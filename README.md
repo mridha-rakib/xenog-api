@@ -63,3 +63,29 @@ feature.validation.ts
 ```
 
 Controller handles HTTP, service handles business logic, repository handles database queries.
+
+## Validation Error Format
+
+Zod validation errors return a consistent field-wise shape:
+
+```json
+{
+  "success": false,
+  "statusCode": 400,
+  "message": "Validation failed",
+  "details": {
+    "issues": [
+      {
+        "path": "body.email",
+        "field": "email",
+        "location": "body",
+        "message": "Invalid email",
+        "code": "invalid_string"
+      }
+    ],
+    "fields": {
+      "body.email": ["Invalid email"]
+    }
+  }
+}
+```

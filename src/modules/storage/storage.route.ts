@@ -1,4 +1,4 @@
-import { Router } from "express";
+import express, { Router } from "express";
 import { catchAsync } from "../../core/http/catch-async.js";
 import { validate } from "../../core/middlewares/validate.middleware.js";
 import { StorageController } from "./storage.controller.js";
@@ -16,6 +16,22 @@ router.get(
   "/download-url/:key",
   validate(storageValidation.createDownloadUrl),
   catchAsync(controller.createDownloadUrl),
+);
+router.put(
+  "/upload",
+  validate(storageValidation.storageKeyQuery),
+  express.raw({ type: "*/*", limit: "300mb" }),
+  catchAsync(controller.uploadFile),
+);
+router.get(
+  "/file",
+  validate(storageValidation.storageKeyQuery),
+  catchAsync(controller.streamFile),
+);
+router.get(
+  "/file/:filename",
+  validate(storageValidation.storageKeyQuery),
+  catchAsync(controller.streamFile),
 );
 
 export const storageRoutes = router;

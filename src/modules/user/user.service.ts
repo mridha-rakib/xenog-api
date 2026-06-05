@@ -1,11 +1,22 @@
 import httpStatus from "http-status";
+import bcrypt from "bcryptjs";
 import { AppError } from "../../core/errors/app-error.js";
 import {
   createPaginationMeta,
   getPaginationOptions,
   type PaginatedResult,
 } from "../../core/utils/pagination.js";
-import type { CreateUserDto, IUser, UpdateUserDto } from "./user.interface.js";
+import type { AuthUser } from "../auth/auth.interface.js";
+import { StorageService } from "../storage/storage.service.js";
+import type {
+  CreateUserDto,
+  FollowStatusResponse,
+  FriendUserResponse,
+  IUser,
+  SuggestedUserResponse,
+  UpdateUserDto,
+} from "./user.interface.js";
+import { UserFollowRepository } from "./user-follow.repository.js";
 import { UserRepository } from "./user.repository.js";
 
 interface ListUsersQuery {
@@ -17,7 +28,11 @@ interface ListUsersQuery {
 }
 
 export class UserService {
-  public constructor(private readonly userRepository = new UserRepository()) {}
+  public constructor(
+    private readonly userRepository = new UserRepository(),
+    private readonly userFollowRepository = new UserFollowRepository(),
+    private readonly storageService = new StorageService(),
+  ) {}
 
   public async create(payload: CreateUserDto): Promise<IUser> {
     const existingUser = await this.userRepository.findByEmail(payload.email);
@@ -26,7 +41,23 @@ export class UserService {
       throw new AppError("Email already exists", httpStatus.CONFLICT);
     }
 
-    return this.userRepository.create(payload);
+    if (payload.username) {
+      const existingUsername = await this.userRepository.findByUsername(payload.username);
+
+      if (existingUsername) {
+        throw new AppError("Username already exists", httpStatus.CONFLICT);
+      }
+    }
+
+    const { password, ...userPayload } = payload;
+    const passwordHash = password ? await bcrypt.hash(password, 12) : undefined;
+
+    return this.userRepository.create({
+      ...userPayload,
+      ...(userPayload.username ? { username: userPayload.username.toLowerCase() } : {}),
+      ...(passwordHash ? { passwordHash } : {}),
+      emailVerified: true,
+    });
   }
 
   public async list(query: ListUsersQuery): Promise<PaginatedResult<IUser>> {
@@ -37,6 +68,7 @@ export class UserService {
       filter.$or = [
         { name: { $regex: query.search, $options: "i" } },
         { email: { $regex: query.search, $options: "i" } },
+        { username: { $regex: query.search, $options: "i" } },
       ];
     }
 
@@ -69,8 +101,77 @@ export class UserService {
     return user;
   }
 
+  public async listSuggestedUsers(user: AuthUser, limit = 10): Promise<SuggestedUserResponse[]> {
+    const followingIds = await this.userFollowRepository.findFollowingIds(user.id);
+    const users = await this.userRepository.findSuggestedUsers([user.id, ...followingIds], limit);
+
+    return Promise.all(users.map((suggestedUser) => this.toSuggestedUserResponse(suggestedUser, false)));
+  }
+
+  public async listFriends(user: AuthUser, query: { search?: string; limit?: number }): Promise<FriendUserResponse[]> {
+    const friendIds = await this.userFollowRepository.findMutualFriendIds(user.id);
+    const users = await this.userRepository.findFriendsByIds(friendIds, query.search, query.limit ?? 50);
+
+    return Promise.all(users.map((friend) => this.toFriendUserResponse(friend)));
+  }
+
+  public async followUser(user: AuthUser, targetUserId: string): Promise<FollowStatusResponse> {
+    if (user.id === targetUserId) {
+      throw new AppError("You cannot follow yourself", httpStatus.BAD_REQUEST);
+    }
+
+    await this.assertFollowTarget(targetUserId);
+    await this.userFollowRepository.follow(user.id, targetUserId);
+
+    return {
+      userId: targetUserId,
+      isFollowing: true,
+    };
+  }
+
+  public async unfollowUser(user: AuthUser, targetUserId: string): Promise<FollowStatusResponse> {
+    if (user.id === targetUserId) {
+      throw new AppError("You cannot unfollow yourself", httpStatus.BAD_REQUEST);
+    }
+
+    await this.assertFollowTarget(targetUserId);
+    await this.userFollowRepository.unfollow(user.id, targetUserId);
+
+    return {
+      userId: targetUserId,
+      isFollowing: false,
+    };
+  }
+
   public async update(id: string, payload: UpdateUserDto): Promise<IUser> {
-    const user = await this.userRepository.updateById(id, payload);
+    if (payload.email) {
+      const existingEmail = await this.userRepository.findByEmailExcludingId(payload.email, id);
+
+      if (existingEmail) {
+        throw new AppError("Email already exists", httpStatus.CONFLICT);
+      }
+    }
+
+    if (payload.username) {
+      const existingUsername = await this.userRepository.findByUsernameExcludingId(payload.username, id);
+
+      if (existingUsername) {
+        throw new AppError("Username already exists", httpStatus.CONFLICT);
+      }
+    }
+
+    const updatePayload: UpdateUserDto = { ...payload };
+
+    if (payload.currentLocationSharingEnabled === false) {
+      updatePayload.currentLocation = null;
+    } else if (payload.currentLocation) {
+      updatePayload.currentLocation = {
+        ...payload.currentLocation,
+        updatedAt: new Date(),
+      };
+    }
+
+    const user = await this.userRepository.updateById(id, updatePayload);
 
     if (!user) {
       throw new AppError("User not found", httpStatus.NOT_FOUND);
@@ -87,5 +188,40 @@ export class UserService {
     }
 
     return user;
+  }
+
+  private async assertFollowTarget(targetUserId: string): Promise<IUser> {
+    const targetUser = await this.userRepository.findById(targetUserId);
+
+    if (!targetUser || !targetUser.isActive || targetUser.role !== "user") {
+      throw new AppError("User not found", httpStatus.NOT_FOUND);
+    }
+
+    return targetUser;
+  }
+
+  private async toSuggestedUserResponse(user: IUser, isFollowing: boolean): Promise<SuggestedUserResponse> {
+    const avatarUrl = user.avatarKey ? (await this.storageService.createDownloadUrl(user.avatarKey)).url : null;
+
+    return {
+      id: user._id.toString(),
+      name: user.name,
+      username: user.username,
+      avatarKey: user.avatarKey ?? null,
+      avatarUrl,
+      isFollowing,
+    };
+  }
+
+  private async toFriendUserResponse(user: IUser): Promise<FriendUserResponse> {
+    const avatarUrl = user.avatarKey ? (await this.storageService.createDownloadUrl(user.avatarKey)).url : null;
+
+    return {
+      id: user._id.toString(),
+      name: user.name,
+      username: user.username,
+      avatarKey: user.avatarKey ?? null,
+      avatarUrl,
+    };
   }
 }

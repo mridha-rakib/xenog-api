@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import httpStatus from "http-status";
 import { ApiResponse } from "../../core/http/api-response.js";
+import type { AuthUser } from "../auth/auth.interface.js";
 import { UserService } from "./user.service.js";
 
 export class UserController {
@@ -33,6 +34,55 @@ export class UserController {
     ApiResponse.success(res, {
       message: "User retrieved",
       data: user,
+    });
+  };
+
+  public listSuggestions = async (req: Request, res: Response): Promise<void> => {
+    const { limit } = req.query as { limit?: number };
+    const users = await this.userService.listSuggestedUsers(req.authUser as AuthUser, limit);
+
+    ApiResponse.success(res, {
+      message: "Suggested users retrieved",
+      data: {
+        users,
+      },
+    });
+  };
+
+  public listFriends = async (req: Request, res: Response): Promise<void> => {
+    const query = req.query as { search?: string; limit?: number };
+    const friends = await this.userService.listFriends(req.authUser as AuthUser, query);
+
+    ApiResponse.success(res, {
+      message: "Friends retrieved",
+      data: {
+        friends,
+      },
+    });
+  };
+
+  public follow = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const follow = await this.userService.followUser(req.authUser as AuthUser, id);
+
+    ApiResponse.success(res, {
+      statusCode: httpStatus.CREATED,
+      message: "User followed",
+      data: {
+        follow,
+      },
+    });
+  };
+
+  public unfollow = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const follow = await this.userService.unfollowUser(req.authUser as AuthUser, id);
+
+    ApiResponse.success(res, {
+      message: "User unfollowed",
+      data: {
+        follow,
+      },
     });
   };
 

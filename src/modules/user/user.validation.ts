@@ -1,12 +1,39 @@
 import { z } from "zod";
 
 const objectId = z.string().regex(/^[a-f\d]{24}$/i, "Invalid MongoDB ObjectId");
+const nullableString = (max: number) => z.string().trim().max(max).nullable().optional();
+const currentLocation = z
+  .object({
+    latitude: z.number().min(-90).max(90),
+    longitude: z.number().min(-180).max(180),
+    accuracy: z.number().min(0).nullable().optional(),
+  })
+  .nullable()
+  .optional();
 
 export const userValidation = {
   create: z.object({
     body: z.object({
       name: z.string().min(2).max(120),
+      username: z
+        .string()
+        .trim()
+        .min(3)
+        .max(40)
+        .regex(/^[a-zA-Z0-9_]+$/, "Username can only contain letters, numbers, and underscores")
+        .optional(),
       email: z.string().email(),
+      contact: nullableString(40),
+      password: z.string().min(8).max(128).optional(),
+      accountType: z.enum(["personal", "business"]).optional(),
+      avatarKey: nullableString(300),
+      gender: nullableString(40),
+      age: z.number().int().min(0).max(130).nullable().optional(),
+      bio: nullableString(500),
+      address: nullableString(240),
+      businessDocumentKey: nullableString(300),
+      currentLocationSharingEnabled: z.boolean().optional(),
+      currentLocation,
       role: z.enum(["user", "admin"]).optional(),
     }),
   }),
@@ -22,7 +49,23 @@ export const userValidation = {
         .optional(),
     }),
   }),
+  suggestions: z.object({
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(50).optional(),
+    }),
+  }),
+  friends: z.object({
+    query: z.object({
+      search: z.string().trim().max(120).optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+    }),
+  }),
   getById: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+  }),
+  follow: z.object({
     params: z.object({
       id: objectId,
     }),
@@ -34,8 +77,27 @@ export const userValidation = {
     body: z
       .object({
         name: z.string().min(2).max(120).optional(),
+        email: z.string().email().optional(),
+        contact: nullableString(40),
+        username: z
+          .string()
+          .trim()
+          .min(3)
+          .max(40)
+          .regex(/^[a-zA-Z0-9_]+$/, "Username can only contain letters, numbers, and underscores")
+          .optional(),
+        accountType: z.enum(["personal", "business"]).optional(),
+        avatarKey: nullableString(300),
+        gender: nullableString(40),
+        age: z.number().int().min(0).max(130).nullable().optional(),
+        bio: nullableString(500),
+        address: nullableString(240),
+        businessDocumentKey: nullableString(300),
+        currentLocationSharingEnabled: z.boolean().optional(),
+        currentLocation,
         role: z.enum(["user", "admin"]).optional(),
         isActive: z.boolean().optional(),
+        emailVerified: z.boolean().optional(),
       })
       .strict()
       .refine((value) => Object.keys(value).length > 0, "At least one field is required"),

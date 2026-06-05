@@ -1,38 +1,58 @@
 services:
   mongodb:
     image: mongo:7
-    container_name: spark-tech-mongodb
+    container_name: xenog-mongodb
     restart: unless-stopped
     ports:
       - "27017:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: root
       MONGO_INITDB_ROOT_PASSWORD: rootpassword
-      MONGO_INITDB_DATABASE: spark-tech
+      MONGO_INITDB_DATABASE: xenogDB
     volumes:
       - mongodb_data:/data/db
 
   redis:
     image: redis:7-alpine
-    container_name: spark-tech-redis
+    container_name: xenog-redis
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+        else
+          redis-server --appendonly yes
+        fi
     ports:
       - "6380:6379"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "if [ -n \"$${REDIS_PASSWORD}\" ]; then redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep PONG; else redis-cli ping | grep PONG; fi",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
     volumes:
       - redis_data:/data
 
   minio:
     image: minio/minio:latest
-    container_name: spark-tech-minio
+    container_name: xenog-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     ports:
       - "9000:9000"
       - "9001:9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
     volumes:
       - minio_data:/data
 

@@ -13,4 +13,10 @@ export const storageValidation = {
       key: z.string().min(1).max(300),
     }),
   }),
+  storageKeyQuery: z.object({
+    query: z.object({
+      key: z.string().min(1).max(300),
+      contentType: z.string().min(1).max(100).optional(),
+    }),
+  }),
 };

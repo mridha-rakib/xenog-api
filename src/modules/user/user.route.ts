@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { catchAsync } from "../../core/http/catch-async.js";
+import { authenticate } from "../../core/middlewares/auth.middleware.js";
 import { validate } from "../../core/middlewares/validate.middleware.js";
 import { UserController } from "./user.controller.js";
 import { userValidation } from "./user.validation.js";
@@ -9,6 +10,30 @@ const controller = new UserController();
 
 router.post("/", validate(userValidation.create), catchAsync(controller.create));
 router.get("/", validate(userValidation.list), catchAsync(controller.list));
+router.get(
+  "/suggestions",
+  authenticate,
+  validate(userValidation.suggestions),
+  catchAsync(controller.listSuggestions),
+);
+router.get(
+  "/friends",
+  authenticate,
+  validate(userValidation.friends),
+  catchAsync(controller.listFriends),
+);
+router.post(
+  "/:id/follow",
+  authenticate,
+  validate(userValidation.follow),
+  catchAsync(controller.follow),
+);
+router.delete(
+  "/:id/follow",
+  authenticate,
+  validate(userValidation.follow),
+  catchAsync(controller.unfollow),
+);
 router.get("/:id", validate(userValidation.getById), catchAsync(controller.getById));
 router.patch("/:id", validate(userValidation.update), catchAsync(controller.update));
 router.delete("/:id", validate(userValidation.delete), catchAsync(controller.delete));

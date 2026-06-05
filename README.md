@@ -41,6 +41,92 @@ Default MinIO login:
 minioadmin / minioadmin
 ```
 
+## Docker Compose Services
+
+Make sure Docker Desktop is running, then open a terminal in this folder:
+
+```bash
+cd xenog-api
+```
+
+Start all local infrastructure services:
+
+```bash
+docker compose up -d
+```
+
+Start only Redis and MinIO:
+
+```bash
+docker compose up -d redis minio
+```
+
+Check running containers:
+
+```bash
+docker compose ps
+```
+
+View logs:
+
+```bash
+docker compose logs -f
+```
+
+Stop all services:
+
+```bash
+docker compose down
+```
+
+Service URLs and ports:
+
+```text
+MongoDB: localhost:27017
+Redis: localhost:6380
+MinIO API: http://localhost:9000
+MinIO Console: http://localhost:9001
+```
+
+Default MinIO login:
+
+```text
+Username: minioadmin
+Password: minioadmin
+```
+
+If `.env` contains `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, or `REDIS_PASSWORD`, those values will be used instead of the defaults.
+
+## Admin Seed
+
+The backend automatically seeds an admin user when the server starts. Set these values in `.env`:
+
+```text
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=replace-with-strong-password
+ADMIN_DISPLAY_NAME=Xenog Admin
+```
+
+Then start the API:
+
+```bash
+npm run dev
+```
+
+You can also seed only the admin account without starting the API:
+
+```bash
+npm run seed:admin
+```
+
+If the admin email does not exist, the app creates it. If the email already exists, the app updates that account with the `.env` display name and password, then ensures it is active, email verified, and `admin`.
+
+Admin login endpoint:
+
+```text
+POST /api/v1/auth/admin/login
+```
+
 ## Architecture
 
 ```text

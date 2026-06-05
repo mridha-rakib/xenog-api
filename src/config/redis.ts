@@ -30,6 +30,14 @@ export class RedisClient {
     return this.client;
   }
 
+  public static async waitUntilReady(): Promise<Redis> {
+    const client = this.connect();
+    await client.ping();
+    logger.info({ service: "redis" }, "Redis ready");
+
+    return client;
+  }
+
   public static getClient(): Redis {
     if (!this.client) {
       return this.connect();

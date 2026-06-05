@@ -11,19 +11,21 @@ import { appRoutes } from "./routes/index.js";
 
 export const createApp = () => {
   const app = express();
+  const corsOrigin = env.CORS_ORIGIN ?? env.APP_ORIGIN;
+  const bodyLimit = `${env.REQUEST_BODY_LIMIT_MB}mb`;
 
   app.set("trust proxy", 1);
 
   app.use(helmet());
   app.use(
     cors({
-      origin: env.APP_ORIGIN === "*" ? true : env.APP_ORIGIN.split(",").map((origin) => origin.trim()),
+      origin: corsOrigin === "*" ? true : corsOrigin.split(",").map((origin) => origin.trim()),
       credentials: true,
     }),
   );
   app.use(compression());
-  app.use(express.json({ limit: "2mb" }));
-  app.use(express.urlencoded({ extended: true, limit: "2mb" }));
+  app.use(express.json({ limit: bodyLimit }));
+  app.use(express.urlencoded({ extended: true, limit: bodyLimit }));
   app.use(requestLogger);
   app.use(
     rateLimit({

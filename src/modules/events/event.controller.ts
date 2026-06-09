@@ -2,7 +2,13 @@ import type { Request, Response } from "express";
 import httpStatus from "http-status";
 import { ApiResponse } from "../../core/http/api-response.js";
 import type { AuthUser } from "../auth/auth.interface.js";
-import type { EventMapQuery, PublishEventDto, SaveEventDraftDto } from "./event.interface.js";
+import type {
+  CreateEventTicketDto,
+  EventMapQuery,
+  PublishEventDto,
+  SaveEventDraftDto,
+  UpdateEventTicketDto,
+} from "./event.interface.js";
 import { EventService } from "./event.service.js";
 
 export class EventController {
@@ -62,11 +68,69 @@ export class EventController {
     });
   };
 
+  public createDraftTicket = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.createDraftTicket(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.body as CreateEventTicketDto,
+    );
+
+    ApiResponse.success(res, {
+      statusCode: httpStatus.CREATED,
+      message: "Event draft ticket created",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public updateDraftTicket = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.updateDraftTicket(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.ticketId as string,
+      req.body as UpdateEventTicketDto,
+    );
+
+    ApiResponse.success(res, {
+      message: "Event draft ticket updated",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public deleteDraftTicket = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.deleteDraftTicket(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.ticketId as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Event draft ticket deleted",
+      data: {
+        event,
+      },
+    });
+  };
+
   public listMyEvents = async (req: Request, res: Response): Promise<void> => {
     const events = await this.eventService.listMyEvents(req.authUser as AuthUser);
 
     ApiResponse.success(res, {
       message: "Events retrieved",
+      data: {
+        events,
+      },
+    });
+  };
+
+  public listMyProfileEvents = async (req: Request, res: Response): Promise<void> => {
+    const events = await this.eventService.listMyProfileEvents(req.authUser as AuthUser);
+
+    ApiResponse.success(res, {
+      message: "Profile events retrieved",
       data: {
         events,
       },

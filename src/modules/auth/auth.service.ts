@@ -57,6 +57,7 @@ const toAuthUser = (user: IUser): AuthUser => ({
         updatedAt: user.currentLocation.updatedAt,
       }
     : null,
+  notificationsEnabled: user.notificationsEnabled ?? true,
   role: user.role,
   isActive: user.isActive,
   emailVerified: user.emailVerified ?? true,
@@ -124,16 +125,16 @@ export class AuthService {
   }
 
   public async login(payload: LoginDto, requiredRole?: AuthUser["role"]): Promise<AuthSession> {
-    const user = await this.userRepository.findByEmailWithPassword(payload.email);
+    const user = await this.userRepository.findByEmailOrUsernameWithPassword(payload.email);
 
     if (!user?.passwordHash) {
-      throw new AppError("Invalid email or password", httpStatus.UNAUTHORIZED);
+      throw new AppError("Invalid email/username or password", httpStatus.UNAUTHORIZED);
     }
 
     const passwordMatches = await bcrypt.compare(payload.password, user.passwordHash);
 
     if (!passwordMatches) {
-      throw new AppError("Invalid email or password", httpStatus.UNAUTHORIZED);
+      throw new AppError("Invalid email/username or password", httpStatus.UNAUTHORIZED);
     }
 
     if (!user.isActive) {

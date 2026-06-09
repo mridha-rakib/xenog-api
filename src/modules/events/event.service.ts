@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import httpStatus from "http-status";
 import { AppError } from "../../core/errors/app-error.js";
 import type { AuthUser } from "../auth/auth.interface.js";
@@ -7,11 +8,15 @@ import { EventRepository } from "./event.repository.js";
 import type {
   EventHostResponse,
   EventMapQuery,
+  ProfileEventGroupsResponse,
+  CreateEventTicketDto,
   EventResponse,
   EventTicket,
+  EventTicketInput,
   IEvent,
   PublishEventDto,
   SaveEventDraftDto,
+  UpdateEventTicketDto,
 } from "./event.interface.js";
 
 const ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
@@ -67,10 +72,91 @@ export class EventService {
     return this.toResponse(event);
   }
 
+  public async createDraftTicket(user: AuthUser, eventId: string, payload: CreateEventTicketDto): Promise<EventResponse> {
+    const event = await this.getDraftForUser(user, eventId);
+    const ticket = this.normalizeTicket(payload);
+    const updatedEvent = await this.eventRepository.updateDraftByIdForUser(eventId, user.id, {
+      tickets: [...event.tickets.map((item) => this.normalizeTicket(item)), ticket],
+    });
+
+    if (!updatedEvent) {
+      throw new AppError("Event draft not found.", httpStatus.NOT_FOUND);
+    }
+
+    return this.toResponse(updatedEvent);
+  }
+
+  public async updateDraftTicket(
+    user: AuthUser,
+    eventId: string,
+    ticketId: string,
+    payload: UpdateEventTicketDto,
+  ): Promise<EventResponse> {
+    const event = await this.getDraftForUser(user, eventId);
+    let foundTicket = false;
+    const tickets = event.tickets.map((ticket) => {
+      const normalizedTicket = this.normalizeTicket(ticket);
+
+      if (normalizedTicket.id !== ticketId) {
+        return normalizedTicket;
+      }
+
+      foundTicket = true;
+
+      return this.normalizeTicket({
+        ...normalizedTicket,
+        ...payload,
+        id: normalizedTicket.id,
+        type: payload.type ?? normalizedTicket.type,
+      });
+    });
+
+    if (!foundTicket) {
+      throw new AppError("Event draft ticket not found.", httpStatus.NOT_FOUND);
+    }
+
+    const updatedEvent = await this.eventRepository.updateDraftByIdForUser(eventId, user.id, { tickets });
+
+    if (!updatedEvent) {
+      throw new AppError("Event draft not found.", httpStatus.NOT_FOUND);
+    }
+
+    return this.toResponse(updatedEvent);
+  }
+
+  public async deleteDraftTicket(user: AuthUser, eventId: string, ticketId: string): Promise<EventResponse> {
+    const event = await this.getDraftForUser(user, eventId);
+    const tickets = event.tickets.map((ticket) => this.normalizeTicket(ticket));
+    const nextTickets = tickets.filter((ticket) => ticket.id !== ticketId);
+
+    if (nextTickets.length === tickets.length) {
+      throw new AppError("Event draft ticket not found.", httpStatus.NOT_FOUND);
+    }
+
+    const updatedEvent = await this.eventRepository.updateDraftByIdForUser(eventId, user.id, { tickets: nextTickets });
+
+    if (!updatedEvent) {
+      throw new AppError("Event draft not found.", httpStatus.NOT_FOUND);
+    }
+
+    return this.toResponse(updatedEvent);
+  }
+
   public async listMyEvents(user: AuthUser): Promise<EventResponse[]> {
     const events = await this.eventRepository.findByUserId(user.id);
 
     return events.map((event) => this.toResponse(event));
+  }
+
+  public async listMyProfileEvents(user: AuthUser): Promise<ProfileEventGroupsResponse> {
+    const activeSince = new Date(Date.now() - ACTIVE_EVENT_WINDOW_MS);
+    const events = await this.eventRepository.findPublishedProfileEventsByUserId(user.id, activeSince);
+    const host = await this.userRepository.findById(user.id);
+
+    return {
+      active: events.active.map((event) => this.toResponse(event, host)),
+      past: events.past.map((event) => this.toResponse(event, host)),
+    };
   }
 
   public async listMapEvents(query: EventMapQuery): Promise<EventResponse[]> {
@@ -92,6 +178,8 @@ export class EventService {
       name: payload.name?.trim() || null,
       description: payload.description?.trim() || null,
       bannerImageKey: payload.bannerImageKey?.trim() || null,
+      bannerOriginalImageKey: payload.bannerOriginalImageKey?.trim() || null,
+      bannerImageDisplay: payload.bannerImageDisplay ?? null,
       category: payload.category ?? null,
       location: payload.location
         ? {
@@ -123,8 +211,9 @@ export class EventService {
     };
   }
 
-  private normalizeTicket(ticket: EventTicket): EventTicket {
+  private normalizeTicket(ticket: EventTicketInput): EventTicket {
     return {
+      id: ticket.id?.trim() || randomUUID(),
       name: ticket.name.trim(),
       description: ticket.description?.trim() || null,
       salesEndAt: ticket.salesEndAt ?? null,
@@ -132,6 +221,16 @@ export class EventService {
       price: ticket.type === "free" ? 0 : ticket.price,
       capacity: ticket.capacity,
     };
+  }
+
+  private async getDraftForUser(user: AuthUser, eventId: string): Promise<IEvent> {
+    const event = await this.eventRepository.findByIdForUser(eventId, user.id);
+
+    if (!event || event.status !== "draft") {
+      throw new AppError("Event draft not found.", httpStatus.NOT_FOUND);
+    }
+
+    return event;
   }
 
   private async getHostById(events: IEvent[]): Promise<Map<string, IUser>> {
@@ -168,6 +267,8 @@ export class EventService {
       name: event.name ?? null,
       description: event.description ?? null,
       bannerImageKey: event.bannerImageKey ?? null,
+      bannerOriginalImageKey: event.bannerOriginalImageKey ?? null,
+      bannerImageDisplay: event.bannerImageDisplay ?? null,
       ageRestriction: event.ageRestriction ?? null,
       category: event.category ?? null,
       scheduledAt: event.scheduledAt ?? null,

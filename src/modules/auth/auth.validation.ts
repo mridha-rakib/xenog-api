@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 const loginBody = z.object({
-  email: z.string().email(),
+  email: z.string().trim().min(1, "Email or username is required"),
   password: z.string().min(1, "Password is required"),
 });
 
@@ -63,6 +63,7 @@ const updateProfileBody = z
     businessDocumentKey: nullableString(300),
     currentLocationSharingEnabled: z.boolean().optional(),
     currentLocation,
+    notificationsEnabled: z.boolean().optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, "At least one field is required");

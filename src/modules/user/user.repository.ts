@@ -30,6 +30,14 @@ export class UserRepository {
     return UserModel.findOne({ email: email.toLowerCase() }).select("+passwordHash");
   }
 
+  public async findByEmailOrUsernameWithPassword(identifier: string): Promise<IUser | null> {
+    const normalizedIdentifier = identifier.trim().replace(/^@+/, "").toLowerCase();
+
+    return UserModel.findOne({
+      $or: [{ email: normalizedIdentifier }, { username: normalizedIdentifier }],
+    }).select("+passwordHash");
+  }
+
   public async findByEmailWithVerification(email: string): Promise<IUser | null> {
     return UserModel.findOne({ email: email.toLowerCase() }).select(
       "+emailVerificationCodeHash +emailVerificationExpiresAt",

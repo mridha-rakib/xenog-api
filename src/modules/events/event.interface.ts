@@ -43,12 +43,28 @@ export interface EventLocation {
 }
 
 export interface EventTicket {
+  id: string;
   name: string;
   description?: string | null;
   salesEndAt?: Date | null;
   type: EventTicketType;
   price: number;
   capacity: number;
+}
+
+export type EventTicketInput = Omit<EventTicket, "id"> & {
+  id?: string;
+};
+
+export interface EventImageDisplay {
+  crop?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null;
+  imageWidth?: number | null;
+  imageHeight?: number | null;
 }
 
 export interface EventHostResponse {
@@ -65,6 +81,8 @@ export interface IEvent {
   name?: string | null;
   description?: string | null;
   bannerImageKey?: string | null;
+  bannerOriginalImageKey?: string | null;
+  bannerImageDisplay?: EventImageDisplay | null;
   ageRestriction?: EventAgeRestriction | null;
   category?: EventCategory | null;
   scheduledAt?: Date | null;
@@ -80,13 +98,18 @@ export interface SaveEventDraftDto {
   name?: string | null;
   description?: string | null;
   bannerImageKey?: string | null;
+  bannerOriginalImageKey?: string | null;
+  bannerImageDisplay?: EventImageDisplay | null;
   ageRestriction?: EventAgeRestriction | null;
   category?: EventCategory | null;
   scheduledAt?: Date | null;
   location?: EventLocation | null;
-  tickets?: EventTicket[];
+  tickets?: EventTicketInput[];
   privacy?: EventPrivacy;
 }
+
+export type CreateEventTicketDto = EventTicketInput;
+export type UpdateEventTicketDto = Partial<Omit<EventTicketInput, "id">>;
 
 export interface PublishEventDto extends SaveEventDraftDto {
   name: string;
@@ -95,7 +118,7 @@ export interface PublishEventDto extends SaveEventDraftDto {
   category: EventCategory;
   scheduledAt: Date;
   location: EventLocation;
-  tickets: EventTicket[];
+  tickets: EventTicketInput[];
   privacy: EventPrivacy;
 }
 
@@ -107,6 +130,8 @@ export interface EventResponse {
   name?: string | null;
   description?: string | null;
   bannerImageKey?: string | null;
+  bannerOriginalImageKey?: string | null;
+  bannerImageDisplay?: EventImageDisplay | null;
   ageRestriction?: EventAgeRestriction | null;
   category?: EventCategory | null;
   scheduledAt?: Date | null;
@@ -116,6 +141,11 @@ export interface EventResponse {
   publishedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface ProfileEventGroupsResponse {
+  active: EventResponse[];
+  past: EventResponse[];
 }
 
 export interface EventMapQuery {

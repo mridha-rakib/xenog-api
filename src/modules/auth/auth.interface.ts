@@ -45,6 +45,7 @@ export interface AuthUser {
   businessDocumentKey?: string | null;
   currentLocationSharingEnabled: boolean;
   currentLocation?: AuthUserCurrentLocation | null;
+  notificationsEnabled: boolean;
   role: "user" | "admin";
   isActive: boolean;
   emailVerified: boolean;
@@ -89,4 +90,5 @@ export interface UpdateProfileDto {
   businessDocumentKey?: string | null;
   currentLocationSharingEnabled?: boolean;
   currentLocation?: AuthUserCurrentLocation | null;
+  notificationsEnabled?: boolean;
 }

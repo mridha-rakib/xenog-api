@@ -114,6 +114,10 @@ const userSchema = new Schema<IUser>(
       type: currentLocationSchema,
       default: null,
     },
+    notificationsEnabled: {
+      type: Boolean,
+      default: true,
+    },
     role: {
       type: String,
       enum: ["user", "admin"],

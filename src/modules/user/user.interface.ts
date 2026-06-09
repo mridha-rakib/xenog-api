@@ -17,6 +17,7 @@ export interface IUser {
   businessDocumentKey?: string | null;
   currentLocationSharingEnabled?: boolean;
   currentLocation?: UserCurrentLocation | null;
+  notificationsEnabled?: boolean;
   role: "user" | "admin";
   isActive: boolean;
   emailVerified: boolean;
@@ -56,6 +57,7 @@ export interface CreateUserDto {
   businessDocumentKey?: string | null;
   currentLocationSharingEnabled?: boolean;
   currentLocation?: UserCurrentLocation | null;
+  notificationsEnabled?: boolean;
   role?: "user" | "admin";
 }
 
@@ -73,6 +75,7 @@ export interface UpdateUserDto {
   businessDocumentKey?: string | null;
   currentLocationSharingEnabled?: boolean;
   currentLocation?: UserCurrentLocation | null;
+  notificationsEnabled?: boolean;
   role?: "user" | "admin";
   isActive?: boolean;
   emailVerified?: boolean;

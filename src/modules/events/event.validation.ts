@@ -2,6 +2,7 @@ import { z } from "zod";
 import { eventAgeRestrictions, eventCategories, eventPrivacyOptions, eventTicketTypes } from "./event.interface.js";
 
 const objectId = z.string().trim().regex(/^[a-f\d]{24}$/i, "Invalid MongoDB ObjectId");
+const ticketId = z.string().trim().min(1, "Ticket ID is required").max(80, "Ticket ID cannot exceed 80 characters");
 
 const optionalText = (label: string, maxLength: number) =>
   z
@@ -34,6 +35,31 @@ const eventCategory = z.preprocess(
 
 const optionalEventCategory = eventCategory.optional().nullable().transform((value) => value ?? null);
 
+const normalizedNumber = z.number().min(0).max(1);
+
+const bannerImageDisplay = z
+  .object({
+    crop: z
+      .object({
+        x: normalizedNumber,
+        y: normalizedNumber,
+        width: normalizedNumber.refine((value) => value > 0, "Crop width is required"),
+        height: normalizedNumber.refine((value) => value > 0, "Crop height is required"),
+      })
+      .strict()
+      .refine((value) => value.x + value.width <= 1.001 && value.y + value.height <= 1.001, {
+        message: "Crop area must stay inside the image",
+      })
+      .optional()
+      .nullable(),
+    imageWidth: z.number().int().positive().optional().nullable(),
+    imageHeight: z.number().int().positive().optional().nullable(),
+  })
+  .strict()
+  .optional()
+  .nullable()
+  .transform((value) => value ?? null);
+
 const eventLocation = z
   .object({
     searchLabel: optionalText("Location", 240),
@@ -44,19 +70,40 @@ const eventLocation = z
   })
   .strict();
 
+const eventTicketShape = {
+  id: ticketId.optional(),
+  name: z.string().trim().min(1, "Ticket name is required").max(120),
+  description: optionalText("Ticket description", 1000),
+  salesEndAt: z.coerce.date().optional().nullable().transform((value) => value ?? null),
+  type: z.enum(eventTicketTypes).default("free"),
+  price: z.coerce.number().min(0).max(1_000_000).default(0),
+  capacity: z.coerce.number().int().min(0).max(1_000_000),
+};
+
 const eventTicket = z
-  .object({
-    name: z.string().trim().min(1, "Ticket name is required").max(120),
-    description: optionalText("Ticket description", 1000),
-    salesEndAt: z.coerce.date().optional().nullable().transform((value) => value ?? null),
-    type: z.enum(eventTicketTypes).default("free"),
-    price: z.coerce.number().min(0).max(1_000_000).default(0),
-    capacity: z.coerce.number().int().min(0).max(1_000_000),
-  })
+  .object(eventTicketShape)
   .strict()
   .transform((ticket) => ({
     ...ticket,
     price: ticket.type === "free" ? 0 : ticket.price,
+  }));
+
+const updateEventTicket = z
+  .object({
+    name: eventTicketShape.name.optional(),
+    description: eventTicketShape.description,
+    salesEndAt: eventTicketShape.salesEndAt,
+    type: z.enum(eventTicketTypes).optional(),
+    price: z.coerce.number().min(0).max(1_000_000).optional(),
+    capacity: eventTicketShape.capacity.optional(),
+  })
+  .strict()
+  .refine((ticket) => Object.values(ticket).some((value) => value !== undefined), {
+    message: "At least one ticket field is required",
+  })
+  .transform((ticket) => ({
+    ...ticket,
+    ...(ticket.type === "free" ? { price: 0 } : {}),
   }));
 
 const draftBody = z
@@ -64,6 +111,8 @@ const draftBody = z
     name: optionalText("Event name", 160),
     description: optionalText("Description", 5000),
     bannerImageKey: optionalText("Banner image", 300),
+    bannerOriginalImageKey: optionalText("Original banner image", 300),
+    bannerImageDisplay,
     ageRestriction: z.enum(eventAgeRestrictions).optional().nullable(),
     category: optionalEventCategory,
     scheduledAt: z.coerce.date().optional().nullable().transform((value) => value ?? null),
@@ -121,6 +170,25 @@ export const eventValidation = {
       id: objectId,
     }),
     body: publishBody,
+  }),
+  createDraftTicket: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+    body: eventTicket,
+  }),
+  updateDraftTicket: z.object({
+    params: z.object({
+      id: objectId,
+      ticketId,
+    }),
+    body: updateEventTicket,
+  }),
+  deleteDraftTicket: z.object({
+    params: z.object({
+      id: objectId,
+      ticketId,
+    }),
   }),
   mapEvents: z.object({
     query: mapQuery,

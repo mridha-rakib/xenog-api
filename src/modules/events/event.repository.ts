@@ -16,6 +16,8 @@ export class EventRepository {
       name: payload.name ?? null,
       description: payload.description ?? null,
       bannerImageKey: payload.bannerImageKey ?? null,
+      bannerOriginalImageKey: payload.bannerOriginalImageKey ?? null,
+      bannerImageDisplay: payload.bannerImageDisplay ?? null,
       ageRestriction: payload.ageRestriction ?? null,
       category: payload.category ?? null,
       scheduledAt: payload.scheduledAt ?? null,
@@ -32,6 +34,29 @@ export class EventRepository {
 
   public async findByUserId(userId: string): Promise<IEvent[]> {
     return EventModel.find({ userId }).sort({ createdAt: -1, _id: -1 });
+  }
+
+  public async findPublishedProfileEventsByUserId(
+    userId: string,
+    activeSince: Date,
+  ): Promise<{ active: IEvent[]; past: IEvent[] }> {
+    const baseQuery: FilterQuery<IEvent> = {
+      userId,
+      status: "published",
+    };
+
+    const [active, past] = await Promise.all([
+      EventModel.find({
+        ...baseQuery,
+        scheduledAt: { $gte: activeSince },
+      }).sort({ scheduledAt: 1, publishedAt: -1, _id: -1 }),
+      EventModel.find({
+        ...baseQuery,
+        scheduledAt: { $lt: activeSince },
+      }).sort({ scheduledAt: -1, publishedAt: -1, _id: -1 }),
+    ]);
+
+    return { active, past };
   }
 
   public async findMapEvents(query: EventMapQuery & { activeSince: Date }): Promise<IEvent[]> {
@@ -92,6 +117,8 @@ export class EventRepository {
     if (payload.name !== undefined) update.name = payload.name;
     if (payload.description !== undefined) update.description = payload.description;
     if (payload.bannerImageKey !== undefined) update.bannerImageKey = payload.bannerImageKey;
+    if (payload.bannerOriginalImageKey !== undefined) update.bannerOriginalImageKey = payload.bannerOriginalImageKey;
+    if (payload.bannerImageDisplay !== undefined) update.bannerImageDisplay = payload.bannerImageDisplay;
     if (payload.ageRestriction !== undefined) update.ageRestriction = payload.ageRestriction;
     if (payload.category !== undefined) update.category = payload.category;
     if (payload.scheduledAt !== undefined) update.scheduledAt = payload.scheduledAt;

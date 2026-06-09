@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Schema, model } from "mongoose";
 import type { EventLocation, EventTicket, IEvent } from "./event.interface.js";
 import {
@@ -46,6 +47,13 @@ const eventLocationSchema = new Schema<EventLocation>(
 
 const eventTicketSchema = new Schema<EventTicket>(
   {
+    id: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 80,
+      default: randomUUID,
+    },
     name: {
       type: String,
       required: true,
@@ -84,6 +92,48 @@ const eventTicketSchema = new Schema<EventTicket>(
   { _id: false },
 );
 
+const eventImageDisplaySchema = new Schema(
+  {
+    crop: {
+      x: {
+        type: Number,
+        min: 0,
+        max: 1,
+        default: 0,
+      },
+      y: {
+        type: Number,
+        min: 0,
+        max: 1,
+        default: 0,
+      },
+      width: {
+        type: Number,
+        min: 0,
+        max: 1,
+        default: 1,
+      },
+      height: {
+        type: Number,
+        min: 0,
+        max: 1,
+        default: 1,
+      },
+    },
+    imageWidth: {
+      type: Number,
+      min: 1,
+      default: null,
+    },
+    imageHeight: {
+      type: Number,
+      min: 1,
+      default: null,
+    },
+  },
+  { _id: false },
+);
+
 const eventSchema = new Schema<IEvent>(
   {
     userId: {
@@ -115,6 +165,16 @@ const eventSchema = new Schema<IEvent>(
       type: String,
       trim: true,
       maxlength: 300,
+      default: null,
+    },
+    bannerOriginalImageKey: {
+      type: String,
+      trim: true,
+      maxlength: 300,
+      default: null,
+    },
+    bannerImageDisplay: {
+      type: eventImageDisplaySchema,
       default: null,
     },
     ageRestriction: {

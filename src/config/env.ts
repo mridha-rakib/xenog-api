@@ -7,6 +7,7 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(5000),
   API_PREFIX: z.string().default("/api/v1"),
+  PUBLIC_API_PREFIX: z.string().optional(),
 
   APP_NAME: z.string().default("Spark Tech API"),
   APP_ORIGIN: z.string().default("http://localhost:3000"),

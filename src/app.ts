@@ -36,13 +36,21 @@ export const createApp = () => {
     }),
   );
 
+  const statusResponse = {
+    success: true,
+    message: `${env.APP_NAME} is running`,
+    docs: `${env.PUBLIC_API_PREFIX ?? env.API_PREFIX}/health`,
+  };
+
+  app.get(env.API_PREFIX, (_req, res) => {
+    res.json(statusResponse);
+  });
+
   app.use(env.API_PREFIX, appRoutes);
 
   app.get("/", (_req, res) => {
     res.json({
-      success: true,
-      message: `${env.APP_NAME} is running`,
-      docs: `${env.API_PREFIX}/health`,
+      ...statusResponse,
     });
   });
 

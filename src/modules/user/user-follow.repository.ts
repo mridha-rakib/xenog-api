@@ -35,4 +35,8 @@ export class UserFollowRepository {
 
     return followingIds.map((id) => id.toString()).filter((id) => followerIdSet.has(id));
   }
+
+  public async countFollowers(userId: string): Promise<number> {
+    return UserFollowModel.countDocuments({ followingId: userId });
+  }
 }

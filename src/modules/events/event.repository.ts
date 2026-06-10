@@ -32,6 +32,10 @@ export class EventRepository {
     return EventModel.findOne({ _id: id, userId });
   }
 
+  public async findById(id: string): Promise<IEvent | null> {
+    return EventModel.findById(id);
+  }
+
   public async findByUserId(userId: string): Promise<IEvent[]> {
     return EventModel.find({ userId }).sort({ createdAt: -1, _id: -1 });
   }
@@ -87,6 +91,16 @@ export class EventRepository {
     return EventModel.find(eventQuery)
       .sort({ scheduledAt: 1, publishedAt: -1, _id: -1 })
       .limit(query.limit ?? 100);
+  }
+
+  public async countByUserId(userId: string, status?: "draft" | "published"): Promise<number> {
+    const filter: FilterQuery<IEvent> = { userId };
+
+    if (status) {
+      filter.status = status;
+    }
+
+    return EventModel.countDocuments(filter);
   }
 
   public async updateDraftByIdForUser(id: string, userId: string, payload: SaveEventDraftDto): Promise<IEvent | null> {

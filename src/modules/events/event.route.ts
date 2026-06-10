@@ -28,5 +28,6 @@ router.post("/:id/publish", validate(eventValidation.publishDraft), catchAsync(c
 router.get("/mine/profile", catchAsync(controller.listMyProfileEvents));
 router.get("/mine", catchAsync(controller.listMyEvents));
 router.get("/map", validate(eventValidation.mapEvents), catchAsync(controller.listMapEvents));
+router.get("/:id", validate(eventValidation.eventParams), catchAsync(controller.getEventById));
 
 export const eventRoutes = router;

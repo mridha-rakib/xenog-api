@@ -147,4 +147,15 @@ export class EventController {
       },
     });
   };
+
+  public getEventById = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.getEventById(req.authUser as AuthUser, req.params.id as string);
+
+    ApiResponse.success(res, {
+      message: "Event retrieved",
+      data: {
+        event,
+      },
+    });
+  };
 }

@@ -72,6 +72,10 @@ export interface EventHostResponse {
   name: string;
   username?: string;
   avatarKey?: string | null;
+  avatarUrl?: string | null;
+  bio?: string | null;
+  followersCount?: number;
+  eventsCount?: number;
 }
 
 export interface IEvent {

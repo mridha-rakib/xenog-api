@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import httpStatus from "http-status";
 import { AppError } from "../../core/errors/app-error.js";
 import type { AuthUser } from "../auth/auth.interface.js";
+import { StorageService } from "../storage/storage.service.js";
 import { UserRepository } from "../user/user.repository.js";
+import { UserFollowRepository } from "../user/user-follow.repository.js";
 import type { IUser } from "../user/user.interface.js";
 import { EventRepository } from "./event.repository.js";
 import type {
@@ -25,6 +27,8 @@ export class EventService {
   public constructor(
     private readonly eventRepository = new EventRepository(),
     private readonly userRepository = new UserRepository(),
+    private readonly userFollowRepository = new UserFollowRepository(),
+    private readonly storageService = new StorageService(),
   ) {}
 
   public async saveDraft(user: AuthUser, payload: SaveEventDraftDto, eventId?: string): Promise<EventResponse> {
@@ -172,6 +176,33 @@ export class EventService {
     return events.map((event) => this.toResponse(event, hostById.get(event.userId.toString()) ?? null));
   }
 
+  public async getEventById(user: AuthUser, eventId: string): Promise<EventResponse> {
+    const event = await this.eventRepository.findById(eventId);
+
+    if (!event) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    const isOwner = event.userId.toString() === user.id;
+
+    if (event.status === "draft" && !isOwner) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    const host = await this.userRepository.findById(event.userId.toString());
+    const [avatarUrl, followersCount, eventsCount] = await Promise.all([
+      host?.avatarKey ? this.storageService.createDownloadUrl(host.avatarKey).then((download) => download.url) : Promise.resolve(null),
+      host ? this.userFollowRepository.countFollowers(host._id.toString()) : Promise.resolve(0),
+      host ? this.eventRepository.countByUserId(host._id.toString(), "published") : Promise.resolve(0),
+    ]);
+
+    return this.toResponse(event, host, {
+      avatarUrl,
+      followersCount,
+      eventsCount,
+    });
+  }
+
   private normalizeDraftPayload(payload: SaveEventDraftDto): SaveEventDraftDto {
     return {
       ...payload,
@@ -245,7 +276,14 @@ export class EventService {
     return new Map(hosts.map((host) => [host._id.toString(), host]));
   }
 
-  private toHostResponse(host: IUser | null): EventHostResponse | null {
+  private toHostResponse(
+    host: IUser | null,
+    extras?: {
+      avatarUrl?: string | null;
+      followersCount?: number;
+      eventsCount?: number;
+    },
+  ): EventHostResponse | null {
     if (!host) {
       return null;
     }
@@ -255,14 +293,26 @@ export class EventService {
       name: host.name,
       username: host.username,
       avatarKey: host.avatarKey ?? null,
+      avatarUrl: extras?.avatarUrl ?? null,
+      bio: host.bio ?? null,
+      followersCount: extras?.followersCount,
+      eventsCount: extras?.eventsCount,
     };
   }
 
-  private toResponse(event: IEvent, host?: IUser | null): EventResponse {
+  private toResponse(
+    event: IEvent,
+    host?: IUser | null,
+    hostExtras?: {
+      avatarUrl?: string | null;
+      followersCount?: number;
+      eventsCount?: number;
+    },
+  ): EventResponse {
     return {
       id: event._id.toString(),
       userId: event.userId.toString(),
-      ...(host !== undefined ? { host: this.toHostResponse(host) } : {}),
+      ...(host !== undefined ? { host: this.toHostResponse(host, hostExtras) } : {}),
       status: event.status,
       name: event.name ?? null,
       description: event.description ?? null,

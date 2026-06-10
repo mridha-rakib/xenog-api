@@ -22,12 +22,6 @@ const productSchema = new Schema<IProduct>(
       maxlength: 5000,
       default: null,
     },
-    category: {
-      type: String,
-      trim: true,
-      maxlength: 80,
-      default: null,
-    },
     tag: {
       type: String,
       trim: true,

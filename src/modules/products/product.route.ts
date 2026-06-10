@@ -17,5 +17,8 @@ router.post(
 );
 
 router.get("/mine", catchAsync(controller.listMyProducts));
+router.get("/:id", validate(productValidation.productParams), catchAsync(controller.getMyProduct));
+router.patch("/:id", validate(productValidation.updateProduct), catchAsync(controller.updateMyProduct));
+router.delete("/:id", validate(productValidation.productParams), catchAsync(controller.deleteMyProduct));
 
 export const productRoutes = router;

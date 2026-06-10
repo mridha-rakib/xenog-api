@@ -5,7 +5,6 @@ export interface IProduct {
   userId: Types.ObjectId;
   name: string;
   description?: string | null;
-  category?: string | null;
   tag?: string | null;
   priceUsd: number;
   discountPercent: number;
@@ -18,7 +17,6 @@ export interface IProduct {
 export interface CreateProductDto {
   name: string;
   description?: string | null;
-  category?: string | null;
   tag?: string | null;
   priceUsd: number;
   discountPercent?: number;
@@ -31,7 +29,6 @@ export interface ProductResponse {
   userId: string;
   name: string;
   description?: string | null;
-  category?: string | null;
   tag?: string | null;
   priceUsd: number;
   discountPercent: number;

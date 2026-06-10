@@ -29,4 +29,39 @@ export class ProductController {
       },
     });
   };
+
+  public getMyProduct = async (req: Request, res: Response): Promise<void> => {
+    const product = await this.productService.getMyProduct(req.authUser as AuthUser, req.params.id as string);
+
+    ApiResponse.success(res, {
+      message: "Product retrieved",
+      data: {
+        product,
+      },
+    });
+  };
+
+  public updateMyProduct = async (req: Request, res: Response): Promise<void> => {
+    const product = await this.productService.updateMyProduct(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.body,
+    );
+
+    ApiResponse.success(res, {
+      message: "Product updated",
+      data: {
+        product,
+      },
+    });
+  };
+
+  public deleteMyProduct = async (req: Request, res: Response): Promise<void> => {
+    await this.productService.deleteMyProduct(req.authUser as AuthUser, req.params.id as string);
+
+    ApiResponse.success(res, {
+      message: "Product deleted",
+      data: null,
+    });
+  };
 }

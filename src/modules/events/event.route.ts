@@ -48,7 +48,9 @@ router.patch(
   catchAsync(controller.updateEventTicket),
 );
 router.delete("/:id/tickets/:ticketId", validate(eventValidation.eventTicketParams), catchAsync(controller.deleteEventTicket));
+router.get("/:id/rewards/claims", validate(eventValidation.getEventRewardClaims), catchAsync(controller.getMyEventRewardClaims));
 router.post("/:id/rewards", validate(eventValidation.createEventReward), catchAsync(controller.createEventReward));
+router.post("/:id/rewards/:rewardId/claim", validate(eventValidation.claimReward), catchAsync(controller.claimReward));
 router.patch(
   "/:id/rewards/:rewardId",
   validate(eventValidation.updateEventReward),

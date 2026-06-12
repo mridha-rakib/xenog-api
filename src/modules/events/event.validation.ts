@@ -330,4 +330,15 @@ export const eventValidation = {
   mapEvents: z.object({
     query: mapQuery,
   }),
+  claimReward: z.object({
+    params: z.object({
+      id: objectId,
+      rewardId: ticketId,
+    }),
+  }),
+  getEventRewardClaims: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+  }),
 };

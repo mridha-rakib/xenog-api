@@ -299,6 +299,36 @@ export class EventController {
     });
   };
 
+  public claimReward = async (req: Request, res: Response): Promise<void> => {
+    const claim = await this.eventService.claimReward(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.rewardId as string,
+    );
+
+    ApiResponse.success(res, {
+      statusCode: httpStatus.CREATED,
+      message: "Reward claimed",
+      data: {
+        claim,
+      },
+    });
+  };
+
+  public getMyEventRewardClaims = async (req: Request, res: Response): Promise<void> => {
+    const claims = await this.eventService.getMyEventRewardClaims(
+      req.authUser as AuthUser,
+      req.params.id as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Reward claims retrieved",
+      data: {
+        claims,
+      },
+    });
+  };
+
   public listMyEvents = async (req: Request, res: Response): Promise<void> => {
     const events = await this.eventService.listMyEvents(req.authUser as AuthUser);
 

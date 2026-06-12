@@ -8,6 +8,8 @@ import { UserFollowRepository } from "../user/user-follow.repository.js";
 import type { IUser } from "../user/user.interface.js";
 import { ProductRepository } from "../products/product.repository.js";
 import { EventRepository } from "./event.repository.js";
+import { RewardClaimRepository } from "./reward-claim.repository.js";
+import type { IRewardClaim } from "./reward-claim.model.js";
 import type {
   CreateEventRewardDto,
   EventHostResponse,
@@ -21,6 +23,7 @@ import type {
   EventTicketInput,
   IEvent,
   PublishEventDto,
+  RewardClaimResponse,
   SaveEventDraftDto,
   UpdateEventRewardDto,
   UpdateEventTicketDto,
@@ -35,6 +38,7 @@ export class EventService {
     private readonly userFollowRepository = new UserFollowRepository(),
     private readonly storageService = new StorageService(),
     private readonly productRepository = new ProductRepository(),
+    private readonly rewardClaimRepository = new RewardClaimRepository(),
   ) {}
 
   public async saveDraft(user: AuthUser, payload: SaveEventDraftDto, eventId?: string): Promise<EventResponse> {
@@ -648,6 +652,54 @@ export class EventService {
     };
   }
 
+  public async claimReward(user: AuthUser, eventId: string, rewardId: string): Promise<RewardClaimResponse> {
+    const event = await this.eventRepository.findById(eventId);
+
+    if (!event || event.status !== "published") {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    const reward = event.rewards.find((r) => r.id === rewardId);
+
+    if (!reward) {
+      throw new AppError("Reward not found.", httpStatus.NOT_FOUND);
+    }
+
+    if (reward.expiresAt && new Date() > reward.expiresAt) {
+      throw new AppError("This reward has expired.", httpStatus.GONE);
+    }
+
+    const existingClaim = await this.rewardClaimRepository.findByUserAndReward(user.id, eventId, rewardId);
+
+    if (existingClaim) {
+      throw new AppError("You have already claimed this reward.", httpStatus.CONFLICT);
+    }
+
+    if (reward.capacity > 0) {
+      const claimedCount = await this.rewardClaimRepository.countByReward(eventId, rewardId);
+
+      if (claimedCount >= reward.capacity) {
+        throw new AppError("This reward has no remaining capacity.", httpStatus.GONE);
+      }
+    }
+
+    const claim = await this.rewardClaimRepository.create({ userId: user.id, eventId, rewardId });
+
+    return this.toClaimResponse(claim);
+  }
+
+  public async getMyEventRewardClaims(user: AuthUser, eventId: string): Promise<RewardClaimResponse[]> {
+    const event = await this.eventRepository.findById(eventId);
+
+    if (!event) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    const claims = await this.rewardClaimRepository.findByUserAndEvent(user.id, eventId);
+
+    return claims.map((claim) => this.toClaimResponse(claim));
+  }
+
   private async getDraftForUser(user: AuthUser, eventId: string): Promise<IEvent> {
     const event = await this.eventRepository.findByIdForUser(eventId, user.id);
 
@@ -682,6 +734,17 @@ export class EventService {
     const hosts = await this.userRepository.findMany({ _id: { $in: hostIds } }, 0, hostIds.length);
 
     return new Map(hosts.map((host) => [host._id.toString(), host]));
+  }
+
+  private toClaimResponse(claim: IRewardClaim): RewardClaimResponse {
+    return {
+      id: claim._id.toString(),
+      userId: claim.userId.toString(),
+      eventId: claim.eventId.toString(),
+      rewardId: claim.rewardId,
+      claimedAt: claim.claimedAt,
+      createdAt: claim.createdAt,
+    };
   }
 
   private toHostResponse(

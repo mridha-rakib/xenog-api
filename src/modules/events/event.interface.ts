@@ -189,3 +189,12 @@ export interface EventMapQuery {
   radiusKm?: number;
   limit?: number;
 }
+
+export interface RewardClaimResponse {
+  id: string;
+  userId: string;
+  eventId: string;
+  rewardId: string;
+  claimedAt: Date;
+  createdAt: Date;
+}

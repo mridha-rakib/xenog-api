@@ -26,6 +26,24 @@ export class UserFollowRepository {
     return followingIds.map((id) => id.toString());
   }
 
+  public async findFollowerIds(followingId: string, limit: number): Promise<string[]> {
+    const follows = await UserFollowModel.find({ followingId })
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(limit)
+      .select("followerId");
+
+    return follows.map((follow) => follow.followerId.toString());
+  }
+
+  public async findFollowingIdsForList(followerId: string, limit: number): Promise<string[]> {
+    const follows = await UserFollowModel.find({ followerId })
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(limit)
+      .select("followingId");
+
+    return follows.map((follow) => follow.followingId.toString());
+  }
+
   public async findMutualFriendIds(userId: string): Promise<string[]> {
     const [followingIds, followerIds] = await Promise.all([
       UserFollowModel.distinct("followingId", { followerId: userId }),
@@ -38,5 +56,9 @@ export class UserFollowRepository {
 
   public async countFollowers(userId: string): Promise<number> {
     return UserFollowModel.countDocuments({ followingId: userId });
+  }
+
+  public async countFollowing(userId: string): Promise<number> {
+    return UserFollowModel.countDocuments({ followerId: userId });
   }
 }

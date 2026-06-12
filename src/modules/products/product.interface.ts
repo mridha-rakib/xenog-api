@@ -1,8 +1,12 @@
 import type { Types } from "mongoose";
 
+export const productStatuses = ["published"] as const;
+export type ProductStatus = (typeof productStatuses)[number];
+
 export interface IProduct {
   _id: Types.ObjectId;
   userId: Types.ObjectId;
+  status?: ProductStatus;
   name: string;
   description?: string | null;
   tag?: string | null;
@@ -15,6 +19,7 @@ export interface IProduct {
 }
 
 export interface CreateProductDto {
+  status?: ProductStatus;
   name: string;
   description?: string | null;
   tag?: string | null;
@@ -27,6 +32,7 @@ export interface CreateProductDto {
 export interface ProductResponse {
   id: string;
   userId: string;
+  status: ProductStatus;
   name: string;
   description?: string | null;
   tag?: string | null;

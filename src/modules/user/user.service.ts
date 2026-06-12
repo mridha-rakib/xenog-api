@@ -13,8 +13,11 @@ import type {
   FollowStatusResponse,
   FriendUserResponse,
   IUser,
+  ProfileFollowUserResponse,
   SuggestedUserResponse,
   UpdateUserDto,
+  UserProfileStatsResponse,
+  UserReviewResponse,
 } from "./user.interface.js";
 import { UserFollowRepository } from "./user-follow.repository.js";
 import { UserRepository } from "./user.repository.js";
@@ -25,6 +28,11 @@ interface ListUsersQuery {
   search?: string;
   role?: "user" | "admin";
   isActive?: boolean;
+}
+
+interface ListProfileUsersQuery {
+  search?: string;
+  limit?: number;
 }
 
 export class UserService {
@@ -113,6 +121,60 @@ export class UserService {
     const users = await this.userRepository.findFriendsByIds(friendIds, query.search, query.limit ?? 50);
 
     return Promise.all(users.map((friend) => this.toFriendUserResponse(friend)));
+  }
+
+  public async getProfileStats(targetUserId: string): Promise<UserProfileStatsResponse> {
+    await this.assertFollowTarget(targetUserId);
+
+    const [followers, following] = await Promise.all([
+      this.userFollowRepository.countFollowers(targetUserId),
+      this.userFollowRepository.countFollowing(targetUserId),
+    ]);
+
+    return {
+      reviews: 0,
+      followers,
+      following,
+    };
+  }
+
+  public async listFollowers(
+    targetUserId: string,
+    viewer: AuthUser,
+    query: ListProfileUsersQuery,
+  ): Promise<ProfileFollowUserResponse[]> {
+    await this.assertFollowTarget(targetUserId);
+
+    const limit = query.limit ?? 100;
+    const followerIds = await this.userFollowRepository.findFollowerIds(targetUserId, limit);
+    const users = await this.userRepository.findActiveUsersByIds(followerIds, query.search, limit);
+    const viewerFollowingIds = new Set(await this.userFollowRepository.findFollowingIds(viewer.id));
+
+    return Promise.all(users.map((profileUser) => this.toProfileFollowUserResponse(profileUser, viewerFollowingIds)));
+  }
+
+  public async listFollowing(
+    targetUserId: string,
+    viewer: AuthUser,
+    query: ListProfileUsersQuery,
+  ): Promise<ProfileFollowUserResponse[]> {
+    await this.assertFollowTarget(targetUserId);
+
+    const limit = query.limit ?? 100;
+    const followingIds = await this.userFollowRepository.findFollowingIdsForList(targetUserId, limit);
+    const users = await this.userRepository.findActiveUsersByIds(followingIds, query.search, limit);
+    const viewerFollowingIds = new Set(await this.userFollowRepository.findFollowingIds(viewer.id));
+
+    return Promise.all(users.map((profileUser) => this.toProfileFollowUserResponse(profileUser, viewerFollowingIds)));
+  }
+
+  public async listReviews(targetUserId: string): Promise<{ reviews: UserReviewResponse[]; count: number }> {
+    await this.assertFollowTarget(targetUserId);
+
+    return {
+      reviews: [],
+      count: 0,
+    };
   }
 
   public async followUser(user: AuthUser, targetUserId: string): Promise<FollowStatusResponse> {
@@ -222,6 +284,23 @@ export class UserService {
       username: user.username,
       avatarKey: user.avatarKey ?? null,
       avatarUrl,
+    };
+  }
+
+  private async toProfileFollowUserResponse(
+    user: IUser,
+    viewerFollowingIds: Set<string>,
+  ): Promise<ProfileFollowUserResponse> {
+    const userId = user._id.toString();
+    const avatarUrl = user.avatarKey ? (await this.storageService.createDownloadUrl(user.avatarKey)).url : null;
+
+    return {
+      id: userId,
+      name: user.name,
+      username: user.username,
+      avatarKey: user.avatarKey ?? null,
+      avatarUrl,
+      isFollowing: viewerFollowingIds.has(userId),
     };
   }
 }

@@ -22,6 +22,30 @@ router.get(
   validate(userValidation.friends),
   catchAsync(controller.listFriends),
 );
+router.get(
+  "/:id/profile-stats",
+  authenticate,
+  validate(userValidation.profileResource),
+  catchAsync(controller.getProfileStats),
+);
+router.get(
+  "/:id/followers",
+  authenticate,
+  validate(userValidation.profileList),
+  catchAsync(controller.listFollowers),
+);
+router.get(
+  "/:id/following",
+  authenticate,
+  validate(userValidation.profileList),
+  catchAsync(controller.listFollowing),
+);
+router.get(
+  "/:id/reviews",
+  authenticate,
+  validate(userValidation.profileResource),
+  catchAsync(controller.listReviews),
+);
 router.post(
   "/:id/follow",
   authenticate,

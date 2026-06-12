@@ -61,6 +61,20 @@ export const userValidation = {
       limit: z.coerce.number().int().min(1).max(100).optional(),
     }),
   }),
+  profileList: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+    query: z.object({
+      search: z.string().trim().max(120).optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+    }),
+  }),
+  profileResource: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+  }),
   getById: z.object({
     params: z.object({
       id: objectId,

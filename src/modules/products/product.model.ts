@@ -1,5 +1,6 @@
 import { Schema, model } from "mongoose";
 import type { IProduct } from "./product.interface.js";
+import { productStatuses } from "./product.interface.js";
 
 const productSchema = new Schema<IProduct>(
   {
@@ -7,6 +8,13 @@ const productSchema = new Schema<IProduct>(
       type: Schema.Types.ObjectId,
       ref: "User",
       required: true,
+      index: true,
+    },
+    status: {
+      type: String,
+      enum: productStatuses,
+      required: true,
+      default: "published",
       index: true,
     },
     name: {
@@ -57,5 +65,6 @@ const productSchema = new Schema<IProduct>(
 );
 
 productSchema.index({ name: "text", description: "text", tag: "text" });
+productSchema.index({ userId: 1, status: 1, createdAt: -1 });
 
 export const ProductModel = model<IProduct>("Product", productSchema);

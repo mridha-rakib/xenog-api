@@ -61,6 +61,60 @@ export class UserController {
     });
   };
 
+  public getProfileStats = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const stats = await this.userService.getProfileStats(id);
+
+    ApiResponse.success(res, {
+      message: "Profile stats retrieved",
+      data: {
+        stats,
+      },
+    });
+  };
+
+  public listFollowers = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const users = await this.userService.listFollowers(
+      id,
+      req.authUser as AuthUser,
+      req.query as { search?: string; limit?: number },
+    );
+
+    ApiResponse.success(res, {
+      message: "Followers retrieved",
+      data: {
+        users,
+      },
+    });
+  };
+
+  public listFollowing = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const users = await this.userService.listFollowing(
+      id,
+      req.authUser as AuthUser,
+      req.query as { search?: string; limit?: number },
+    );
+
+    ApiResponse.success(res, {
+      message: "Following retrieved",
+      data: {
+        users,
+      },
+    });
+  };
+
+  public listReviews = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const reviews = await this.userService.listReviews(id);
+
+    ApiResponse.success(res, {
+      message: "Reviews retrieved",
+      data: reviews,
+    });
+  };
+
   public follow = async (req: Request, res: Response): Promise<void> => {
     const { id } = req.params as { id: string };
     const follow = await this.userService.followUser(req.authUser as AuthUser, id);

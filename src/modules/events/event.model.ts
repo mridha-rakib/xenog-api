@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { Schema, model } from "mongoose";
-import type { EventLocation, EventTicket, IEvent } from "./event.interface.js";
+import type { EventLocation, EventReward, EventTicket, IEvent } from "./event.interface.js";
 import {
   eventAgeRestrictions,
   eventCategories,
   eventPrivacyOptions,
+  eventRewardTypes,
   eventStatuses,
   eventTicketTypes,
 } from "./event.interface.js";
@@ -81,6 +82,89 @@ const eventTicketSchema = new Schema<EventTicket>(
       min: 0,
       max: 1_000_000,
       default: 0,
+    },
+    capacity: {
+      type: Number,
+      min: 0,
+      max: 1_000_000,
+      required: true,
+    },
+  },
+  { _id: false },
+);
+
+const eventRewardSchema = new Schema<EventReward>(
+  {
+    id: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 80,
+      default: randomUUID,
+    },
+    rewardType: {
+      type: String,
+      enum: eventRewardTypes,
+      required: true,
+    },
+    ticketId: {
+      type: String,
+      trim: true,
+      maxlength: 80,
+      default: null,
+    },
+    productId: {
+      type: Schema.Types.ObjectId,
+      ref: "Product",
+      default: null,
+    },
+    targetName: {
+      type: String,
+      trim: true,
+      maxlength: 160,
+      default: null,
+    },
+    imageKeys: {
+      type: [String],
+      default: [],
+      validate: {
+        validator: (value: string[]) => value.length <= 10,
+        message: "Reward cannot include more than 10 images",
+      },
+    },
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 120,
+    },
+    description: {
+      type: String,
+      trim: true,
+      maxlength: 1000,
+      default: null,
+    },
+    expiresAt: {
+      type: Date,
+      default: null,
+    },
+    discountPercent: {
+      type: Number,
+      min: 0,
+      max: 100,
+      default: 0,
+    },
+    buyQuantity: {
+      type: Number,
+      min: 1,
+      max: 1_000_000,
+      required: true,
+    },
+    freeQuantity: {
+      type: Number,
+      min: 1,
+      max: 1_000_000,
+      required: true,
     },
     capacity: {
       type: Number,
@@ -200,6 +284,10 @@ const eventSchema = new Schema<IEvent>(
     },
     tickets: {
       type: [eventTicketSchema],
+      default: [],
+    },
+    rewards: {
+      type: [eventRewardSchema],
       default: [],
     },
     privacy: {

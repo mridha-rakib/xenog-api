@@ -102,3 +102,32 @@ export interface FollowStatusResponse {
   userId: string;
   isFollowing: boolean;
 }
+
+export interface UserProfileStatsResponse {
+  reviews: number;
+  followers: number;
+  following: number;
+}
+
+export interface ProfileFollowUserResponse {
+  id: string;
+  name: string;
+  username?: string;
+  avatarKey?: string | null;
+  avatarUrl?: string | null;
+  isFollowing: boolean;
+}
+
+export interface UserReviewResponse {
+  id: string;
+  author: {
+    id: string;
+    name: string;
+    username?: string;
+    avatarKey?: string | null;
+    avatarUrl?: string | null;
+  } | null;
+  text: string;
+  liked: boolean;
+  createdAt: Date;
+}

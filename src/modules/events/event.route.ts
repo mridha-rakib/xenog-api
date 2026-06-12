@@ -23,11 +23,40 @@ router.delete(
   validate(eventValidation.deleteDraftTicket),
   catchAsync(controller.deleteDraftTicket),
 );
+router.post("/drafts/:id/rewards", validate(eventValidation.createDraftReward), catchAsync(controller.createDraftReward));
+router.patch(
+  "/drafts/:id/rewards/:rewardId",
+  validate(eventValidation.updateDraftReward),
+  catchAsync(controller.updateDraftReward),
+);
+router.delete(
+  "/drafts/:id/rewards/:rewardId",
+  validate(eventValidation.deleteDraftReward),
+  catchAsync(controller.deleteDraftReward),
+);
 router.post("/publish", validate(eventValidation.publish), catchAsync(controller.publish));
 router.post("/:id/publish", validate(eventValidation.publishDraft), catchAsync(controller.publishDraft));
 router.get("/mine/profile", catchAsync(controller.listMyProfileEvents));
 router.get("/mine", catchAsync(controller.listMyEvents));
 router.get("/map", validate(eventValidation.mapEvents), catchAsync(controller.listMapEvents));
+router.get("/profile/:userId", validate(eventValidation.profileEvents), catchAsync(controller.listProfileEvents));
+router.get("/:id/tickets/:ticketId", validate(eventValidation.eventTicketParams), catchAsync(controller.getEventTicket));
+router.post("/:id/tickets", validate(eventValidation.createEventTicket), catchAsync(controller.createEventTicket));
+router.patch(
+  "/:id/tickets/:ticketId",
+  validate(eventValidation.updateEventTicket),
+  catchAsync(controller.updateEventTicket),
+);
+router.delete("/:id/tickets/:ticketId", validate(eventValidation.eventTicketParams), catchAsync(controller.deleteEventTicket));
+router.post("/:id/rewards", validate(eventValidation.createEventReward), catchAsync(controller.createEventReward));
+router.patch(
+  "/:id/rewards/:rewardId",
+  validate(eventValidation.updateEventReward),
+  catchAsync(controller.updateEventReward),
+);
+router.delete("/:id/rewards/:rewardId", validate(eventValidation.eventRewardParams), catchAsync(controller.deleteEventReward));
+router.patch("/:id", validate(eventValidation.updateEvent), catchAsync(controller.updateEvent));
+router.delete("/:id", validate(eventValidation.deleteEvent), catchAsync(controller.deleteEvent));
 router.get("/:id", validate(eventValidation.eventParams), catchAsync(controller.getEventById));
 
 export const eventRoutes = router;

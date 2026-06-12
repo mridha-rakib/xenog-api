@@ -4,9 +4,11 @@ import { ApiResponse } from "../../core/http/api-response.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import type {
   CreateEventTicketDto,
+  CreateEventRewardDto,
   EventMapQuery,
   PublishEventDto,
   SaveEventDraftDto,
+  UpdateEventRewardDto,
   UpdateEventTicketDto,
 } from "./event.interface.js";
 import { EventService } from "./event.service.js";
@@ -68,6 +70,94 @@ export class EventController {
     });
   };
 
+  public updateEvent = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.updateEvent(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.body as SaveEventDraftDto,
+    );
+
+    ApiResponse.success(res, {
+      message: "Event updated",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public deleteEvent = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.deleteEvent(req.authUser as AuthUser, req.params.id as string);
+
+    ApiResponse.success(res, {
+      message: "Event deleted",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public getEventTicket = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.getEventTicket(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.ticketId as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Event ticket retrieved",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public createEventTicket = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.createEventTicket(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.body as CreateEventTicketDto,
+    );
+
+    ApiResponse.success(res, {
+      statusCode: httpStatus.CREATED,
+      message: "Event ticket created",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public updateEventTicket = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.updateEventTicket(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.ticketId as string,
+      req.body as UpdateEventTicketDto,
+    );
+
+    ApiResponse.success(res, {
+      message: "Event ticket updated",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public deleteEventTicket = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.deleteEventTicket(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.ticketId as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Event ticket deleted",
+      data: {
+        event,
+      },
+    });
+  };
+
   public createDraftTicket = async (req: Request, res: Response): Promise<void> => {
     const event = await this.eventService.createDraftTicket(
       req.authUser as AuthUser,
@@ -115,6 +205,100 @@ export class EventController {
     });
   };
 
+  public createEventReward = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.createEventReward(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.body as CreateEventRewardDto,
+    );
+
+    ApiResponse.success(res, {
+      statusCode: httpStatus.CREATED,
+      message: "Event reward created",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public updateEventReward = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.updateEventReward(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.rewardId as string,
+      req.body as UpdateEventRewardDto,
+    );
+
+    ApiResponse.success(res, {
+      message: "Event reward updated",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public deleteEventReward = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.deleteEventReward(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.rewardId as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Event reward deleted",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public createDraftReward = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.createDraftReward(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.body as CreateEventRewardDto,
+    );
+
+    ApiResponse.success(res, {
+      statusCode: httpStatus.CREATED,
+      message: "Event draft reward created",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public updateDraftReward = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.updateDraftReward(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.rewardId as string,
+      req.body as UpdateEventRewardDto,
+    );
+
+    ApiResponse.success(res, {
+      message: "Event draft reward updated",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public deleteDraftReward = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.deleteDraftReward(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.rewardId as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Event draft reward deleted",
+      data: {
+        event,
+      },
+    });
+  };
+
   public listMyEvents = async (req: Request, res: Response): Promise<void> => {
     const events = await this.eventService.listMyEvents(req.authUser as AuthUser);
 
@@ -128,6 +312,20 @@ export class EventController {
 
   public listMyProfileEvents = async (req: Request, res: Response): Promise<void> => {
     const events = await this.eventService.listMyProfileEvents(req.authUser as AuthUser);
+
+    ApiResponse.success(res, {
+      message: "Profile events retrieved",
+      data: {
+        events,
+      },
+    });
+  };
+
+  public listProfileEvents = async (req: Request, res: Response): Promise<void> => {
+    const events = await this.eventService.listProfileEventsForUser(
+      req.authUser as AuthUser,
+      req.params.userId as string,
+    );
 
     ApiResponse.success(res, {
       message: "Profile events retrieved",

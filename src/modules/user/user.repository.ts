@@ -126,6 +126,31 @@ export class UserRepository {
     return UserModel.find(filter).sort({ name: 1, username: 1 }).limit(limit);
   }
 
+  public async findActiveUsersByIds(userIds: string[], search: string | undefined, limit: number): Promise<IUser[]> {
+    if (userIds.length === 0) {
+      return [];
+    }
+
+    const filter: FilterQuery<IUser> = {
+      _id: { $in: userIds },
+      role: "user",
+      isActive: true,
+      emailVerified: true,
+    };
+    const normalizedSearch = search?.trim().replace(/^@/, "");
+
+    if (normalizedSearch) {
+      const escapedSearch = normalizedSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+      filter.$or = [
+        { name: { $regex: escapedSearch, $options: "i" } },
+        { username: { $regex: escapedSearch, $options: "i" } },
+      ];
+    }
+
+    return UserModel.find(filter).sort({ name: 1, username: 1 }).limit(limit);
+  }
+
   public async count(filter: FilterQuery<IUser>): Promise<number> {
     return UserModel.countDocuments(filter);
   }

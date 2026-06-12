@@ -28,8 +28,24 @@ export class ProductService {
     return products.map((product) => this.toResponse(product));
   }
 
+  public async listPublishedProductsByUser(userId: string): Promise<ProductResponse[]> {
+    const products = await this.productRepository.findPublishedByUserId(userId);
+
+    return products.map((product) => this.toResponse(product));
+  }
+
   public async getMyProduct(user: AuthUser, productId: string): Promise<ProductResponse> {
     const product = await this.productRepository.findByIdForUser(productId, user.id);
+
+    if (!product) {
+      throw new AppError("Product not found.", httpStatus.NOT_FOUND);
+    }
+
+    return this.toResponse(product);
+  }
+
+  public async getPublishedProduct(productId: string): Promise<ProductResponse> {
+    const product = await this.productRepository.findPublishedById(productId);
 
     if (!product) {
       throw new AppError("Product not found.", httpStatus.NOT_FOUND);
@@ -65,6 +81,7 @@ export class ProductService {
     return {
       id: product._id.toString(),
       userId: product.userId.toString(),
+      status: product.status ?? "published",
       name: product.name,
       description: product.description ?? null,
       tag: product.tag ?? null,

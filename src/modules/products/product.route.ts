@@ -17,6 +17,16 @@ router.post(
 );
 
 router.get("/mine", catchAsync(controller.listMyProducts));
+router.get(
+  "/users/:userId/published",
+  validate(productValidation.userProductsParams),
+  catchAsync(controller.listPublishedProductsByUser),
+);
+router.get(
+  "/published/:id",
+  validate(productValidation.productParams),
+  catchAsync(controller.getPublishedProduct),
+);
 router.get("/:id", validate(productValidation.productParams), catchAsync(controller.getMyProduct));
 router.patch("/:id", validate(productValidation.updateProduct), catchAsync(controller.updateMyProduct));
 router.delete("/:id", validate(productValidation.productParams), catchAsync(controller.deleteMyProduct));

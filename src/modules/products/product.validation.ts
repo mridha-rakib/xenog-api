@@ -19,6 +19,11 @@ export const productValidation = {
       id: objectId,
     }),
   }),
+  userProductsParams: z.object({
+    params: z.object({
+      userId: objectId,
+    }),
+  }),
   createProduct: z.object({
     body: z
       .object({

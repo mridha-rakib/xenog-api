@@ -30,8 +30,30 @@ export class ProductController {
     });
   };
 
+  public listPublishedProductsByUser = async (req: Request, res: Response): Promise<void> => {
+    const products = await this.productService.listPublishedProductsByUser(req.params.userId as string);
+
+    ApiResponse.success(res, {
+      message: "Products retrieved",
+      data: {
+        products,
+      },
+    });
+  };
+
   public getMyProduct = async (req: Request, res: Response): Promise<void> => {
     const product = await this.productService.getMyProduct(req.authUser as AuthUser, req.params.id as string);
+
+    ApiResponse.success(res, {
+      message: "Product retrieved",
+      data: {
+        product,
+      },
+    });
+  };
+
+  public getPublishedProduct = async (req: Request, res: Response): Promise<void> => {
+    const product = await this.productService.getPublishedProduct(req.params.id as string);
 
     ApiResponse.success(res, {
       message: "Product retrieved",

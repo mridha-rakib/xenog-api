@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { eventAgeRestrictions, eventCategories, eventPrivacyOptions, eventTicketTypes } from "./event.interface.js";
+import {
+  eventAgeRestrictions,
+  eventCategories,
+  eventPrivacyOptions,
+  eventRewardTypes,
+  eventTicketTypes,
+} from "./event.interface.js";
 
 const objectId = z.string().trim().regex(/^[a-f\d]{24}$/i, "Invalid MongoDB ObjectId");
 const ticketId = z.string().trim().min(1, "Ticket ID is required").max(80, "Ticket ID cannot exceed 80 characters");
@@ -106,6 +112,64 @@ const updateEventTicket = z
     ...(ticket.type === "free" ? { price: 0 } : {}),
   }));
 
+const eventRewardShape = {
+  id: ticketId.optional(),
+  rewardType: z.enum(eventRewardTypes),
+  ticketId: ticketId.optional().nullable().transform((value) => value ?? null),
+  productId: objectId.optional().nullable().transform((value) => value ?? null),
+  name: z.string().trim().min(1, "Offer name is required").max(120),
+  description: optionalText("Offer description", 1000),
+  expiresAt: z.coerce.date().optional().nullable().transform((value) => value ?? null),
+  discountPercent: z.coerce.number().min(0).max(100).default(0),
+  buyQuantity: z.coerce.number().int().min(1).max(1_000_000),
+  freeQuantity: z.coerce.number().int().min(1).max(1_000_000),
+  capacity: z.coerce.number().int().min(0).max(1_000_000),
+};
+
+const validateRewardTarget = <T extends { rewardType?: string; ticketId?: string | null; productId?: string | null }>(
+  reward: T,
+) => {
+  if (reward.rewardType === "ticket") {
+    return Boolean(reward.ticketId);
+  }
+
+  if (reward.rewardType === "product") {
+    return Boolean(reward.productId);
+  }
+
+  return true;
+};
+
+const eventReward = z
+  .object(eventRewardShape)
+  .strict()
+  .refine(validateRewardTarget, {
+    message: "Select a ticket or product for this reward",
+  })
+  .transform((reward) => ({
+    ...reward,
+    ticketId: reward.rewardType === "ticket" ? reward.ticketId : null,
+    productId: reward.rewardType === "product" ? reward.productId : null,
+  }));
+
+const updateEventReward = z
+  .object({
+    rewardType: z.enum(eventRewardTypes).optional(),
+    ticketId: eventRewardShape.ticketId.optional(),
+    productId: eventRewardShape.productId.optional(),
+    name: eventRewardShape.name.optional(),
+    description: eventRewardShape.description,
+    expiresAt: eventRewardShape.expiresAt,
+    discountPercent: z.coerce.number().min(0).max(100).optional(),
+    buyQuantity: eventRewardShape.buyQuantity.optional(),
+    freeQuantity: eventRewardShape.freeQuantity.optional(),
+    capacity: eventRewardShape.capacity.optional(),
+  })
+  .strict()
+  .refine((reward) => Object.values(reward).some((value) => value !== undefined), {
+    message: "At least one reward field is required",
+  });
+
 const draftBody = z
   .object({
     name: optionalText("Event name", 160),
@@ -148,6 +212,11 @@ const mapQuery = z
   });
 
 export const eventValidation = {
+  profileEvents: z.object({
+    params: z.object({
+      userId: objectId,
+    }),
+  }),
   eventParams: z.object({
     params: z.object({
       id: objectId,
@@ -171,6 +240,42 @@ export const eventValidation = {
     }),
     body: publishBody,
   }),
+  updateEvent: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+    body: draftBody,
+  }),
+  deleteEvent: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+  }),
+  eventTicketParams: z.object({
+    params: z.object({
+      id: objectId,
+      ticketId,
+    }),
+  }),
+  eventRewardParams: z.object({
+    params: z.object({
+      id: objectId,
+      rewardId: ticketId,
+    }),
+  }),
+  createEventTicket: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+    body: eventTicket,
+  }),
+  updateEventTicket: z.object({
+    params: z.object({
+      id: objectId,
+      ticketId,
+    }),
+    body: updateEventTicket,
+  }),
   createDraftTicket: z.object({
     params: z.object({
       id: objectId,
@@ -188,6 +293,38 @@ export const eventValidation = {
     params: z.object({
       id: objectId,
       ticketId,
+    }),
+  }),
+  createEventReward: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+    body: eventReward,
+  }),
+  updateEventReward: z.object({
+    params: z.object({
+      id: objectId,
+      rewardId: ticketId,
+    }),
+    body: updateEventReward,
+  }),
+  createDraftReward: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+    body: eventReward,
+  }),
+  updateDraftReward: z.object({
+    params: z.object({
+      id: objectId,
+      rewardId: ticketId,
+    }),
+    body: updateEventReward,
+  }),
+  deleteDraftReward: z.object({
+    params: z.object({
+      id: objectId,
+      rewardId: ticketId,
     }),
   }),
   mapEvents: z.object({

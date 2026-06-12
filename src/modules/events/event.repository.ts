@@ -23,6 +23,7 @@ export class EventRepository {
       scheduledAt: payload.scheduledAt ?? null,
       location: payload.location ?? null,
       tickets: payload.tickets ?? [],
+      rewards: payload.rewards ?? [],
       privacy: payload.privacy ?? "public",
       publishedAt: payload.publishedAt ?? null,
     });
@@ -34,6 +35,19 @@ export class EventRepository {
 
   public async findById(id: string): Promise<IEvent | null> {
     return EventModel.findById(id);
+  }
+
+  public async updateByIdForUser(id: string, userId: string, payload: SaveEventDraftDto): Promise<IEvent | null> {
+    const update: UpdateQuery<IEvent> = this.toUpdate(payload);
+
+    return EventModel.findOneAndUpdate({ _id: id, userId }, update, {
+      new: true,
+      runValidators: true,
+    });
+  }
+
+  public async deleteByIdForUser(id: string, userId: string): Promise<IEvent | null> {
+    return EventModel.findOneAndDelete({ _id: id, userId });
   }
 
   public async findByUserId(userId: string): Promise<IEvent[]> {
@@ -138,6 +152,7 @@ export class EventRepository {
     if (payload.scheduledAt !== undefined) update.scheduledAt = payload.scheduledAt;
     if (payload.location !== undefined) update.location = payload.location;
     if (payload.tickets !== undefined) update.tickets = payload.tickets;
+    if (payload.rewards !== undefined) update.rewards = payload.rewards;
     if (payload.privacy !== undefined) update.privacy = payload.privacy;
 
     return update;

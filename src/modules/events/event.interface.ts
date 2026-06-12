@@ -12,6 +12,9 @@ export type EventPrivacy = (typeof eventPrivacyOptions)[number];
 export const eventTicketTypes = ["free", "pay"] as const;
 export type EventTicketType = (typeof eventTicketTypes)[number];
 
+export const eventRewardTypes = ["ticket", "product"] as const;
+export type EventRewardType = (typeof eventRewardTypes)[number];
+
 export const eventCategories = [
   "Music",
   "Nightlife",
@@ -56,6 +59,27 @@ export type EventTicketInput = Omit<EventTicket, "id"> & {
   id?: string;
 };
 
+export interface EventReward {
+  id: string;
+  rewardType: EventRewardType;
+  ticketId?: string | null;
+  productId?: Types.ObjectId | string | null;
+  targetName?: string | null;
+  imageKeys?: string[];
+  name: string;
+  description?: string | null;
+  expiresAt?: Date | null;
+  discountPercent: number;
+  buyQuantity: number;
+  freeQuantity: number;
+  capacity: number;
+}
+
+export type EventRewardInput = Omit<EventReward, "id" | "productId"> & {
+  id?: string;
+  productId?: Types.ObjectId | string | null;
+};
+
 export interface EventImageDisplay {
   crop?: {
     x: number;
@@ -76,6 +100,7 @@ export interface EventHostResponse {
   bio?: string | null;
   followersCount?: number;
   eventsCount?: number;
+  isFollowing?: boolean;
 }
 
 export interface IEvent {
@@ -92,6 +117,7 @@ export interface IEvent {
   scheduledAt?: Date | null;
   location?: EventLocation | null;
   tickets: EventTicket[];
+  rewards: EventReward[];
   privacy: EventPrivacy;
   publishedAt?: Date | null;
   createdAt: Date;
@@ -109,11 +135,14 @@ export interface SaveEventDraftDto {
   scheduledAt?: Date | null;
   location?: EventLocation | null;
   tickets?: EventTicketInput[];
+  rewards?: EventRewardInput[];
   privacy?: EventPrivacy;
 }
 
 export type CreateEventTicketDto = EventTicketInput;
 export type UpdateEventTicketDto = Partial<Omit<EventTicketInput, "id">>;
+export type CreateEventRewardDto = EventRewardInput;
+export type UpdateEventRewardDto = Partial<Omit<EventRewardInput, "id">>;
 
 export interface PublishEventDto extends SaveEventDraftDto {
   name: string;
@@ -123,6 +152,7 @@ export interface PublishEventDto extends SaveEventDraftDto {
   scheduledAt: Date;
   location: EventLocation;
   tickets: EventTicketInput[];
+  rewards?: EventRewardInput[];
   privacy: EventPrivacy;
 }
 
@@ -141,6 +171,7 @@ export interface EventResponse {
   scheduledAt?: Date | null;
   location?: EventLocation | null;
   tickets: EventTicket[];
+  rewards: EventReward[];
   privacy: EventPrivacy;
   publishedAt?: Date | null;
   createdAt: Date;

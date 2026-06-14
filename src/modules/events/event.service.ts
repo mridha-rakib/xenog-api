@@ -10,6 +10,10 @@ import { ProductRepository } from "../products/product.repository.js";
 import { EventRepository } from "./event.repository.js";
 import { RewardClaimRepository } from "./reward-claim.repository.js";
 import type { IRewardClaim } from "./reward-claim.model.js";
+import { CheckoutPaymentRepository } from "../payments/checkout-payment.repository.js";
+import { CheckoutPaymentService } from "../payments/checkout-payment.service.js";
+import { CreatorEarningRepository } from "../payments/creator-earning.repository.js";
+import { TicketShareRepository } from "../payments/ticket-share.repository.js";
 import type {
   CreateEventRewardDto,
   EventHostResponse,
@@ -22,14 +26,45 @@ import type {
   EventTicket,
   EventTicketInput,
   IEvent,
+  NowEventStatus,
+  NowModeEventResponse,
+  NowModeQuery,
+  PostTagEventResponse,
+  PostTagEventStatus,
   PublishEventDto,
   RewardClaimResponse,
   SaveEventDraftDto,
+  TicketAccessResponse,
   UpdateEventRewardDto,
   UpdateEventTicketDto,
 } from "./event.interface.js";
 
 const ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
+const NOW_MODE_LOOKAHEAD_MS = 3 * 60 * 60 * 1000;
+const STARTING_SOON_MS = 60 * 60 * 1000;
+
+const getNowStatus = (scheduledAt: Date | null | undefined): NowEventStatus | null => {
+  if (!scheduledAt) {
+    return null;
+  }
+
+  const now = Date.now();
+  const scheduled = scheduledAt.getTime();
+
+  if (scheduled <= now && now - scheduled <= ACTIVE_EVENT_WINDOW_MS) {
+    return "live_now";
+  }
+
+  if (scheduled > now && scheduled - now <= STARTING_SOON_MS) {
+    return "starting_soon";
+  }
+
+  if (scheduled > now && scheduled - now <= NOW_MODE_LOOKAHEAD_MS) {
+    return "last_call";
+  }
+
+  return null;
+};
 
 export class EventService {
   public constructor(
@@ -39,6 +74,10 @@ export class EventService {
     private readonly storageService = new StorageService(),
     private readonly productRepository = new ProductRepository(),
     private readonly rewardClaimRepository = new RewardClaimRepository(),
+    private readonly checkoutPaymentRepository = new CheckoutPaymentRepository(),
+    private readonly checkoutPaymentService = new CheckoutPaymentService(),
+    private readonly creatorEarningRepository = new CreatorEarningRepository(),
+    private readonly ticketShareRepository = new TicketShareRepository(),
   ) {}
 
   public async saveDraft(user: AuthUser, payload: SaveEventDraftDto, eventId?: string): Promise<EventResponse> {
@@ -427,6 +466,80 @@ export class EventService {
     return events.map((event) => this.toResponse(event));
   }
 
+  public async listMyPostTagEvents(user: AuthUser): Promise<PostTagEventResponse[]> {
+    const now = Date.now();
+    const activeSince = new Date(now - ACTIVE_EVENT_WINDOW_MS);
+
+    // Own events: organizer can tag live, active, or upcoming events
+    const ownEvents = await this.eventRepository.findActiveAndUpcomingByUserId(user.id, activeSince);
+
+    // Ticket-holder events: only live + active (already started, within 12h window)
+    const [paidEventIds, sharedEventIds] = await Promise.all([
+      this.checkoutPaymentRepository.findPaidTicketEventIdsByUser(user.id),
+      this.ticketShareRepository.findActiveEventIdsByRecipient(user.id),
+    ]);
+
+    const ownEventIdSet = new Set(ownEvents.map((e) => e._id.toString()));
+    const foreignTicketEventIds = [...new Set([...paidEventIds, ...sharedEventIds])].filter(
+      (id) => !ownEventIdSet.has(id),
+    );
+
+    const ticketEvents = await this.eventRepository.findLiveActiveByIds(
+      foreignTicketEventIds,
+      activeSince,
+      new Date(now),
+    );
+
+    const allEvents = [...ownEvents, ...ticketEvents];
+
+    return Promise.all(
+      allEvents.map(async (event) => {
+        const bannerImageUrl = event.bannerImageKey
+          ? await this.storageService.createDownloadUrl(event.bannerImageKey).then((d) => d.url).catch(() => null)
+          : null;
+
+        const scheduled = event.scheduledAt?.getTime() ?? null;
+        let postTagStatus: PostTagEventStatus;
+
+        if (scheduled === null || scheduled > now) {
+          postTagStatus = "upcoming";
+        } else if (now - scheduled <= NOW_MODE_LOOKAHEAD_MS) {
+          postTagStatus = "live";
+        } else {
+          postTagStatus = "active";
+        }
+
+        return {
+          id: event._id.toString(),
+          name: event.name ?? "",
+          bannerImageUrl,
+          scheduledAt: event.scheduledAt!,
+          location: event.location ?? null,
+          postTagStatus,
+        };
+      }),
+    );
+  }
+
+  public async getTicketAccess(user: AuthUser, eventId: string): Promise<TicketAccessResponse> {
+    const event = await this.eventRepository.findById(eventId);
+
+    if (!event || event.status !== "published") {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    if (event.userId.toString() === user.id) {
+      return { hasAccess: true };
+    }
+
+    const [hasPurchased, hasShared] = await Promise.all([
+      this.checkoutPaymentRepository.hasUserPaidTicketForEvent(user.id, eventId),
+      this.ticketShareRepository.hasActiveShareForRecipientAtEvent(user.id, eventId),
+    ]);
+
+    return { hasAccess: hasPurchased || hasShared };
+  }
+
   public async listMyProfileEvents(user: AuthUser): Promise<ProfileEventGroupsResponse> {
     return this.listProfileEventsByUserId(user.id);
   }
@@ -450,6 +563,39 @@ export class EventService {
     };
   }
 
+  public async completeEvent(user: AuthUser, eventId: string): Promise<EventResponse> {
+    const event = await this.eventRepository.completeById(eventId, user.id);
+
+    if (!event) {
+      throw new AppError("Published event not found.", httpStatus.NOT_FOUND);
+    }
+
+    const completedAt = event.completedAt ?? new Date();
+    const eligibleAt = new Date(completedAt.getTime() + 72 * 60 * 60 * 1000);
+
+    await this.creatorEarningRepository.setEligibleAtByEventId(eventId, eligibleAt);
+
+    return this.toResponse(event);
+  }
+
+  public async cancelEvent(user: AuthUser, eventId: string): Promise<EventResponse> {
+    const event = await this.eventRepository.cancelById(eventId, user.id);
+
+    if (!event) {
+      throw new AppError("Active event not found.", httpStatus.NOT_FOUND);
+    }
+
+    const paidOrders = await this.checkoutPaymentRepository.findPaidTicketOrdersByEventId(eventId);
+
+    for (const order of paidOrders) {
+      await this.checkoutPaymentService.processRefundForCancelledEvent(order._id.toString());
+    }
+
+    await this.creatorEarningRepository.markRefundedByEventId(eventId);
+
+    return this.toResponse(event);
+  }
+
   public async listMapEvents(query: EventMapQuery): Promise<EventResponse[]> {
     const activeSince = new Date(Date.now() - ACTIVE_EVENT_WINDOW_MS);
     const events = await this.eventRepository.findMapEvents({
@@ -461,6 +607,39 @@ export class EventService {
     const hostById = await this.getHostById(events);
 
     return events.map((event) => this.toResponse(event, hostById.get(event.userId.toString()) ?? null));
+  }
+
+  public async listNowModeEvents(query: NowModeQuery): Promise<NowModeEventResponse[]> {
+    const now = Date.now();
+    const activeSince = new Date(now - ACTIVE_EVENT_WINDOW_MS);
+    const upcomingUntil = new Date(now + NOW_MODE_LOOKAHEAD_MS);
+
+    const events = await this.eventRepository.findNowModeEvents({
+      ...query,
+      radiusKm: query.radiusKm ?? 50,
+      limit: query.limit ?? 100,
+      activeSince,
+      upcomingUntil,
+    });
+
+    const hostById = await this.getHostById(events);
+    const statusPriority: Record<NowEventStatus, number> = { live_now: 0, starting_soon: 1, last_call: 2 };
+
+    return events
+      .map((event) => {
+        const nowStatus = getNowStatus(event.scheduledAt ?? null);
+
+        if (!nowStatus) {
+          return null;
+        }
+
+        return {
+          ...this.toResponse(event, hostById.get(event.userId.toString()) ?? null),
+          nowStatus,
+        };
+      })
+      .filter((event): event is NowModeEventResponse => event !== null)
+      .sort((a, b) => statusPriority[a.nowStatus] - statusPriority[b.nowStatus]);
   }
 
   public async getEventById(user: AuthUser, eventId: string): Promise<EventResponse> {
@@ -801,6 +980,8 @@ export class EventService {
       rewards: this.normalizeExistingRewards(event.rewards),
       privacy: event.privacy,
       publishedAt: event.publishedAt ?? null,
+      completedAt: event.completedAt ?? null,
+      cancelledAt: event.cancelledAt ?? null,
       createdAt: event.createdAt,
       updatedAt: event.updatedAt,
     };

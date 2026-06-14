@@ -1,6 +1,6 @@
 import type { FilterQuery, UpdateQuery } from "mongoose";
 import { EventModel } from "./event.model.js";
-import type { EventMapQuery, IEvent, PublishEventDto, SaveEventDraftDto } from "./event.interface.js";
+import type { EventMapQuery, IEvent, NowModeQuery, PublishEventDto, SaveEventDraftDto } from "./event.interface.js";
 
 interface CreateEventRecord extends SaveEventDraftDto {
   userId: string;
@@ -37,6 +37,10 @@ export class EventRepository {
     return EventModel.findById(id);
   }
 
+  public async findManyByIds(ids: string[]): Promise<IEvent[]> {
+    return EventModel.find({ _id: { $in: ids } });
+  }
+
   public async updateByIdForUser(id: string, userId: string, payload: SaveEventDraftDto): Promise<IEvent | null> {
     const update: UpdateQuery<IEvent> = this.toUpdate(payload);
 
@@ -52,6 +56,26 @@ export class EventRepository {
 
   public async findByUserId(userId: string): Promise<IEvent[]> {
     return EventModel.find({ userId }).sort({ createdAt: -1, _id: -1 });
+  }
+
+  public async findActiveAndUpcomingByUserId(userId: string, activeSince: Date): Promise<IEvent[]> {
+    return EventModel.find({
+      userId,
+      status: "published",
+      scheduledAt: { $gte: activeSince },
+    }).sort({ scheduledAt: 1, _id: -1 });
+  }
+
+  public async findLiveActiveByIds(eventIds: string[], activeSince: Date, until: Date): Promise<IEvent[]> {
+    if (eventIds.length === 0) {
+      return [];
+    }
+
+    return EventModel.find({
+      _id: { $in: eventIds },
+      status: "published",
+      scheduledAt: { $gte: activeSince, $lte: until },
+    }).sort({ scheduledAt: 1, _id: -1 });
   }
 
   public async findPublishedProfileEventsByUserId(
@@ -105,6 +129,56 @@ export class EventRepository {
     return EventModel.find(eventQuery)
       .sort({ scheduledAt: 1, publishedAt: -1, _id: -1 })
       .limit(query.limit ?? 100);
+  }
+
+  public async findNowModeEvents(query: NowModeQuery & { activeSince: Date; upcomingUntil: Date }): Promise<IEvent[]> {
+    const eventQuery: FilterQuery<IEvent> = {
+      status: "published",
+      privacy: "public",
+      scheduledAt: { $gte: query.activeSince, $lte: query.upcomingUntil },
+      "location.latitude": { $type: "number" },
+      "location.longitude": { $type: "number" },
+    };
+
+    if (typeof query.latitude === "number" && typeof query.longitude === "number" && typeof query.radiusKm === "number") {
+      const latitudeDelta = query.radiusKm / 111.32;
+      const longitudeDelta = query.radiusKm / (111.32 * Math.max(Math.cos((query.latitude * Math.PI) / 180), 0.01));
+
+      eventQuery["location.latitude"] = {
+        $type: "number",
+        $gte: query.latitude - latitudeDelta,
+        $lte: query.latitude + latitudeDelta,
+      };
+      eventQuery["location.longitude"] = {
+        $type: "number",
+        $gte: query.longitude - longitudeDelta,
+        $lte: query.longitude + longitudeDelta,
+      };
+    }
+
+    return EventModel.find(eventQuery)
+      .sort({ scheduledAt: 1, _id: -1 })
+      .limit(query.limit ?? 100);
+  }
+
+  public async completeById(id: string, userId: string): Promise<IEvent | null> {
+    const now = new Date();
+
+    return EventModel.findOneAndUpdate(
+      { _id: id, userId, status: "published" },
+      { $set: { status: "completed", completedAt: now } },
+      { new: true, runValidators: true },
+    );
+  }
+
+  public async cancelById(id: string, userId: string): Promise<IEvent | null> {
+    const now = new Date();
+
+    return EventModel.findOneAndUpdate(
+      { _id: id, userId, status: { $in: ["published", "completed"] } },
+      { $set: { status: "cancelled", cancelledAt: now } },
+      { new: true, runValidators: true },
+    );
   }
 
   public async countByUserId(userId: string, status?: "draft" | "published"): Promise<number> {

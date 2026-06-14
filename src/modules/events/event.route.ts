@@ -37,7 +37,10 @@ router.delete(
 router.post("/publish", validate(eventValidation.publish), catchAsync(controller.publish));
 router.post("/:id/publish", validate(eventValidation.publishDraft), catchAsync(controller.publishDraft));
 router.get("/mine/profile", catchAsync(controller.listMyProfileEvents));
+router.get("/mine/post-tag", catchAsync(controller.listMyPostTagEvents));
 router.get("/mine", catchAsync(controller.listMyEvents));
+router.get("/:id/ticket-access", validate(eventValidation.eventParams), catchAsync(controller.getTicketAccess));
+router.get("/now", validate(eventValidation.nowModeEvents), catchAsync(controller.listNowModeEvents));
 router.get("/map", validate(eventValidation.mapEvents), catchAsync(controller.listMapEvents));
 router.get("/profile/:userId", validate(eventValidation.profileEvents), catchAsync(controller.listProfileEvents));
 router.get("/:id/tickets/:ticketId", validate(eventValidation.eventTicketParams), catchAsync(controller.getEventTicket));
@@ -57,6 +60,8 @@ router.patch(
   catchAsync(controller.updateEventReward),
 );
 router.delete("/:id/rewards/:rewardId", validate(eventValidation.eventRewardParams), catchAsync(controller.deleteEventReward));
+router.post("/:id/complete", validate(eventValidation.eventParams), catchAsync(controller.completeEvent));
+router.post("/:id/cancel", validate(eventValidation.eventParams), catchAsync(controller.cancelEvent));
 router.patch("/:id", validate(eventValidation.updateEvent), catchAsync(controller.updateEvent));
 router.delete("/:id", validate(eventValidation.deleteEvent), catchAsync(controller.deleteEvent));
 router.get("/:id", validate(eventValidation.eventParams), catchAsync(controller.getEventById));

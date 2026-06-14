@@ -23,6 +23,11 @@ import type {
 } from "./moment.interface.js";
 import { MomentCommentRepository } from "./moment-comment.repository.js";
 import { MomentReactionRepository } from "./moment-reaction.repository.js";
+import { EventRepository } from "../events/event.repository.js";
+import { CheckoutPaymentRepository } from "../payments/checkout-payment.repository.js";
+import { TicketShareRepository } from "../payments/ticket-share.repository.js";
+
+const MOMENT_ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
 
 interface MomentInteractionContext {
   likeCounts: Map<string, number>;
@@ -40,21 +45,79 @@ export class MomentService {
     private readonly userFollowRepository = new UserFollowRepository(),
     private readonly momentReactionRepository = new MomentReactionRepository(),
     private readonly momentCommentRepository = new MomentCommentRepository(),
+    private readonly eventRepository = new EventRepository(),
+    private readonly checkoutPaymentRepository = new CheckoutPaymentRepository(),
+    private readonly ticketShareRepository = new TicketShareRepository(),
   ) {}
 
   public async createMoment(payload: CreateMomentDto, user: AuthUser): Promise<MomentResponse> {
+    let resolvedEventTitle = payload.eventTitle?.trim() || null;
+    let resolvedEventId = payload.eventId?.trim() || null;
+
+    if (resolvedEventId && payload.mode === "event") {
+      const event = await this.eventRepository.findById(resolvedEventId);
+
+      if (!event || event.status !== "published") {
+        throw new AppError("Event not found or not available.", httpStatus.NOT_FOUND);
+      }
+
+      const isOrganizer = event.userId.toString() === user.id;
+
+      if (!isOrganizer) {
+        const now = Date.now();
+        const scheduled = event.scheduledAt?.getTime() ?? null;
+        const isLiveOrActive = scheduled !== null && scheduled <= now && now - scheduled <= MOMENT_ACTIVE_EVENT_WINDOW_MS;
+
+        if (!isLiveOrActive) {
+          throw new AppError("You can only post Mooments for events that are currently live or active.", httpStatus.FORBIDDEN);
+        }
+
+        const [hasPurchased, hasShared] = await Promise.all([
+          this.checkoutPaymentRepository.hasUserPaidTicketForEvent(user.id, resolvedEventId),
+          this.ticketShareRepository.hasActiveShareForRecipientAtEvent(user.id, resolvedEventId),
+        ]);
+
+        if (!hasPurchased && !hasShared) {
+          throw new AppError("A valid ticket is required to post Mooments for this event.", httpStatus.FORBIDDEN);
+        }
+      }
+
+      if (event.name) {
+        resolvedEventTitle = event.name;
+      }
+    }
+
     const moment = await this.momentRepository.create({
       userId: user.id,
       mode: payload.mode,
       caption: payload.caption?.trim() || null,
       audience: payload.audience,
       taggedPeople: payload.taggedPeople ?? [],
-      eventTitle: payload.eventTitle?.trim() || null,
+      eventTitle: resolvedEventTitle,
+      eventId: resolvedEventId,
       eventCode: payload.eventCode?.trim() || null,
       mediaItems: payload.mediaItems ?? [],
     });
 
     return this.toResponse(moment, undefined, user, new Set(), this.emptyInteractionContext());
+  }
+
+  public async listEventMoments(eventId: string, user: AuthUser): Promise<MomentResponse[]> {
+    const event = await this.eventRepository.findById(eventId);
+
+    if (!event || event.status !== "published") {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    const moments = await this.momentRepository.findByEventId(eventId);
+    const [viewerFollowingIds, interactionContext] = await Promise.all([
+      this.getViewerFollowingIdSet(user),
+      this.buildInteractionContext(moments, user),
+    ]);
+
+    return Promise.all(
+      moments.map((moment) => this.toResponse(moment, undefined, user, viewerFollowingIds, interactionContext)),
+    );
   }
 
   public async listMyMoments(user: AuthUser): Promise<MomentResponse[]> {
@@ -271,6 +334,7 @@ export class MomentService {
       audience: moment.audience,
       taggedPeople: moment.taggedPeople,
       eventTitle: moment.eventTitle ?? null,
+      eventId: moment.eventId?.toString() ?? null,
       eventCode: moment.eventCode ?? null,
       mediaItems,
       likesCount: interactionSummary.likesCount,

@@ -81,6 +81,11 @@ export const momentValidation = {
       id: objectId,
     }),
   }),
+  eventMoments: z.object({
+    params: z.object({
+      eventId: objectId,
+    }),
+  }),
   profileTimeline: z.object({
     params: z.object({
       userId: objectId,
@@ -130,6 +135,7 @@ export const momentValidation = {
           .default([])
           .transform((names) => [...new Set(names)]),
         eventTitle: optionalText("Event", 200),
+        eventId: objectId.optional().nullable(),
         eventCode: optionalText("Event code", 200),
         mediaItems: z
           .array(mediaItem, {

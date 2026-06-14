@@ -45,6 +45,14 @@ export class MoomentCreditPaymentRepository {
     );
   }
 
+  public async decrementWallet(userId: string, credits: number): Promise<IMoomentCreditWallet | null> {
+    return MoomentCreditWalletModel.findOneAndUpdate(
+      { userId, balance: { $gte: credits } },
+      { $inc: { balance: -credits } },
+      { new: true, runValidators: true },
+    );
+  }
+
   public async createPurchase(payload: CreatePurchaseRecord): Promise<IMoomentCreditPurchase> {
     return MoomentCreditPurchaseModel.create(payload);
   }

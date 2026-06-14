@@ -29,6 +29,7 @@ export interface IMoment {
   audience: MomentAudience;
   taggedPeople: string[];
   eventTitle?: string | null;
+  eventId?: Types.ObjectId | null;
   eventCode?: string | null;
   mediaItems: MomentMediaItem[];
   createdAt: Date;
@@ -70,6 +71,7 @@ export interface CreateMomentDto {
   audience: MomentAudience;
   taggedPeople?: string[];
   eventTitle?: string | null;
+  eventId?: string | null;
   eventCode?: string | null;
   mediaItems?: MomentMediaItem[];
 }
@@ -92,6 +94,7 @@ export interface MomentResponse {
   audience: MomentAudience;
   taggedPeople: string[];
   eventTitle?: string | null;
+  eventId?: string | null;
   eventCode?: string | null;
   mediaItems: MomentMediaItem[];
   likesCount: number;

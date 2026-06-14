@@ -6,6 +6,7 @@ import type {
   CreateEventTicketDto,
   CreateEventRewardDto,
   EventMapQuery,
+  NowModeQuery,
   PublishEventDto,
   SaveEventDraftDto,
   UpdateEventRewardDto,
@@ -340,6 +341,31 @@ export class EventController {
     });
   };
 
+  public listMyPostTagEvents = async (req: Request, res: Response): Promise<void> => {
+    const events = await this.eventService.listMyPostTagEvents(req.authUser as AuthUser);
+
+    ApiResponse.success(res, {
+      message: "Post tag events retrieved",
+      data: {
+        events,
+      },
+    });
+  };
+
+  public getTicketAccess = async (req: Request, res: Response): Promise<void> => {
+    const access = await this.eventService.getTicketAccess(
+      req.authUser as AuthUser,
+      req.params.id as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Ticket access retrieved",
+      data: {
+        access,
+      },
+    });
+  };
+
   public listMyProfileEvents = async (req: Request, res: Response): Promise<void> => {
     const events = await this.eventService.listMyProfileEvents(req.authUser as AuthUser);
 
@@ -376,11 +402,44 @@ export class EventController {
     });
   };
 
+  public listNowModeEvents = async (req: Request, res: Response): Promise<void> => {
+    const events = await this.eventService.listNowModeEvents(req.query as unknown as NowModeQuery);
+
+    ApiResponse.success(res, {
+      message: "Now mode events retrieved",
+      data: {
+        events,
+      },
+    });
+  };
+
   public getEventById = async (req: Request, res: Response): Promise<void> => {
     const event = await this.eventService.getEventById(req.authUser as AuthUser, req.params.id as string);
 
     ApiResponse.success(res, {
       message: "Event retrieved",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public completeEvent = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.completeEvent(req.authUser as AuthUser, req.params.id as string);
+
+    ApiResponse.success(res, {
+      message: "Event marked as completed",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public cancelEvent = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.cancelEvent(req.authUser as AuthUser, req.params.id as string);
+
+    ApiResponse.success(res, {
+      message: "Event cancelled and refunds issued",
       data: {
         event,
       },

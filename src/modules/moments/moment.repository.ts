@@ -14,9 +14,20 @@ export class MomentRepository {
       audience: payload.audience,
       taggedPeople: payload.taggedPeople ?? [],
       eventTitle: payload.eventTitle ?? null,
+      eventId: payload.eventId ?? null,
       eventCode: payload.eventCode ?? null,
       mediaItems: payload.mediaItems ?? [],
     });
+  }
+
+  public async findByEventId(eventId: string, limit = 50): Promise<IMoment[]> {
+    return MomentModel.find({
+      mode: "event",
+      audience: "public",
+      eventId,
+    })
+      .sort({ createdAt: -1 })
+      .limit(limit);
   }
 
   public async findByUserId(userId: string): Promise<IMoment[]> {

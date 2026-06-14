@@ -46,6 +46,11 @@ router.post(
   validate(momentValidation.createComment),
   catchAsync(controller.createMomentComment),
 );
+router.get(
+  "/event/:eventId",
+  validate(momentValidation.eventMoments),
+  catchAsync(controller.listEventMoments),
+);
 router.get("/", catchAsync(controller.listFeedMoments));
 router.get("/mine", catchAsync(controller.listMyMoments));
 

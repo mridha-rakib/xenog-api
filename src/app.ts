@@ -24,7 +24,18 @@ export const createApp = () => {
     }),
   );
   app.use(compression());
-  app.use(express.json({ limit: bodyLimit }));
+  app.use(
+    express.json({
+      limit: bodyLimit,
+      verify: (req, _res, buf) => {
+        const request = req as express.Request;
+
+        if (request.originalUrl === `${env.API_PREFIX}/payments/stripe/webhook`) {
+          request.rawBody = Buffer.from(buf);
+        }
+      },
+    }),
+  );
   app.use(express.urlencoded({ extended: true, limit: bodyLimit }));
   app.use(requestLogger);
   app.use(

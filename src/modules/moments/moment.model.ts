@@ -87,6 +87,13 @@ const momentSchema = new Schema<IMoment>(
       maxlength: 200,
       default: null,
     },
+    eventId: {
+      type: Schema.Types.ObjectId,
+      ref: "Event",
+      default: null,
+      index: true,
+      sparse: true,
+    },
     eventCode: {
       type: String,
       trim: true,

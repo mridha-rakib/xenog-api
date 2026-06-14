@@ -115,4 +115,14 @@ export class MomentController {
       data: timeline,
     });
   };
+
+  public listEventMoments = async (req: Request, res: Response): Promise<void> => {
+    const { eventId } = req.params as { eventId: string };
+    const moments = await this.momentService.listEventMoments(eventId, req.authUser as AuthUser);
+
+    ApiResponse.success(res, {
+      message: "Event moments retrieved",
+      data: { moments },
+    });
+  };
 }

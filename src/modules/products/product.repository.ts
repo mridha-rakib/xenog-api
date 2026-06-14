@@ -42,6 +42,17 @@ export class ProductRepository {
     });
   }
 
+  public async findPublishedByIds(ids: string[]): Promise<IProduct[]> {
+    if (ids.length === 0) {
+      return [];
+    }
+
+    return ProductModel.find({
+      _id: { $in: ids },
+      $or: [{ status: "published" }, { status: { $exists: false } }],
+    });
+  }
+
   public async updateByIdForUser(id: string, userId: string, payload: CreateProductDto): Promise<IProduct | null> {
     return ProductModel.findOneAndUpdate(
       { _id: id, userId },

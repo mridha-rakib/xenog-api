@@ -1,6 +1,6 @@
 import type { Types } from "mongoose";
 
-export const eventStatuses = ["draft", "published"] as const;
+export const eventStatuses = ["draft", "published", "completed", "cancelled"] as const;
 export type EventStatus = (typeof eventStatuses)[number];
 
 export const eventAgeRestrictions = ["all_ages", "18_plus", "21_plus"] as const;
@@ -120,6 +120,8 @@ export interface IEvent {
   rewards: EventReward[];
   privacy: EventPrivacy;
   publishedAt?: Date | null;
+  completedAt?: Date | null;
+  cancelledAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -174,6 +176,8 @@ export interface EventResponse {
   rewards: EventReward[];
   privacy: EventPrivacy;
   publishedAt?: Date | null;
+  completedAt?: Date | null;
+  cancelledAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -197,4 +201,32 @@ export interface RewardClaimResponse {
   rewardId: string;
   claimedAt: Date;
   createdAt: Date;
+}
+
+export type NowEventStatus = "live_now" | "starting_soon" | "last_call";
+
+export interface NowModeQuery {
+  latitude?: number;
+  longitude?: number;
+  radiusKm?: number;
+  limit?: number;
+}
+
+export interface NowModeEventResponse extends EventResponse {
+  nowStatus: NowEventStatus;
+}
+
+export type PostTagEventStatus = "live" | "active" | "upcoming";
+
+export interface PostTagEventResponse {
+  id: string;
+  name: string;
+  bannerImageUrl?: string | null;
+  scheduledAt: Date;
+  location?: EventLocation | null;
+  postTagStatus: PostTagEventStatus;
+}
+
+export interface TicketAccessResponse {
+  hasAccess: boolean;
 }

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { cartRoutes } from "../modules/cart/cart.route.js";
 import { chatRoutes } from "../modules/chat/chat.route.js";
 import { eventRoutes } from "../modules/events/event.route.js";
 import { healthRoutes } from "../modules/health/health.route.js";
@@ -17,6 +18,7 @@ import { momentRoutes } from "../modules/moments/moment.route.js";
 const router = Router();
 
 router.use("/auth", authRoutes);
+router.use("/cart", cartRoutes);
 router.use("/chat", chatRoutes);
 router.use("/events", eventRoutes);
 router.use("/health", healthRoutes);

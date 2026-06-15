@@ -43,15 +43,16 @@ const ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
 const NOW_MODE_LOOKAHEAD_MS = 3 * 60 * 60 * 1000;
 const STARTING_SOON_MS = 60 * 60 * 1000;
 
-const getNowStatus = (scheduledAt: Date | null | undefined): NowEventStatus | null => {
+const getNowStatus = (scheduledAt: Date | null | undefined, endAt?: Date | null): NowEventStatus | null => {
   if (!scheduledAt) {
     return null;
   }
 
   const now = Date.now();
   const scheduled = scheduledAt.getTime();
+  const ended = endAt?.getTime() ?? null;
 
-  if (scheduled <= now && now - scheduled <= ACTIVE_EVENT_WINDOW_MS) {
+  if (scheduled <= now && (ended ? ended >= now : now - scheduled <= ACTIVE_EVENT_WINDOW_MS)) {
     return "live_now";
   }
 
@@ -471,7 +472,7 @@ export class EventService {
     const activeSince = new Date(now - ACTIVE_EVENT_WINDOW_MS);
 
     // Own events: organizer can tag live, active, or upcoming events
-    const ownEvents = await this.eventRepository.findActiveAndUpcomingByUserId(user.id, activeSince);
+    const ownEvents = await this.eventRepository.findActiveAndUpcomingByUserId(user.id, activeSince, new Date(now));
 
     // Ticket-holder events: only live + active (already started, within 12h window)
     const [paidEventIds, sharedEventIds] = await Promise.all([
@@ -501,9 +502,11 @@ export class EventService {
         const scheduled = event.scheduledAt?.getTime() ?? null;
         let postTagStatus: PostTagEventStatus;
 
+        const ended = event.endAt?.getTime() ?? null;
+
         if (scheduled === null || scheduled > now) {
           postTagStatus = "upcoming";
-        } else if (now - scheduled <= NOW_MODE_LOOKAHEAD_MS) {
+        } else if (ended ? ended >= now : now - scheduled <= NOW_MODE_LOOKAHEAD_MS) {
           postTagStatus = "live";
         } else {
           postTagStatus = "active";
@@ -627,7 +630,7 @@ export class EventService {
 
     return events
       .map((event) => {
-        const nowStatus = getNowStatus(event.scheduledAt ?? null);
+        const nowStatus = getNowStatus(event.scheduledAt ?? null, event.endAt ?? null);
 
         if (!nowStatus) {
           return null;
@@ -698,6 +701,10 @@ export class EventService {
       normalized.category = payload.category ?? null;
     }
 
+    if ("endAt" in payload) {
+      normalized.endAt = payload.endAt ?? null;
+    }
+
     if ("location" in payload) {
       normalized.location = payload.location
         ? {
@@ -731,6 +738,7 @@ export class EventService {
       ageRestriction: payload.ageRestriction,
       category: payload.category,
       scheduledAt: payload.scheduledAt,
+      endAt: payload.endAt,
       location: draftPayload.location ?? {},
       tickets: payload.tickets.map((ticket) => this.normalizeTicket(ticket)),
       privacy: payload.privacy,
@@ -975,6 +983,7 @@ export class EventService {
       ageRestriction: event.ageRestriction ?? null,
       category: event.category ?? null,
       scheduledAt: event.scheduledAt ?? null,
+      endAt: event.endAt ?? null,
       location: event.location ?? null,
       tickets: event.tickets,
       rewards: this.normalizeExistingRewards(event.rewards),

@@ -278,6 +278,11 @@ const eventSchema = new Schema<IEvent>(
       default: null,
       index: true,
     },
+    endAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
     location: {
       type: eventLocationSchema,
       default: null,

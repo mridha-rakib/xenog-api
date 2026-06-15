@@ -115,6 +115,7 @@ export interface IEvent {
   ageRestriction?: EventAgeRestriction | null;
   category?: EventCategory | null;
   scheduledAt?: Date | null;
+  endAt?: Date | null;
   location?: EventLocation | null;
   tickets: EventTicket[];
   rewards: EventReward[];
@@ -135,6 +136,7 @@ export interface SaveEventDraftDto {
   ageRestriction?: EventAgeRestriction | null;
   category?: EventCategory | null;
   scheduledAt?: Date | null;
+  endAt?: Date | null;
   location?: EventLocation | null;
   tickets?: EventTicketInput[];
   rewards?: EventRewardInput[];
@@ -152,6 +154,7 @@ export interface PublishEventDto extends SaveEventDraftDto {
   ageRestriction: EventAgeRestriction;
   category: EventCategory;
   scheduledAt: Date;
+  endAt: Date;
   location: EventLocation;
   tickets: EventTicketInput[];
   rewards?: EventRewardInput[];
@@ -171,6 +174,7 @@ export interface EventResponse {
   ageRestriction?: EventAgeRestriction | null;
   category?: EventCategory | null;
   scheduledAt?: Date | null;
+  endAt?: Date | null;
   location?: EventLocation | null;
   tickets: EventTicket[];
   rewards: EventReward[];

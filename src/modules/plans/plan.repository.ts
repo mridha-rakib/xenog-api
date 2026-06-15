@@ -13,6 +13,7 @@ export class PlanRepository {
       title: payload.title,
       scheduledAt: payload.scheduledAt,
       timeLabel: payload.timeLabel ?? null,
+      eventId: payload.eventId ?? null,
       eventTitle: payload.eventTitle ?? null,
       location: payload.location,
       friendIds: payload.friendIds ?? [],

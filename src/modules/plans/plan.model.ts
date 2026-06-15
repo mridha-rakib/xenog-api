@@ -52,6 +52,12 @@ const planSchema = new Schema<IPlan>(
       maxlength: 40,
       default: null,
     },
+    eventId: {
+      type: Schema.Types.ObjectId,
+      ref: "Event",
+      default: null,
+      index: true,
+    },
     eventTitle: {
       type: String,
       trim: true,

@@ -6,12 +6,27 @@ export interface PlanLocation {
   longitude?: number | null;
 }
 
+export interface PlanEventSummary {
+  id: string;
+  title?: string | null;
+  bannerImageKey?: string | null;
+  bannerOriginalImageKey?: string | null;
+}
+
+export interface PlanFriendSummary {
+  id: string;
+  name: string;
+  username?: string;
+  avatarKey?: string | null;
+}
+
 export interface IPlan {
   _id: Types.ObjectId;
   userId: Types.ObjectId;
   title: string;
   scheduledAt: Date;
   timeLabel?: string | null;
+  eventId?: Types.ObjectId | null;
   eventTitle?: string | null;
   location: PlanLocation;
   friendIds: Types.ObjectId[];
@@ -25,6 +40,7 @@ export interface CreatePlanDto {
   title: string;
   scheduledAt: Date;
   timeLabel?: string | null;
+  eventId?: string | null;
   eventTitle?: string | null;
   location: PlanLocation;
   friendIds?: string[];
@@ -36,6 +52,7 @@ export interface UpdatePlanDto {
   title?: string;
   scheduledAt?: Date;
   timeLabel?: string | null;
+  eventId?: string | null;
   eventTitle?: string | null;
   location?: PlanLocation;
   friendIds?: string[];
@@ -55,10 +72,13 @@ export interface PlanResponse {
   title: string;
   scheduledAt: Date;
   timeLabel?: string | null;
+  eventId?: string | null;
   eventTitle?: string | null;
   location: PlanLocation;
   friendIds: string[];
   friendNames: string[];
+  event?: PlanEventSummary | null;
+  friends: PlanFriendSummary[];
   notes?: string | null;
   createdAt: Date;
   updatedAt: Date;

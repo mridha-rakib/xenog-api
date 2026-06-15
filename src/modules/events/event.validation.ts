@@ -19,6 +19,40 @@ const optionalText = (label: string, maxLength: number) =>
     .nullable()
     .transform((value) => value || null);
 
+const dateTime = (label: string) =>
+  z.preprocess(
+    (value) => {
+      if (value === undefined || value === null || value === "") {
+        return value;
+      }
+
+      const parsed = new Date(value as string | number | Date);
+      return Number.isNaN(parsed.getTime()) ? value : parsed;
+    },
+    z.date({
+      invalid_type_error: `${label} must be a valid date and time`,
+      required_error: `${label} is required`,
+    }),
+  );
+
+const optionalDateTime = (label: string) =>
+  z.preprocess(
+    (value) => {
+      if (value === undefined || value === null || value === "") {
+        return null;
+      }
+
+      const parsed = new Date(value as string | number | Date);
+      return Number.isNaN(parsed.getTime()) ? value : parsed;
+    },
+    z
+      .date({
+        invalid_type_error: `${label} must be a valid date and time`,
+        required_error: `${label} is required`,
+      })
+      .nullable(),
+  ).transform((value) => value ?? null);
+
 const queryNumber = (schema: z.ZodNumber) =>
   z.preprocess(
     (value) => {
@@ -170,7 +204,7 @@ const updateEventReward = z
     message: "At least one reward field is required",
   });
 
-const draftBody = z
+const draftBodyBase = z
   .object({
     name: optionalText("Event name", 160),
     description: optionalText("Description", 5000),
@@ -179,24 +213,38 @@ const draftBody = z
     bannerImageDisplay,
     ageRestriction: z.enum(eventAgeRestrictions).optional().nullable(),
     category: optionalEventCategory,
-    scheduledAt: z.coerce.date().optional().nullable().transform((value) => value ?? null),
+    scheduledAt: optionalDateTime("Start time"),
+    endAt: optionalDateTime("End time"),
     location: eventLocation.optional().nullable(),
     tickets: z.array(eventTicket).max(100).optional(),
     privacy: z.enum(eventPrivacyOptions).default("public").optional(),
   })
   .strict();
 
-const publishBody = draftBody.extend({
+const validateEventDateRange = (event: { scheduledAt?: Date | null; endAt?: Date | null }, ctx: z.RefinementCtx) => {
+  if (event.scheduledAt && event.endAt && event.endAt <= event.scheduledAt) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "End time must be after the start time",
+      path: ["endAt"],
+    });
+  }
+};
+
+const draftBody = draftBodyBase.superRefine(validateEventDateRange);
+
+const publishBody = draftBodyBase.extend({
   name: z.string().trim().min(1, "Event name is required").max(160),
   ageRestriction: z.enum(eventAgeRestrictions),
   category: eventCategory,
-  scheduledAt: z.coerce.date(),
+  scheduledAt: dateTime("Start time"),
+  endAt: dateTime("End time"),
   location: eventLocation.refine((value) => Boolean(value.venue || value.address || value.searchLabel), {
     message: "Location is required",
   }),
   tickets: z.array(eventTicket).max(100).default([]),
   privacy: z.enum(eventPrivacyOptions).default("public"),
-});
+}).superRefine(validateEventDateRange);
 
 const mapQuery = z
   .object({

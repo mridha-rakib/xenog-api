@@ -52,33 +52,27 @@ export class MomentService {
 
   public async createMoment(payload: CreateMomentDto, user: AuthUser): Promise<MomentResponse> {
     let resolvedEventTitle = payload.eventTitle?.trim() || null;
-    let resolvedEventId = payload.eventId?.trim() || null;
+    const resolvedEventId = payload.eventId?.trim() || null;
 
-    if (resolvedEventId && payload.mode === "event") {
+    if (resolvedEventId) {
       const event = await this.eventRepository.findById(resolvedEventId);
 
       if (!event || event.status !== "published") {
         throw new AppError("Event not found or not available.", httpStatus.NOT_FOUND);
       }
 
-      const isOrganizer = event.userId.toString() === user.id;
+      if (!this.isPostTaggableEvent(event)) {
+        throw new AppError("You can only tag upcoming, live, or active events.", httpStatus.FORBIDDEN);
+      }
 
-      if (!isOrganizer) {
-        const now = Date.now();
-        const scheduled = event.scheduledAt?.getTime() ?? null;
-        const isLiveOrActive = scheduled !== null && scheduled <= now && now - scheduled <= MOMENT_ACTIVE_EVENT_WINDOW_MS;
-
-        if (!isLiveOrActive) {
-          throw new AppError("You can only post Mooments for events that are currently live or active.", httpStatus.FORBIDDEN);
-        }
-
+      if (event.privacy === "private" && event.userId.toString() !== user.id) {
         const [hasPurchased, hasShared] = await Promise.all([
           this.checkoutPaymentRepository.hasUserPaidTicketForEvent(user.id, resolvedEventId),
           this.ticketShareRepository.hasActiveShareForRecipientAtEvent(user.id, resolvedEventId),
         ]);
 
         if (!hasPurchased && !hasShared) {
-          throw new AppError("A valid ticket is required to post Mooments for this event.", httpStatus.FORBIDDEN);
+          throw new AppError("A valid ticket is required to tag this event.", httpStatus.FORBIDDEN);
         }
       }
 
@@ -100,6 +94,18 @@ export class MomentService {
     });
 
     return this.toResponse(moment, undefined, user, new Set(), this.emptyInteractionContext());
+  }
+
+  private isPostTaggableEvent(event: { scheduledAt?: Date | null; endAt?: Date | null }): boolean {
+    const now = Date.now();
+    const scheduled = event.scheduledAt?.getTime() ?? null;
+    const ended = event.endAt?.getTime() ?? null;
+
+    if (ended !== null) {
+      return ended >= now;
+    }
+
+    return scheduled === null || scheduled >= now - MOMENT_ACTIVE_EVENT_WINDOW_MS;
   }
 
   public async listEventMoments(eventId: string, user: AuthUser): Promise<MomentResponse[]> {

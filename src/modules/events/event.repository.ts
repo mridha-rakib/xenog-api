@@ -71,6 +71,20 @@ export class EventRepository {
     }).sort({ scheduledAt: 1, _id: -1 });
   }
 
+  public async findPublicPostTaggable(activeSince: Date, now: Date, limit = 100): Promise<IEvent[]> {
+    return EventModel.find({
+      status: "published",
+      privacy: "public",
+      $or: [
+        { endAt: { $gte: now } },
+        { endAt: null, scheduledAt: { $gte: activeSince } },
+        { endAt: { $exists: false }, scheduledAt: { $gte: activeSince } },
+      ],
+    })
+      .sort({ scheduledAt: 1, publishedAt: -1, _id: -1 })
+      .limit(limit);
+  }
+
   public async findLiveActiveByIds(eventIds: string[], activeSince: Date, until: Date): Promise<IEvent[]> {
     if (eventIds.length === 0) {
       return [];

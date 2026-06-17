@@ -22,7 +22,6 @@ export class MomentRepository {
 
   public async findByEventId(eventId: string, limit = 50): Promise<IMoment[]> {
     return MomentModel.find({
-      mode: "event",
       audience: "public",
       eventId,
     })

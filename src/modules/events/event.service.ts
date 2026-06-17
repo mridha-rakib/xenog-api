@@ -471,27 +471,36 @@ export class EventService {
     const now = Date.now();
     const activeSince = new Date(now - ACTIVE_EVENT_WINDOW_MS);
 
-    // Own events: organizer can tag live, active, or upcoming events
-    const ownEvents = await this.eventRepository.findActiveAndUpcomingByUserId(user.id, activeSince, new Date(now));
+    const nowDate = new Date(now);
 
-    // Ticket-holder events: only live + active (already started, within 12h window)
+    // Public events can be tagged by any user while they are upcoming, live, or active.
+    const [publicEvents, ownEvents] = await Promise.all([
+      this.eventRepository.findPublicPostTaggable(activeSince, nowDate),
+      this.eventRepository.findActiveAndUpcomingByUserId(user.id, activeSince, nowDate),
+    ]);
+
+    // Private ticket-holder events remain available only when live or active.
     const [paidEventIds, sharedEventIds] = await Promise.all([
       this.checkoutPaymentRepository.findPaidTicketEventIdsByUser(user.id),
       this.ticketShareRepository.findActiveEventIdsByRecipient(user.id),
     ]);
 
-    const ownEventIdSet = new Set(ownEvents.map((e) => e._id.toString()));
+    const directlyAvailableEventIdSet = new Set([...publicEvents, ...ownEvents].map((e) => e._id.toString()));
     const foreignTicketEventIds = [...new Set([...paidEventIds, ...sharedEventIds])].filter(
-      (id) => !ownEventIdSet.has(id),
+      (id) => !directlyAvailableEventIdSet.has(id),
     );
 
     const ticketEvents = await this.eventRepository.findLiveActiveByIds(
       foreignTicketEventIds,
       activeSince,
-      new Date(now),
+      nowDate,
     );
 
-    const allEvents = [...ownEvents, ...ticketEvents];
+    const eventById = new Map<string, IEvent>();
+    [...publicEvents, ...ownEvents, ...ticketEvents].forEach((event) => {
+      eventById.set(event._id.toString(), event);
+    });
+    const allEvents = [...eventById.values()];
 
     return Promise.all(
       allEvents.map(async (event) => {

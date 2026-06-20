@@ -18,6 +18,7 @@ import type {
   CreateEventRewardDto,
   EventHostResponse,
   EventMapQuery,
+  EventMemberResponse,
   EventReward,
   EventRewardInput,
   ProfileEventGroupsResponse,
@@ -467,6 +468,12 @@ export class EventService {
     return events.map((event) => this.toResponse(event));
   }
 
+  public async listMyDraftEvents(user: AuthUser): Promise<EventResponse[]> {
+    const events = await this.eventRepository.findDraftsByUserId(user.id);
+
+    return events.map((event) => this.toResponse(event));
+  }
+
   public async listMyPostTagEvents(user: AuthUser): Promise<PostTagEventResponse[]> {
     const now = Date.now();
     const activeSince = new Date(now - ACTIVE_EVENT_WINDOW_MS);
@@ -667,6 +674,13 @@ export class EventService {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
+    if (event.privacy === "private" && !isOwner) {
+      const isMember = event.memberUserIds.some((id) => id.toString() === user.id);
+      if (!isMember) {
+        throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+      }
+    }
+
     const host = await this.userRepository.findById(event.userId.toString());
     const [avatarUrl, followersCount, eventsCount, isFollowing] = await Promise.all([
       host?.avatarKey ? this.storageService.createDownloadUrl(host.avatarKey).then((download) => download.url) : Promise.resolve(null),
@@ -681,6 +695,74 @@ export class EventService {
       eventsCount,
       isFollowing,
     });
+  }
+
+  public async listEventMembers(user: AuthUser, eventId: string): Promise<EventMemberResponse[]> {
+    const event = await this.getEventForOwner(user, eventId);
+    return this.resolveMemberResponses(event.memberUserIds.map((id) => id.toString()));
+  }
+
+  public async addEventMember(user: AuthUser, eventId: string, memberId: string): Promise<EventMemberResponse[]> {
+    const event = await this.eventRepository.findByIdForUser(eventId, user.id);
+
+    if (!event) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    if (event.privacy !== "private") {
+      throw new AppError("Members can only be added to private events.", httpStatus.BAD_REQUEST);
+    }
+
+    if (memberId === user.id) {
+      throw new AppError("You cannot add yourself as a member.", httpStatus.BAD_REQUEST);
+    }
+
+    const memberUser = await this.userRepository.findById(memberId);
+
+    if (!memberUser) {
+      throw new AppError("User not found.", httpStatus.NOT_FOUND);
+    }
+
+    const updatedEvent = await this.eventRepository.addMemberById(eventId, user.id, memberId);
+
+    if (!updatedEvent) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    return this.resolveMemberResponses(updatedEvent.memberUserIds.map((id) => id.toString()));
+  }
+
+  public async removeEventMember(user: AuthUser, eventId: string, memberId: string): Promise<EventMemberResponse[]> {
+    const updatedEvent = await this.eventRepository.removeMemberById(eventId, user.id, memberId);
+
+    if (!updatedEvent) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    return this.resolveMemberResponses(updatedEvent.memberUserIds.map((id) => id.toString()));
+  }
+
+  private async resolveMemberResponses(memberIds: string[]): Promise<EventMemberResponse[]> {
+    if (memberIds.length === 0) {
+      return [];
+    }
+
+    const users = await this.userRepository.findMany({ _id: { $in: memberIds } }, 0, memberIds.length);
+    const urlResults = await Promise.all(
+      users.map((u) =>
+        u.avatarKey
+          ? this.storageService.createDownloadUrl(u.avatarKey).then((d) => d.url).catch(() => null)
+          : Promise.resolve(null),
+      ),
+    );
+
+    return users.map((u, i) => ({
+      id: u._id.toString(),
+      name: u.name,
+      username: u.username,
+      avatarKey: u.avatarKey ?? null,
+      avatarUrl: urlResults[i],
+    }));
   }
 
   private normalizeDraftPayload(payload: SaveEventDraftDto): SaveEventDraftDto {
@@ -720,6 +802,7 @@ export class EventService {
             searchLabel: payload.location.searchLabel?.trim() || null,
             venue: payload.location.venue?.trim() || null,
             address: payload.location.address?.trim() || null,
+            additionalInfo: payload.location.additionalInfo?.trim() || null,
             latitude: payload.location.latitude ?? null,
             longitude: payload.location.longitude ?? null,
           }

@@ -105,6 +105,7 @@ const eventLocation = z
     searchLabel: optionalText("Location", 240),
     venue: optionalText("Venue", 160),
     address: optionalText("Address", 240),
+    additionalInfo: optionalText("Additional info", 500),
     latitude: z.number().min(-90).max(90).optional().nullable(),
     longitude: z.number().min(-180).max(180).optional().nullable(),
   })
@@ -390,6 +391,25 @@ export const eventValidation = {
   getEventRewardClaims: z.object({
     params: z.object({
       id: objectId,
+    }),
+  }),
+  listEventMembers: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+  }),
+  addEventMember: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+    body: z.object({
+      userId: objectId,
+    }),
+  }),
+  removeEventMember: z.object({
+    params: z.object({
+      id: objectId,
+      userId: objectId,
     }),
   }),
 };

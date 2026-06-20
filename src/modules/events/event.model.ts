@@ -30,6 +30,12 @@ const eventLocationSchema = new Schema<EventLocation>(
       maxlength: 240,
       default: null,
     },
+    additionalInfo: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: null,
+    },
     latitude: {
       type: Number,
       min: -90,
@@ -300,6 +306,10 @@ const eventSchema = new Schema<IEvent>(
       enum: eventPrivacyOptions,
       required: true,
       default: "public",
+    },
+    memberUserIds: {
+      type: [{ type: Schema.Types.ObjectId, ref: "User" }],
+      default: [],
     },
     publishedAt: {
       type: Date,

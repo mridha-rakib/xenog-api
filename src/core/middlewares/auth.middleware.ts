@@ -52,3 +52,23 @@ export const authorizeRoles =
 
     next();
   };
+
+export const requireBusinessAccount: RequestHandler = (req, _res, next) => {
+  if (!req.authUser) {
+    next(new AppError("Authentication required", httpStatus.UNAUTHORIZED));
+    return;
+  }
+
+  if (req.authUser.accountType !== "business") {
+    next(
+      new AppError(
+        "A Business Account is required to create and manage events",
+        httpStatus.FORBIDDEN,
+        { code: "BUSINESS_ACCOUNT_REQUIRED" },
+      ),
+    );
+    return;
+  }
+
+  next();
+};

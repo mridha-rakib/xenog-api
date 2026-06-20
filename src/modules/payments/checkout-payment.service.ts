@@ -273,7 +273,7 @@ export class CheckoutPaymentService {
     }
 
     const currency = env.STRIPE_CURRENCY.toLowerCase();
-    const lineItems = await this.resolveLineItems(payload);
+    const lineItems = await this.resolveLineItems(user, payload);
     const subtotalAmount = roundCurrency(lineItems.reduce((sum, item) => sum + item.totalAmount, 0));
     const feeRate = getBuyerFeeRate(payload.paymentMethod);
     const platformFeeAmount = roundCurrency(subtotalAmount * feeRate);
@@ -526,12 +526,20 @@ export class CheckoutPaymentService {
     return this.stripe;
   }
 
-  private async resolveLineItems(payload: CreateCheckoutIntentDto): Promise<CheckoutOrderLineItem[]> {
+  private async resolveLineItems(user: AuthUser, payload: CreateCheckoutIntentDto): Promise<CheckoutOrderLineItem[]> {
     if (payload.kind === "ticket") {
       const event = await this.eventRepository.findById(payload.eventId);
 
       if (!event || event.status !== "published") {
         throw new AppError("Event not found", httpStatus.NOT_FOUND);
+      }
+
+      if (event.privacy === "private") {
+        const isOwner = event.userId.toString() === user.id;
+        const isMember = event.memberUserIds.some((id) => id.toString() === user.id);
+        if (!isOwner && !isMember) {
+          throw new AppError("You are not invited to this private event", httpStatus.FORBIDDEN);
+        }
       }
 
       const ticket = event.tickets.find((item) => item.id === payload.ticketId);

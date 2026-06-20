@@ -59,6 +59,10 @@ export class EventRepository {
     return EventModel.find({ userId }).sort({ createdAt: -1, _id: -1 });
   }
 
+  public async findDraftsByUserId(userId: string): Promise<IEvent[]> {
+    return EventModel.find({ userId, status: "draft" }).sort({ updatedAt: -1, _id: -1 });
+  }
+
   public async findActiveAndUpcomingByUserId(userId: string, activeSince: Date, now: Date): Promise<IEvent[]> {
     return EventModel.find({
       userId,
@@ -256,6 +260,22 @@ export class EventRepository {
       new: true,
       runValidators: true,
     });
+  }
+
+  public async addMemberById(eventId: string, hostUserId: string, memberId: string): Promise<IEvent | null> {
+    return EventModel.findOneAndUpdate(
+      { _id: eventId, userId: hostUserId, privacy: "private" },
+      { $addToSet: { memberUserIds: memberId } },
+      { new: true, runValidators: true },
+    );
+  }
+
+  public async removeMemberById(eventId: string, hostUserId: string, memberId: string): Promise<IEvent | null> {
+    return EventModel.findOneAndUpdate(
+      { _id: eventId, userId: hostUserId },
+      { $pull: { memberUserIds: memberId } },
+      { new: true, runValidators: true },
+    );
   }
 
   private toUpdate(payload: SaveEventDraftDto): UpdateQuery<IEvent> {

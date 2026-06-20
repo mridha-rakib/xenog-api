@@ -134,7 +134,6 @@ const checkoutOrderSchema = new Schema<ICheckoutOrder>(
       type: String,
       trim: true,
       default: null,
-      sparse: true,
     },
     stripeClientSecret: {
       type: String,

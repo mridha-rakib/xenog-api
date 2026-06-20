@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { catchAsync } from "../../core/http/catch-async.js";
-import { authenticate } from "../../core/middlewares/auth.middleware.js";
+import { authenticate, requireBusinessAccount } from "../../core/middlewares/auth.middleware.js";
 import { validate } from "../../core/middlewares/validate.middleware.js";
 import { EventController } from "./event.controller.js";
 import { eventValidation } from "./event.validation.js";
@@ -9,6 +9,14 @@ const router = Router();
 const controller = new EventController();
 
 router.use(authenticate);
+
+// Block all write operations for non-business accounts.
+// Exempt: GET (read-only) and the attendee reward-claim action.
+router.use((req, res, next) => {
+  if (req.method === "GET") return next();
+  if (req.method === "POST" && /\/rewards\/[^/]+\/claim$/.test(req.path)) return next();
+  requireBusinessAccount(req, res, next);
+});
 
 router.post("/drafts", validate(eventValidation.saveDraft), catchAsync(controller.saveDraft));
 router.patch("/drafts/:id", validate(eventValidation.updateDraft), catchAsync(controller.updateDraft));
@@ -38,6 +46,7 @@ router.post("/publish", validate(eventValidation.publish), catchAsync(controller
 router.post("/:id/publish", validate(eventValidation.publishDraft), catchAsync(controller.publishDraft));
 router.get("/mine/profile", catchAsync(controller.listMyProfileEvents));
 router.get("/mine/post-tag", catchAsync(controller.listMyPostTagEvents));
+router.get("/mine/drafts", catchAsync(controller.listMyDraftEvents));
 router.get("/mine", catchAsync(controller.listMyEvents));
 router.get("/:id/ticket-access", validate(eventValidation.eventParams), catchAsync(controller.getTicketAccess));
 router.get("/now", validate(eventValidation.nowModeEvents), catchAsync(controller.listNowModeEvents));
@@ -62,6 +71,9 @@ router.patch(
 router.delete("/:id/rewards/:rewardId", validate(eventValidation.eventRewardParams), catchAsync(controller.deleteEventReward));
 router.post("/:id/complete", validate(eventValidation.eventParams), catchAsync(controller.completeEvent));
 router.post("/:id/cancel", validate(eventValidation.eventParams), catchAsync(controller.cancelEvent));
+router.get("/:id/members", validate(eventValidation.listEventMembers), catchAsync(controller.listEventMembers));
+router.post("/:id/members", validate(eventValidation.addEventMember), catchAsync(controller.addEventMember));
+router.delete("/:id/members/:userId", validate(eventValidation.removeEventMember), catchAsync(controller.removeEventMember));
 router.patch("/:id", validate(eventValidation.updateEvent), catchAsync(controller.updateEvent));
 router.delete("/:id", validate(eventValidation.deleteEvent), catchAsync(controller.deleteEvent));
 router.get("/:id", validate(eventValidation.eventParams), catchAsync(controller.getEventById));

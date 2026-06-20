@@ -6,7 +6,7 @@ export type EventStatus = (typeof eventStatuses)[number];
 export const eventAgeRestrictions = ["all_ages", "18_plus", "21_plus"] as const;
 export type EventAgeRestriction = (typeof eventAgeRestrictions)[number];
 
-export const eventPrivacyOptions = ["public", "private"] as const;
+export const eventPrivacyOptions = ["public", "locked", "private"] as const;
 export type EventPrivacy = (typeof eventPrivacyOptions)[number];
 
 export const eventTicketTypes = ["free", "pay"] as const;
@@ -28,7 +28,7 @@ export const eventCategories = [
   "Games & Leisure",
   "Learning & Classes",
   "Markets & Trade",
-  "Sheet Performances",
+  "Street Performances",
   "Religious & Spiritual",
   "College Events",
   "Premium Experiences",
@@ -41,6 +41,7 @@ export interface EventLocation {
   searchLabel?: string | null;
   venue?: string | null;
   address?: string | null;
+  additionalInfo?: string | null;
   latitude?: number | null;
   longitude?: number | null;
 }
@@ -103,6 +104,14 @@ export interface EventHostResponse {
   isFollowing?: boolean;
 }
 
+export interface EventMemberResponse {
+  id: string;
+  name: string;
+  username?: string;
+  avatarKey?: string | null;
+  avatarUrl?: string | null;
+}
+
 export interface IEvent {
   _id: Types.ObjectId;
   userId: Types.ObjectId;
@@ -120,6 +129,7 @@ export interface IEvent {
   tickets: EventTicket[];
   rewards: EventReward[];
   privacy: EventPrivacy;
+  memberUserIds: Types.ObjectId[];
   publishedAt?: Date | null;
   completedAt?: Date | null;
   cancelledAt?: Date | null;

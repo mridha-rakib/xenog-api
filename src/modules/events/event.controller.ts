@@ -341,6 +341,17 @@ export class EventController {
     });
   };
 
+  public listMyDraftEvents = async (req: Request, res: Response): Promise<void> => {
+    const events = await this.eventService.listMyDraftEvents(req.authUser as AuthUser);
+
+    ApiResponse.success(res, {
+      message: "Draft events retrieved",
+      data: {
+        events,
+      },
+    });
+  };
+
   public listMyPostTagEvents = async (req: Request, res: Response): Promise<void> => {
     const events = await this.eventService.listMyPostTagEvents(req.authUser as AuthUser);
 
@@ -443,6 +454,42 @@ export class EventController {
       data: {
         event,
       },
+    });
+  };
+
+  public listEventMembers = async (req: Request, res: Response): Promise<void> => {
+    const members = await this.eventService.listEventMembers(req.authUser as AuthUser, req.params.id as string);
+
+    ApiResponse.success(res, {
+      message: "Event members retrieved",
+      data: { members },
+    });
+  };
+
+  public addEventMember = async (req: Request, res: Response): Promise<void> => {
+    const members = await this.eventService.addEventMember(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      (req.body as { userId: string }).userId,
+    );
+
+    ApiResponse.success(res, {
+      statusCode: httpStatus.CREATED,
+      message: "Member added",
+      data: { members },
+    });
+  };
+
+  public removeEventMember = async (req: Request, res: Response): Promise<void> => {
+    const members = await this.eventService.removeEventMember(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.userId as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Member removed",
+      data: { members },
     });
   };
 }

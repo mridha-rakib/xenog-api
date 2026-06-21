@@ -97,6 +97,25 @@ Password: minioadmin
 
 If `.env` contains `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, or `REDIS_PASSWORD`, those values will be used instead of the defaults.
 
+## Sharing MongoDB Between Environments
+
+MongoDB stores object keys, not the image or video bytes. If local and deployed APIs use the same MongoDB database, they must also use the same MinIO bucket or the objects must be migrated between the two buckets.
+
+To copy missing objects from local MinIO to the deployed MinIO, run this on the machine where local MinIO and its data are available:
+
+```bash
+TARGET_MINIO_ENDPOINT=api.mooment.dev \
+TARGET_MINIO_PORT=443 \
+TARGET_MINIO_USE_SSL=true \
+TARGET_MINIO_ACCESS_KEY='<deployed access key>' \
+TARGET_MINIO_SECRET_KEY='<deployed secret key>' \
+npm run storage:migrate
+```
+
+The command reads the source MinIO settings from `.env`, preserves object keys and metadata, and skips objects that already exist at the destination. Set `MIGRATE_STORAGE_OVERWRITE=true` only when existing destination objects should be replaced.
+
+After migration, either configure local development to use the deployed MinIO endpoint and credentials or use a separate local MongoDB database. Sharing only MongoDB will create records whose media exists in just one environment.
+
 ## Admin Seed
 
 The backend automatically seeds an admin user when the server starts. Set these values in `.env`:

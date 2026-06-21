@@ -19,10 +19,13 @@ import type {
   MomentInteractionSummaryResponse,
   MomentMediaItem,
   MomentResponse,
+  MomentSaveSummaryResponse,
   MomentTimelineItemResponse,
 } from "./moment.interface.js";
 import { MomentCommentRepository } from "./moment-comment.repository.js";
+import { MomentCommentReactionRepository } from "./moment-comment-reaction.repository.js";
 import { MomentReactionRepository } from "./moment-reaction.repository.js";
+import { MomentSaveRepository } from "./moment-save.repository.js";
 import { EventRepository } from "../events/event.repository.js";
 import { CheckoutPaymentRepository } from "../payments/checkout-payment.repository.js";
 import { TicketShareRepository } from "../payments/ticket-share.repository.js";
@@ -34,6 +37,7 @@ interface MomentInteractionContext {
   commentCounts: Map<string, number>;
   shareCounts: Map<string, number>;
   likedMomentIds: Set<string>;
+  savedMomentIds: Set<string>;
 }
 
 export class MomentService {
@@ -45,6 +49,8 @@ export class MomentService {
     private readonly userFollowRepository = new UserFollowRepository(),
     private readonly momentReactionRepository = new MomentReactionRepository(),
     private readonly momentCommentRepository = new MomentCommentRepository(),
+    private readonly momentCommentReactionRepository = new MomentCommentReactionRepository(),
+    private readonly momentSaveRepository = new MomentSaveRepository(),
     private readonly eventRepository = new EventRepository(),
     private readonly checkoutPaymentRepository = new CheckoutPaymentRepository(),
     private readonly ticketShareRepository = new TicketShareRepository(),
@@ -191,6 +197,52 @@ export class MomentService {
     return this.getInteractionSummary(momentId, user);
   }
 
+  public async toggleMomentSave(momentId: string, user: AuthUser): Promise<MomentSaveSummaryResponse> {
+    await this.getViewableMoment(momentId, user);
+    const { isSaved } = await this.momentSaveRepository.toggleSave(user.id, momentId);
+
+    return { momentId, isSaved };
+  }
+
+  public async listSavedMoments(user: AuthUser): Promise<MomentResponse[]> {
+    const saves = await this.momentSaveRepository.findByUserId(user.id);
+    const momentIds = saves.map((s) => s.momentId.toString());
+    const moments = await this.momentRepository.findByIds(momentIds);
+
+    const [viewerFollowingIds, interactionContext] = await Promise.all([
+      this.getViewerFollowingIdSet(user),
+      this.buildInteractionContext(moments, user),
+    ]);
+
+    const momentById = new Map(moments.map((m) => [m._id.toString(), m]));
+    const orderedMoments = momentIds
+      .map((id) => momentById.get(id))
+      .filter((m): m is IMoment => m !== undefined);
+
+    return Promise.all(
+      orderedMoments.map((moment) => this.toResponse(moment, undefined, user, viewerFollowingIds, interactionContext)),
+    );
+  }
+
+  public async toggleCommentReaction(
+    momentId: string,
+    commentId: string,
+    user: AuthUser,
+  ): Promise<{ isLiked: boolean; likesCount: number }> {
+    await this.getViewableMoment(momentId, user);
+
+    const comment = await this.momentCommentRepository.findById(commentId);
+
+    if (!comment || comment.momentId.toString() !== momentId) {
+      throw new AppError("Comment not found", httpStatus.NOT_FOUND);
+    }
+
+    const { isLiked } = await this.momentCommentReactionRepository.toggleLike(user.id, commentId);
+    const likesCount = await this.momentCommentReactionRepository.countByCommentId(commentId);
+
+    return { isLiked, likesCount };
+  }
+
   public async deleteMoment(momentId: string, user: AuthUser): Promise<void> {
     const moment = await this.momentRepository.findById(momentId);
 
@@ -208,10 +260,15 @@ export class MomentService {
       throw new AppError("Moment not found", httpStatus.NOT_FOUND);
     }
 
+    const comments = await this.momentCommentRepository.findByMomentId(momentId);
+    const commentIds = comments.map((c) => c._id.toString());
+
     await Promise.all([
       this.momentReactionRepository.deleteByMomentId(momentId),
       this.momentCommentRepository.deleteByMomentId(momentId),
+      this.momentCommentReactionRepository.deleteByCommentIds(commentIds),
       this.momentShareRepository.deleteByMomentId(momentId),
+      this.momentSaveRepository.deleteByMomentId(momentId),
     ]);
   }
 
@@ -219,7 +276,7 @@ export class MomentService {
     await this.getViewableMoment(momentId, user);
     const comments = await this.momentCommentRepository.findByMomentId(momentId);
 
-    return this.toCommentTreeResponse(comments);
+    return this.toCommentTreeResponse(comments, user);
   }
 
   public async createMomentComment(
@@ -323,12 +380,17 @@ export class MomentService {
     interactionContext?: MomentInteractionContext,
   ): Promise<MomentResponse> {
     const momentId = moment._id.toString();
-    const [mediaItems, resolvedAuthor, interactionSummary] = await Promise.all([
+    const [mediaItems, resolvedAuthor, interactionSummary, isSaved] = await Promise.all([
       Promise.all(moment.mediaItems.map((mediaItem) => this.toMediaResponse(mediaItem))),
       author === undefined ? this.userRepository.findById(moment.userId.toString()) : Promise.resolve(author),
       interactionContext
         ? Promise.resolve(this.getInteractionSummaryFromContext(momentId, interactionContext))
         : this.getInteractionSummary(momentId, viewer),
+      interactionContext
+        ? Promise.resolve(interactionContext.savedMomentIds.has(momentId))
+        : viewer
+          ? this.momentSaveRepository.findSavedMomentIds(viewer.id, [momentId]).then((ids) => ids.has(momentId))
+          : Promise.resolve(false),
     ]);
 
     return {
@@ -347,6 +409,7 @@ export class MomentService {
       commentsCount: interactionSummary.commentsCount,
       sharesCount: interactionSummary.sharesCount,
       isLiked: interactionSummary.isLiked,
+      isSaved,
       createdAt: moment.createdAt,
       updatedAt: moment.updatedAt,
     };
@@ -404,7 +467,15 @@ export class MomentService {
     };
   }
 
-  private async toCommentTreeResponse(comments: IMomentComment[]): Promise<MomentCommentResponse[]> {
+  private async toCommentTreeResponse(comments: IMomentComment[], viewer?: AuthUser): Promise<MomentCommentResponse[]> {
+    const allCommentIds = comments.map((c) => c._id.toString());
+    const [likeCounts, likedCommentIds] = await Promise.all([
+      this.momentCommentReactionRepository.countByCommentIds(allCommentIds),
+      viewer
+        ? this.momentCommentReactionRepository.findLikedCommentIds(viewer.id, allCommentIds)
+        : Promise.resolve(new Set<string>()),
+    ]);
+
     const commentsByParentId = new Map<string, IMomentComment[]>();
 
     comments.forEach((comment) => {
@@ -417,14 +488,25 @@ export class MomentService {
 
     const buildTree = async (comment: IMomentComment): Promise<MomentCommentResponse> => {
       const replies = commentsByParentId.get(comment._id.toString()) ?? [];
+      const commentId = comment._id.toString();
 
-      return this.toCommentResponse(comment, await Promise.all(replies.map(buildTree)));
+      return this.toCommentResponse(
+        comment,
+        await Promise.all(replies.map(buildTree)),
+        likeCounts.get(commentId) ?? 0,
+        likedCommentIds.has(commentId),
+      );
     };
 
     return Promise.all((commentsByParentId.get("root") ?? []).map(buildTree));
   }
 
-  private async toCommentResponse(comment: IMomentComment, replies: MomentCommentResponse[]): Promise<MomentCommentResponse> {
+  private async toCommentResponse(
+    comment: IMomentComment,
+    replies: MomentCommentResponse[],
+    likesCount = 0,
+    isLiked = false,
+  ): Promise<MomentCommentResponse> {
     const author = await this.userRepository.findById(comment.userId.toString());
 
     return {
@@ -433,6 +515,8 @@ export class MomentService {
       parentCommentId: comment.parentCommentId?.toString() ?? null,
       author: await this.toCommentAuthorResponse(author),
       text: comment.text,
+      likesCount,
+      isLiked,
       createdAt: comment.createdAt,
       updatedAt: comment.updatedAt,
       replies,
@@ -510,11 +594,12 @@ export class MomentService {
 
   private async buildInteractionContext(moments: IMoment[], viewer?: AuthUser): Promise<MomentInteractionContext> {
     const momentIds = [...new Set(moments.map((moment) => moment._id.toString()))];
-    const [likeCounts, commentCounts, shareCounts, likedMomentIds] = await Promise.all([
+    const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds] = await Promise.all([
       this.momentReactionRepository.countByMomentIds(momentIds),
       this.momentCommentRepository.countByMomentIds(momentIds),
       this.momentShareRepository.countByMomentIds(momentIds),
       viewer ? this.momentReactionRepository.findLikedMomentIds(viewer.id, momentIds) : Promise.resolve(new Set<string>()),
+      viewer ? this.momentSaveRepository.findSavedMomentIds(viewer.id, momentIds) : Promise.resolve(new Set<string>()),
     ]);
 
     return {
@@ -522,6 +607,7 @@ export class MomentService {
       commentCounts,
       shareCounts,
       likedMomentIds,
+      savedMomentIds,
     };
   }
 
@@ -531,6 +617,7 @@ export class MomentService {
       commentCounts: new Map(),
       shareCounts: new Map(),
       likedMomentIds: new Set(),
+      savedMomentIds: new Set(),
     };
   }
 

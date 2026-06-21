@@ -88,6 +88,16 @@ export class MomentController {
     });
   };
 
+  public toggleCommentReaction = async (req: Request, res: Response): Promise<void> => {
+    const { id, commentId } = req.params as { id: string; commentId: string };
+    const result = await this.momentService.toggleCommentReaction(id, commentId, req.authUser as AuthUser);
+
+    ApiResponse.success(res, {
+      message: result.isLiked ? "Comment liked" : "Comment unliked",
+      data: result,
+    });
+  };
+
   public createMomentComment = async (req: Request, res: Response): Promise<void> => {
     const { id } = req.params as { id: string };
     const { comment, summary } = await this.momentService.createMomentComment(
@@ -122,6 +132,25 @@ export class MomentController {
 
     ApiResponse.success(res, {
       message: "Event moments retrieved",
+      data: { moments },
+    });
+  };
+
+  public toggleMomentSave = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const summary = await this.momentService.toggleMomentSave(id, req.authUser as AuthUser);
+
+    ApiResponse.success(res, {
+      message: summary.isSaved ? "Moment saved" : "Moment unsaved",
+      data: { summary },
+    });
+  };
+
+  public listSavedMoments = async (req: Request, res: Response): Promise<void> => {
+    const moments = await this.momentService.listSavedMoments(req.authUser as AuthUser);
+
+    ApiResponse.success(res, {
+      message: "Saved moments retrieved",
       data: { moments },
     });
   };

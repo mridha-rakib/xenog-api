@@ -26,6 +26,8 @@ import { CheckoutPaymentRepository } from "./checkout-payment.repository.js";
 import { MoomentCreditPaymentRepository } from "./mooment-credit-payment.repository.js";
 import { CreatorEarningRepository } from "./creator-earning.repository.js";
 import { TicketShareRepository } from "./ticket-share.repository.js";
+import { NotificationRepository } from "../notifications/notification.repository.js";
+import { realtimeGateway } from "../realtime/realtime.gateway.js";
 
 type StripeClient = InstanceType<typeof Stripe>;
 type StripePaymentIntent = Awaited<ReturnType<StripeClient["paymentIntents"]["retrieve"]>>;
@@ -53,6 +55,7 @@ export class CheckoutPaymentService {
     private readonly userRepository = new UserRepository(),
     private readonly userFollowRepository = new UserFollowRepository(),
     private readonly ticketShareRepository = new TicketShareRepository(),
+    private readonly notificationRepository = new NotificationRepository(),
   ) {}
 
   public async getMyTicketPurchaseCounts(
@@ -229,7 +232,48 @@ export class CheckoutPaymentService {
       ticketId: payload.ticketId,
     });
 
+    void this.dispatchTicketShareNotification(user, payload.friendId, event.name ?? null, ticket.name);
+
     return this.toTicketShareResponse(share, friend);
+  }
+
+  private async dispatchTicketShareNotification(
+    sharer: AuthUser,
+    recipientId: string,
+    eventName: string | null,
+    ticketName: string,
+  ): Promise<void> {
+    try {
+      const notification = await this.notificationRepository.create({
+        recipientUserId: recipientId,
+        type: "ticket_share",
+        actorUserId: sharer.id,
+        actorName: sharer.name,
+        actorUsername: sharer.username,
+        actorAvatarKey: sharer.avatarKey ?? null,
+        eventName,
+        ticketName,
+      });
+
+      realtimeGateway.notifyUser(recipientId, {
+        type: "notification:new",
+        notification: {
+          id: notification._id.toString(),
+          type: "ticket_share",
+          actorId: sharer.id,
+          actorName: sharer.name,
+          actorUsername: sharer.username ?? null,
+          actorAvatarUrl: null,
+          eventId: null,
+          eventName,
+          ticketName,
+          isRead: false,
+          createdAt: notification.createdAt.toISOString(),
+        },
+      });
+    } catch {
+      // Notification failure must not break ticket sharing
+    }
   }
 
   public async cancelTicketShare(user: AuthUser, shareId: string): Promise<TicketShareResponse> {
@@ -476,6 +520,7 @@ export class CheckoutPaymentService {
     });
 
     await this.recordCreatorEarnings(order);
+    void this.dispatchTicketNotifications(order);
 
     return {
       order: this.toOrderResponse(order),
@@ -616,6 +661,92 @@ export class CheckoutPaymentService {
     }));
   }
 
+  private async dispatchTicketNotifications(order: ICheckoutOrder): Promise<void> {
+    if (order.kind !== "ticket") {
+      return;
+    }
+
+    try {
+      const buyer = await this.userRepository.findById(order.userId.toString());
+      const ticketItem = order.lineItems.find((item) => item.itemType === "ticket");
+
+      if (!ticketItem) {
+        return;
+      }
+
+      const eventId = ticketItem.eventId ?? null;
+      const eventName = ticketItem.name ?? null;
+      const ticketName = ticketItem.name ?? null;
+
+      // Buyer confirmation notification
+      const buyerNotification = await this.notificationRepository.create({
+        recipientUserId: order.userId.toString(),
+        type: "ticket_buyer",
+        actorName: buyer?.name ?? null,
+        actorUsername: buyer?.username ?? null,
+        actorAvatarKey: buyer?.avatarKey ?? null,
+        eventId,
+        eventName,
+        ticketName,
+      });
+
+      realtimeGateway.notifyUser(order.userId.toString(), {
+        type: "notification:new",
+        notification: {
+          id: buyerNotification._id.toString(),
+          type: "ticket_buyer",
+          actorId: null,
+          actorName: null,
+          actorUsername: null,
+          actorAvatarUrl: null,
+          eventId,
+          eventName,
+          ticketName,
+          isRead: false,
+          createdAt: buyerNotification.createdAt.toISOString(),
+        },
+      });
+
+      // Creator notification
+      if (ticketItem.sellerUserId) {
+        const creatorId = ticketItem.sellerUserId.toString();
+
+        if (creatorId !== order.userId.toString()) {
+          const creatorNotification = await this.notificationRepository.create({
+            recipientUserId: creatorId,
+            type: "ticket_creator",
+            actorUserId: order.userId.toString(),
+            actorName: buyer?.name ?? null,
+            actorUsername: buyer?.username ?? null,
+            actorAvatarKey: buyer?.avatarKey ?? null,
+            eventId,
+            eventName,
+            ticketName,
+          });
+
+          realtimeGateway.notifyUser(creatorId, {
+            type: "notification:new",
+            notification: {
+              id: creatorNotification._id.toString(),
+              type: "ticket_creator",
+              actorId: order.userId.toString(),
+              actorName: buyer?.name ?? null,
+              actorUsername: buyer?.username ?? null,
+              actorAvatarUrl: null,
+              eventId,
+              eventName,
+              ticketName,
+              isRead: false,
+              createdAt: creatorNotification.createdAt.toISOString(),
+            },
+          });
+        }
+      }
+    } catch {
+      // Notification failure must not break payment processing
+    }
+  }
+
   private async recordCreatorEarnings(order: ICheckoutOrder): Promise<void> {
     const sellerItems = order.lineItems.filter((item) => item.sellerUserId);
 
@@ -671,6 +802,7 @@ export class CheckoutPaymentService {
 
       if (!alreadyPaid && updatedOrder) {
         await this.recordCreatorEarnings(updatedOrder);
+        void this.dispatchTicketNotifications(updatedOrder);
       }
 
       return updatedOrder ?? order;

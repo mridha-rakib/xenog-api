@@ -81,6 +81,12 @@ export const momentValidation = {
       id: objectId,
     }),
   }),
+  commentReaction: z.object({
+    params: z.object({
+      id: objectId,
+      commentId: objectId,
+    }),
+  }),
   eventMoments: z.object({
     params: z.object({
       eventId: objectId,

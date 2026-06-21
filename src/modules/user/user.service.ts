@@ -21,6 +21,8 @@ import type {
 } from "./user.interface.js";
 import { UserFollowRepository } from "./user-follow.repository.js";
 import { UserRepository } from "./user.repository.js";
+import { NotificationRepository } from "../notifications/notification.repository.js";
+import { realtimeGateway } from "../realtime/realtime.gateway.js";
 
 interface ListUsersQuery {
   page?: number;
@@ -40,6 +42,7 @@ export class UserService {
     private readonly userRepository = new UserRepository(),
     private readonly userFollowRepository = new UserFollowRepository(),
     private readonly storageService = new StorageService(),
+    private readonly notificationRepository = new NotificationRepository(),
   ) {}
 
   public async create(payload: CreateUserDto): Promise<IUser> {
@@ -182,13 +185,48 @@ export class UserService {
       throw new AppError("You cannot follow yourself", httpStatus.BAD_REQUEST);
     }
 
-    await this.assertFollowTarget(targetUserId);
+    const targetUser = await this.assertFollowTarget(targetUserId);
     await this.userFollowRepository.follow(user.id, targetUserId);
+
+    void this.dispatchFollowNotification(user, targetUser);
 
     return {
       userId: targetUserId,
       isFollowing: true,
     };
+  }
+
+  private async dispatchFollowNotification(follower: AuthUser, targetUser: IUser): Promise<void> {
+    try {
+      const notification = await this.notificationRepository.create({
+        recipientUserId: targetUser._id.toString(),
+        type: "follow",
+        actorUserId: follower.id,
+        actorName: follower.name,
+        actorUsername: follower.username,
+        actorAvatarKey: follower.avatarKey ?? null,
+      });
+
+      realtimeGateway.notifyUser(targetUser._id.toString(), {
+        type: "notification:new",
+        notification: {
+          id: notification._id.toString(),
+          type: notification.type,
+          actorId: follower.id,
+          actorName: follower.name,
+          actorUsername: follower.username ?? null,
+          actorAvatarKey: follower.avatarKey ?? null,
+          actorAvatarUrl: null,
+          eventId: null,
+          eventName: null,
+          ticketName: null,
+          isRead: false,
+          createdAt: notification.createdAt.toISOString(),
+        },
+      });
+    } catch {
+      // Notification failure must not break the follow action
+    }
   }
 
   public async unfollowUser(user: AuthUser, targetUserId: string): Promise<FollowStatusResponse> {

@@ -46,6 +46,16 @@ router.post(
   validate(momentValidation.createComment),
   catchAsync(controller.createMomentComment),
 );
+router.post(
+  "/:id/comments/:commentId/reaction",
+  validate(momentValidation.commentReaction),
+  catchAsync(controller.toggleCommentReaction),
+);
+router.post(
+  "/:id/save",
+  validate(momentValidation.momentIdParam),
+  catchAsync(controller.toggleMomentSave),
+);
 router.get(
   "/event/:eventId",
   validate(momentValidation.eventMoments),
@@ -53,5 +63,6 @@ router.get(
 );
 router.get("/", catchAsync(controller.listFeedMoments));
 router.get("/mine", catchAsync(controller.listMyMoments));
+router.get("/saved", catchAsync(controller.listSavedMoments));
 
 export const momentRoutes = router;

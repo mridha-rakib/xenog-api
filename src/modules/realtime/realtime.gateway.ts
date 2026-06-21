@@ -10,6 +10,8 @@ import type { AuthUser } from "../auth/auth.interface.js";
 import { AuthService } from "../auth/auth.service.js";
 import type { DirectMessageResponse } from "../chat/chat.interface.js";
 import { ChatService } from "../chat/chat.service.js";
+import type { GroupMessageResponse } from "../chat/group.interface.js";
+import { GroupService } from "../chat/group.service.js";
 import { LiveRoomService } from "../live-rooms/live-room.service.js";
 
 type RealtimeClient = {
@@ -47,6 +49,12 @@ const clientMessageSchema = z.discriminatedUnion("type", [
     text: z.string().trim().min(1).max(1000),
   }),
   z.object({
+    type: z.literal("group:message"),
+    clientMessageId: z.string().trim().min(1).max(120).optional(),
+    groupId: objectId,
+    text: z.string().trim().min(1).max(2000),
+  }),
+  z.object({
     type: z.literal("ping"),
   }),
 ]);
@@ -61,8 +69,13 @@ export class RealtimeGateway {
   public constructor(
     private readonly authService = new AuthService(),
     private readonly chatService = new ChatService(),
+    private readonly groupService = new GroupService(),
     private readonly liveRoomService = new LiveRoomService(),
   ) {}
+
+  public notifyUser(userId: string, payload: unknown): void {
+    this.broadcastToUser(userId, payload);
+  }
 
   public attach(server: HttpServer): void {
     this.wss = new WebSocketServer({
@@ -159,6 +172,9 @@ export class RealtimeGateway {
       case "dm:typing":
         await this.handleDirectTyping(client, message);
         return;
+      case "group:message":
+        await this.handleGroupMessage(client, message);
+        return;
       case "live:join":
         this.joinLiveRoom(client, message.roomId);
         return;
@@ -244,6 +260,49 @@ export class RealtimeGateway {
         updatedAt: new Date().toISOString(),
       },
     });
+  }
+
+  private async handleGroupMessage(
+    client: RealtimeClient,
+    message: Extract<ClientMessage, { type: "group:message" }>,
+  ): Promise<void> {
+    let savedMessage: GroupMessageResponse;
+
+    try {
+      savedMessage = await this.groupService.createGroupMessage(client.user, message.groupId, {
+        text: message.text,
+      });
+    } catch (error) {
+      if (error instanceof AppError) {
+        this.sendError(
+          client.socket,
+          error.statusCode === httpStatus.FORBIDDEN ? "NOT_GROUP_MEMBER" : "GROUP_MESSAGE_FAILED",
+          error.message,
+        );
+        return;
+      }
+
+      throw error;
+    }
+
+    const memberIds = await this.groupService.getGroupMemberIds(message.groupId);
+
+    const payload = {
+      type: "group:message",
+      message: {
+        clientMessageId: message.clientMessageId ?? null,
+        groupId: message.groupId,
+        id: savedMessage.id,
+        senderId: savedMessage.senderId,
+        senderName: client.user.name,
+        text: savedMessage.text,
+        createdAt: savedMessage.createdAt.toISOString(),
+      },
+    };
+
+    for (const memberId of memberIds) {
+      this.broadcastToUser(memberId, payload);
+    }
   }
 
   private handleLiveMessage(
@@ -359,3 +418,5 @@ export class RealtimeGateway {
     });
   }
 }
+
+export const realtimeGateway = new RealtimeGateway();

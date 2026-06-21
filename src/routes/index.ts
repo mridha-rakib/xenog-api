@@ -1,12 +1,14 @@
 import { Router } from "express";
 import { cartRoutes } from "../modules/cart/cart.route.js";
 import { chatRoutes } from "../modules/chat/chat.route.js";
+import { groupRoutes } from "../modules/chat/group.route.js";
 import { eventRoutes } from "../modules/events/event.route.js";
 import { healthRoutes } from "../modules/health/health.route.js";
 import { liveRoomRoutes } from "../modules/live-rooms/live-room.route.js";
 import { storageRoutes } from "../modules/storage/storage.route.js";
 import { userRoutes } from "../modules/user/user.route.js";
 import { authRoutes } from "../modules/auth/auth.route.js";
+import { notificationRoutes } from "../modules/notifications/notification.route.js";
 import { paymentRoutes } from "../modules/payments/payment.route.js";
 import { planRoutes } from "../modules/plans/plan.route.js";
 import { productRoutes } from "../modules/products/product.route.js";
@@ -19,7 +21,9 @@ const router = Router();
 
 router.use("/auth", authRoutes);
 router.use("/cart", cartRoutes);
+router.use("/notifications", notificationRoutes);
 router.use("/chat", chatRoutes);
+router.use("/groups", groupRoutes);
 router.use("/events", eventRoutes);
 router.use("/health", healthRoutes);
 router.use("/live-rooms", liveRoomRoutes);

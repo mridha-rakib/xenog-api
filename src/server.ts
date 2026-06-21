@@ -5,7 +5,7 @@ import { MinioClient } from "./config/minio.js";
 import { RedisClient } from "./config/redis.js";
 import { logger } from "./core/logger/logger.js";
 import { seedAdminUser } from "./core/seed/admin.seed.js";
-import { RealtimeGateway } from "./modules/realtime/realtime.gateway.js";
+import { realtimeGateway } from "./modules/realtime/realtime.gateway.js";
 import { createApp } from "./app.js";
 
 const startServer = async (): Promise<void> => {
@@ -16,7 +16,6 @@ const startServer = async (): Promise<void> => {
 
   const app = createApp();
   const server = createServer(app);
-  const realtimeGateway = new RealtimeGateway();
 
   realtimeGateway.attach(server);
 

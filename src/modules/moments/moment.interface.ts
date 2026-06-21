@@ -65,6 +65,28 @@ export interface IMomentComment {
   updatedAt: Date;
 }
 
+export interface IMomentCommentReaction {
+  _id: Types.ObjectId;
+  userId: Types.ObjectId;
+  commentId: Types.ObjectId;
+  type: MomentReactionType;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface IMomentSave {
+  _id: Types.ObjectId;
+  userId: Types.ObjectId;
+  momentId: Types.ObjectId;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface MomentSaveSummaryResponse {
+  momentId: string;
+  isSaved: boolean;
+}
+
 export interface CreateMomentDto {
   mode: MomentMode;
   caption?: string | null;
@@ -101,6 +123,7 @@ export interface MomentResponse {
   commentsCount: number;
   sharesCount: number;
   isLiked: boolean;
+  isSaved: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -140,6 +163,8 @@ export interface MomentCommentResponse {
   parentCommentId?: string | null;
   author?: MomentCommentAuthorResponse | null;
   text: string;
+  likesCount: number;
+  isLiked: boolean;
   createdAt: Date;
   updatedAt: Date;
   replies: MomentCommentResponse[];

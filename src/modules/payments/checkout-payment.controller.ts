@@ -82,6 +82,15 @@ export class CheckoutPaymentController {
     });
   };
 
+  public scanTicket = async (req: Request, res: Response): Promise<void> => {
+    const ticket = await this.service.scanTicket(req.authUser as AuthUser, req.body);
+
+    ApiResponse.success(res, {
+      message: "Ticket scanned successfully",
+      data: { ticket },
+    });
+  };
+
   public stripeWebhook = async (req: Request, res: Response): Promise<void> => {
     await this.service.handleStripeWebhook(req.header("stripe-signature"), req.rawBody);
 

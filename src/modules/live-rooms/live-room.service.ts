@@ -100,7 +100,11 @@ export class LiveRoomService {
     liveRoomId: string,
     query: ListLiveRoomMessagesQuery,
   ): Promise<LiveRoomMessageResponse[]> {
-    await this.getExistingLiveRoom(liveRoomId);
+    const liveRoom = await this.liveRoomRepository.findById(liveRoomId);
+
+    if (!liveRoom) {
+      return [];
+    }
 
     const messages = await this.messageRepository.findByLiveRoomId(liveRoomId, query);
 

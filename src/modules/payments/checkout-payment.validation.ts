@@ -81,7 +81,16 @@ export const checkoutPaymentValidation = {
       .object({
         eventId: objectId,
         ticketId,
+        orderId: objectId,
+        ticketIndex: z.coerce.number().int().min(1).max(100),
         friendId: objectId,
+      })
+      .strict(),
+  }),
+  scanTicket: z.object({
+    body: z
+      .object({
+        qrCode: z.string().trim().min(1, "QR code is required").max(5000, "QR code is too large"),
       })
       .strict(),
   }),

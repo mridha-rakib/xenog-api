@@ -62,6 +62,11 @@ router.post(
   validate(checkoutPaymentValidation.shareTicket),
   catchAsync(checkoutPaymentController.shareTicket),
 );
+router.post(
+  "/ticket-scans",
+  validate(checkoutPaymentValidation.scanTicket),
+  catchAsync(checkoutPaymentController.scanTicket),
+);
 router.delete(
   "/ticket-shares/:shareId",
   validate(checkoutPaymentValidation.shareParams),

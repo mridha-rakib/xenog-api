@@ -7,6 +7,7 @@ type CreateTicketShareRecord = {
   orderId: string;
   eventId: string;
   ticketId: string;
+  ticketIndex: number;
 };
 
 export class TicketShareRepository {
@@ -23,11 +24,37 @@ export class TicketShareRepository {
     ownerUserId: string,
     eventId: string,
     ticketId: string,
+    orderId: string,
+    ticketIndex: number,
   ): Promise<ITicketShare | null> {
     return TicketShareModel.findOne({
       ownerUserId,
       eventId,
       ticketId,
+      orderId,
+      ticketIndex,
+      status: "active",
+    });
+  }
+
+  public async findActiveByTicketPass(
+    eventId: string,
+    ticketId: string,
+    orderId: string,
+    ticketIndex: number,
+  ): Promise<ITicketShare | null> {
+    return TicketShareModel.findOne({
+      eventId,
+      ticketId,
+      orderId,
+      ticketIndex,
+      status: "active",
+    });
+  }
+
+  public async findActiveById(shareId: string): Promise<ITicketShare | null> {
+    return TicketShareModel.findOne({
+      _id: shareId,
       status: "active",
     });
   }
@@ -56,6 +83,15 @@ export class TicketShareRepository {
       .lean();
 
     return Boolean(share);
+  }
+
+  public async countActiveByOwnerAndTicket(ownerUserId: string, eventId: string, ticketId: string): Promise<number> {
+    return TicketShareModel.countDocuments({
+      ownerUserId,
+      eventId,
+      ticketId,
+      status: "active",
+    });
   }
 
   public async findActiveEventIdsByRecipient(recipientUserId: string): Promise<string[]> {

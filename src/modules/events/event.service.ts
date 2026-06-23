@@ -7,6 +7,7 @@ import { UserRepository } from "../user/user.repository.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
 import { UserBlockRepository } from "../user/user-block.repository.js";
 import { EventSaveRepository } from "./event-save.repository.js";
+import { LiveRoomRepository } from "../live-rooms/live-room.repository.js";
 import { MomentRepository } from "../moments/moment.repository.js";
 import { MomentReactionRepository } from "../moments/moment-reaction.repository.js";
 import { MomentCommentRepository } from "../moments/moment-comment.repository.js";
@@ -92,6 +93,7 @@ export class EventService {
     private readonly notificationRepository = new NotificationRepository(),
     private readonly userBlockRepository = new UserBlockRepository(),
     private readonly eventSaveRepository = new EventSaveRepository(),
+    private readonly liveRoomRepository = new LiveRoomRepository(),
     private readonly momentRepository = new MomentRepository(),
     private readonly momentReactionRepository = new MomentReactionRepository(),
     private readonly momentCommentRepository = new MomentCommentRepository(),
@@ -126,7 +128,7 @@ export class EventService {
     if (eventId) {
       const existingEvent = await this.eventRepository.findByIdForUser(eventId, user.id);
 
-      if (existingEvent?.status === "published") {
+      if (existingEvent && existingEvent.status !== "draft") {
         const event = await this.eventRepository.updateByIdForUser(eventId, user.id, normalizedPayload);
 
         if (!event) {
@@ -822,11 +824,21 @@ export class EventService {
     }
 
     const host = await this.userRepository.findById(event.userId.toString());
-    const [avatarUrl, followersCount, eventsCount, isFollowing] = await Promise.all([
+    const [avatarUrl, followersCount, eventsCount, isFollowing, interactionMoment] = await Promise.all([
       host?.avatarKey ? this.storageService.createDownloadUrl(host.avatarKey).then((download) => download.url) : Promise.resolve(null),
       host ? this.userFollowRepository.countFollowers(host._id.toString()) : Promise.resolve(0),
       host ? this.eventRepository.countByUserId(host._id.toString(), ["published", "live"]) : Promise.resolve(0),
       host && host._id.toString() !== user.id ? this.userFollowRepository.isFollowing(user.id, host._id.toString()) : Promise.resolve(false),
+      this.ensureEventInteractionMoment(event),
+      this.ensureEventChatRoom(event),
+    ]);
+
+    const interactionMomentId = interactionMoment._id.toString();
+    const [likeCounts, commentCounts, shareCounts, likedMomentIds] = await Promise.all([
+      this.momentReactionRepository.countByMomentIds([interactionMomentId]),
+      this.momentCommentRepository.countByMomentIds([interactionMomentId]),
+      this.momentShareRepository.countByMomentIds([interactionMomentId]),
+      this.momentReactionRepository.findLikedMomentIds(user.id, [interactionMomentId]),
     ]);
 
     let myJoinRequestStatus: EventJoinRequestStatus | null = null;
@@ -835,7 +847,14 @@ export class EventService {
       myJoinRequestStatus = (joinRequest?.status as EventJoinRequestStatus) ?? null;
     }
 
-    return this.toResponse(event, host, { avatarUrl, followersCount, eventsCount, isFollowing }, myJoinRequestStatus);
+    return {
+      ...this.toResponse(event, host, { avatarUrl, followersCount, eventsCount, isFollowing }, myJoinRequestStatus),
+      interactionMomentId,
+      likesCount: likeCounts.get(interactionMomentId) ?? 0,
+      commentsCount: commentCounts.get(interactionMomentId) ?? 0,
+      sharesCount: shareCounts.get(interactionMomentId) ?? 0,
+      isLiked: likedMomentIds.has(interactionMomentId),
+    };
   }
 
   public async listEventMembers(user: AuthUser, eventId: string): Promise<EventMemberResponse[]> {
@@ -1263,6 +1282,25 @@ export class EventService {
       throw new AppError("This reward has expired.", httpStatus.GONE);
     }
 
+    if (reward.ticketId) {
+      const linkedTicket = event.tickets.find((t) => t.id === reward.ticketId);
+
+      if (linkedTicket && linkedTicket.type !== "free" && linkedTicket.price > 0) {
+        const purchasedCount = await this.checkoutPaymentRepository.getPurchasedCountForTicket(
+          user.id,
+          eventId,
+          reward.ticketId,
+        );
+
+        if (purchasedCount === 0) {
+          throw new AppError(
+            "Purchase this ticket first to claim this reward.",
+            httpStatus.PAYMENT_REQUIRED,
+          );
+        }
+      }
+    }
+
     const existingClaim = await this.rewardClaimRepository.findByUserAndReward(user.id, eventId, rewardId);
 
     if (existingClaim) {
@@ -1336,6 +1374,13 @@ export class EventService {
       userId: event.userId.toString(),
       eventTitle: event.name ?? null,
       caption: event.description ?? null,
+    });
+  }
+
+  private async ensureEventChatRoom(event: IEvent): Promise<void> {
+    await this.liveRoomRepository.ensureById(event._id.toString(), {
+      hostUserId: event.userId.toString(),
+      title: (event.name ?? "Event Chat").slice(0, 160),
     });
   }
 

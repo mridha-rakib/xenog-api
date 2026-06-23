@@ -1,4 +1,5 @@
 import type { UpdateQuery } from "mongoose";
+import { Types } from "mongoose";
 import { LiveRoomModel } from "./live-room.model.js";
 import type { CreateLiveRoomDto, ILiveRoom, UpdateLiveRoomPermissionsDto } from "./live-room.interface.js";
 
@@ -19,6 +20,22 @@ export class LiveRoomRepository {
 
   public async findById(id: string): Promise<ILiveRoom | null> {
     return LiveRoomModel.findById(id);
+  }
+
+  public async ensureById(id: string, defaults: { hostUserId: string; title: string }): Promise<ILiveRoom> {
+    return LiveRoomModel.findOneAndUpdate(
+      { _id: new Types.ObjectId(id) },
+      {
+        $setOnInsert: {
+          hostUserId: new Types.ObjectId(defaults.hostUserId),
+          title: defaults.title.slice(0, 160),
+          allowAllParticipantsToSpeak: true,
+          speakerIds: [],
+          status: "live",
+        },
+      },
+      { upsert: true, new: true, runValidators: false },
+    );
   }
 
   public async updatePermissionsByIdForHost(

@@ -114,6 +114,45 @@ export class CheckoutPaymentRepository {
     }, 0);
   }
 
+  public async getOwnedTicketCountForTicket(
+    userId: string,
+    eventId: string,
+    ticketId: string,
+  ): Promise<number> {
+    const orders = await CheckoutOrderModel.find({
+      userId,
+      kind: "ticket",
+      paymentStatus: "paid",
+      "lineItems.eventId": eventId,
+      "lineItems.itemId": ticketId,
+    })
+      .select("lineItems")
+      .lean();
+
+    return orders.reduce((total, order) => {
+      return (
+        total +
+        order.lineItems
+          .filter((item) => item.itemId === ticketId)
+          .reduce((sum, item) => sum + (item.totalQuantity ?? item.quantity), 0)
+      );
+    }, 0);
+  }
+
+  public async findPaidTicketOrdersForUserEventTicket(
+    userId: string,
+    eventId: string,
+    ticketId: string,
+  ): Promise<ICheckoutOrder[]> {
+    return CheckoutOrderModel.find({
+      userId,
+      kind: "ticket",
+      paymentStatus: "paid",
+      "lineItems.eventId": eventId,
+      "lineItems.itemId": ticketId,
+    }).select("lineItems userId kind paymentStatus createdAt paidAt");
+  }
+
   public async hasUserPaidTicketForEvent(userId: string, eventId: string): Promise<boolean> {
     const order = await CheckoutOrderModel.findOne({
       userId,

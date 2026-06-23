@@ -26,6 +26,10 @@ export interface CheckoutOrderLineItem {
   sellerUserId?: Types.ObjectId | null;
   name: string;
   quantity: number;
+  paidQuantity?: number;
+  freeQuantity?: number;
+  totalQuantity?: number;
+  rewardId?: string | null;
   unitAmount: number;
   totalAmount: number;
 }
@@ -119,6 +123,7 @@ export interface CheckoutIntentResponse {
 export type TicketWalletStatus = "active" | "used" | "cancelled";
 export type TicketWalletSource = "owned" | "shared";
 export type TicketShareStatus = "active" | "cancelled";
+export type TicketPassStatus = "active" | "used";
 
 export interface TicketWalletEventHost {
   id: string;
@@ -142,6 +147,16 @@ export interface TicketWalletEvent {
   host?: TicketWalletEventHost | null;
 }
 
+export interface TicketWalletPass {
+  orderId: string;
+  ticketNo: string;
+  ticketIndex: number;
+  qrCode: string;
+  status: TicketPassStatus;
+  usedAt?: Date | null;
+  currentShare?: TicketShareResponse | null;
+}
+
 export interface TicketWalletItem {
   id: string;
   source: TicketWalletSource;
@@ -150,12 +165,16 @@ export interface TicketWalletItem {
   ticketId: string;
   ticketName: string;
   quantity: number;
+  paidQuantity: number;
+  freeQuantity: number;
+  totalQuantity: number;
   unitAmount: number;
   totalAmount: number;
   currency: string;
   paymentStatus: CheckoutPaymentStatus;
   walletStatus: TicketWalletStatus;
   purchasedAt?: Date | null;
+  ticketPasses: TicketWalletPass[];
   currentShare?: TicketShareResponse | null;
   sharedBy?: TicketWalletEventHost | null;
   event: TicketWalletEvent;
@@ -168,9 +187,26 @@ export interface ITicketShare {
   orderId: Types.ObjectId;
   eventId: string;
   ticketId: string;
+  ticketIndex: number;
   status: TicketShareStatus;
   sharedAt: Date;
   cancelledAt?: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ITicketUsage {
+  _id: Types.ObjectId;
+  ownerUserId: Types.ObjectId;
+  holderUserId: Types.ObjectId;
+  usedByUserId: Types.ObjectId;
+  shareId?: Types.ObjectId | null;
+  orderId: Types.ObjectId;
+  eventId: string;
+  ticketId: string;
+  ticketIndex: number;
+  source: TicketWalletSource;
+  usedAt: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -182,6 +218,8 @@ export interface TicketShareResponse {
   orderId: string;
   eventId: string;
   ticketId: string;
+  ticketIndex: number;
+  qrCode: string;
   status: TicketShareStatus;
   sharedAt: Date;
   cancelledAt?: Date | null;
@@ -191,5 +229,25 @@ export interface TicketShareResponse {
 export interface ShareTicketDto {
   eventId: string;
   ticketId: string;
+  orderId: string;
+  ticketIndex: number;
   friendId: string;
+}
+
+export interface ScanTicketDto {
+  qrCode: string;
+}
+
+export interface ScanTicketResponse {
+  eventId: string;
+  eventName: string;
+  ticketId: string;
+  ticketName: string;
+  orderId: string;
+  ticketIndex: number;
+  ticketNo: string;
+  source: TicketWalletSource;
+  holderUserId: string;
+  holderName: string;
+  usedAt: Date;
 }

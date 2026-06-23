@@ -34,6 +34,11 @@ const ticketShareSchema = new Schema<ITicketShare>(
       maxlength: 80,
       index: true,
     },
+    ticketIndex: {
+      type: Number,
+      required: true,
+      min: 1,
+    },
     status: {
       type: String,
       enum: ["active", "cancelled"],
@@ -58,9 +63,23 @@ const ticketShareSchema = new Schema<ITicketShare>(
 );
 
 ticketShareSchema.index(
-  { ownerUserId: 1, eventId: 1, ticketId: 1, status: 1 },
+  { ownerUserId: 1, eventId: 1, ticketId: 1, orderId: 1, ticketIndex: 1, status: 1 },
   { unique: true, partialFilterExpression: { status: "active" } },
 );
 ticketShareSchema.index({ recipientUserId: 1, status: 1, sharedAt: -1 });
 
 export const TicketShareModel = model<ITicketShare>("TicketShare", ticketShareSchema);
+
+export const ensureTicketShareIndexes = async (): Promise<void> => {
+  try {
+    await TicketShareModel.collection.dropIndex("ownerUserId_1_eventId_1_ticketId_1_status_1");
+  } catch (error) {
+    const indexError = error as { codeName?: string; code?: number };
+
+    if (indexError.codeName !== "IndexNotFound" && indexError.code !== 27) {
+      throw error;
+    }
+  }
+
+  await TicketShareModel.syncIndexes();
+};

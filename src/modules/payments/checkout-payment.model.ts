@@ -40,6 +40,26 @@ const checkoutOrderLineItemSchema = new Schema<CheckoutOrderLineItem>(
       required: true,
       min: 1,
     },
+    paidQuantity: {
+      type: Number,
+      min: 1,
+      default: undefined,
+    },
+    freeQuantity: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+    totalQuantity: {
+      type: Number,
+      min: 1,
+      default: undefined,
+    },
+    rewardId: {
+      type: String,
+      trim: true,
+      default: null,
+    },
     unitAmount: {
       type: Number,
       required: true,
@@ -120,7 +140,7 @@ const checkoutOrderSchema = new Schema<ICheckoutOrder>(
     amountMinor: {
       type: Number,
       required: true,
-      min: 1,
+      min: 0,
     },
     lineItems: {
       type: [checkoutOrderLineItemSchema],

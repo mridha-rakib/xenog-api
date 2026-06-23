@@ -7,10 +7,14 @@ import { logger } from "./core/logger/logger.js";
 import { seedAdminUser } from "./core/seed/admin.seed.js";
 import { realtimeGateway } from "./modules/realtime/realtime.gateway.js";
 import { startEventScheduler } from "./modules/events/event.scheduler.js";
+import { ensureTicketShareIndexes } from "./modules/payments/ticket-share.model.js";
+import { ensureTicketUsageIndexes } from "./modules/payments/ticket-usage.model.js";
 import { createApp } from "./app.js";
 
 const startServer = async (): Promise<void> => {
   await Database.connect();
+  await ensureTicketShareIndexes();
+  await ensureTicketUsageIndexes();
   await seedAdminUser();
   startEventScheduler();
 

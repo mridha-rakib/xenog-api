@@ -98,9 +98,22 @@ export interface FriendUserResponse {
   avatarUrl?: string | null;
 }
 
+export interface IUserBlock {
+  _id: Types.ObjectId;
+  blockerId: Types.ObjectId;
+  blockedId: Types.ObjectId;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface FollowStatusResponse {
   userId: string;
   isFollowing: boolean;
+}
+
+export interface BlockStatusResponse {
+  userId: string;
+  isBlocked: boolean;
 }
 
 export interface UserProfileStatsResponse {

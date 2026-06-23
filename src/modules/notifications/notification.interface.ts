@@ -1,6 +1,6 @@
 import type { Types } from "mongoose";
 
-export type NotificationType = "follow" | "ticket_buyer" | "ticket_creator" | "ticket_share";
+export type NotificationType = "follow" | "ticket_buyer" | "ticket_creator" | "ticket_share" | "join_request" | "join_request_accepted";
 
 export interface INotification {
   _id: Types.ObjectId;

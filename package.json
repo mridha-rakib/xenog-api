@@ -13,6 +13,7 @@
     "seed:admin": "tsx src/scripts/seed-admin.ts",
     "seed:demo-users": "tsx src/scripts/seed-demo-users.ts",
     "storage:migrate": "tsx src/scripts/migrate-storage.ts",
+    "moments:backfill-hashtags": "tsx src/scripts/backfill-moment-hashtags.ts",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f"

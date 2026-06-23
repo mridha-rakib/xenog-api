@@ -1,8 +1,9 @@
 import { MomentModel } from "./moment.model.js";
-import type { CreateMomentDto, IMoment } from "./moment.interface.js";
+import type { CreateMomentDto, IMoment, MomentFeedQuery } from "./moment.interface.js";
 
 interface CreateMomentRecord extends CreateMomentDto {
   userId: string;
+  hashtags: string[];
 }
 
 export class MomentRepository {
@@ -11,13 +12,44 @@ export class MomentRepository {
       userId: payload.userId,
       mode: payload.mode,
       caption: payload.caption ?? null,
+      hashtags: payload.hashtags,
       audience: payload.audience,
       taggedPeople: payload.taggedPeople ?? [],
       eventTitle: payload.eventTitle ?? null,
       eventId: payload.eventId ?? null,
+      isEventAnnouncement: payload.isEventAnnouncement ?? false,
       eventCode: payload.eventCode ?? null,
       mediaItems: payload.mediaItems ?? [],
     });
+  }
+
+  public async ensureEventAnnouncement(payload: {
+    eventId: string;
+    userId: string;
+    eventTitle?: string | null;
+    caption?: string | null;
+  }): Promise<IMoment> {
+    return MomentModel.findOneAndUpdate(
+      { eventId: payload.eventId, isEventAnnouncement: true },
+      {
+        $set: {
+          userId: payload.userId,
+          mode: "event",
+          caption: payload.caption ?? null,
+          audience: "public",
+          eventTitle: payload.eventTitle ?? null,
+        },
+        $setOnInsert: {
+          hashtags: [],
+          taggedPeople: [],
+          eventId: payload.eventId,
+          isEventAnnouncement: true,
+          eventCode: null,
+          mediaItems: [],
+        },
+      },
+      { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
+    );
   }
 
   public async findByEventId(eventId: string, limit = 50): Promise<IMoment[]> {
@@ -63,11 +95,22 @@ export class MomentRepository {
     });
   }
 
-  public async findFeed(limit = 50): Promise<IMoment[]> {
+  public async findFeed(query: MomentFeedQuery = {}): Promise<IMoment[]> {
+    const hashtags = query.hashtags?.filter(Boolean) ?? [];
+    const excludeUserIds = query.excludeUserIds ?? [];
+
     return MomentModel.find({
       mode: "feed",
       audience: "public",
+      ...(hashtags.length > 0 ? { hashtags: { $all: hashtags } } : {}),
+      ...(excludeUserIds.length > 0 ? { userId: { $nin: excludeUserIds } } : {}),
     })
+      .sort({ createdAt: -1 })
+      .limit(query.limit ?? 50);
+  }
+
+  public async findPublicByHashtag(hashtag: string, limit = 100): Promise<IMoment[]> {
+    return MomentModel.find({ audience: "public", hashtags: hashtag })
       .sort({ createdAt: -1 })
       .limit(limit);
   }

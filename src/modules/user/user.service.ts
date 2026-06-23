@@ -9,6 +9,7 @@ import {
 import type { AuthUser } from "../auth/auth.interface.js";
 import { StorageService } from "../storage/storage.service.js";
 import type {
+  BlockStatusResponse,
   CreateUserDto,
   FollowStatusResponse,
   FriendUserResponse,
@@ -20,6 +21,7 @@ import type {
   UserReviewResponse,
 } from "./user.interface.js";
 import { UserFollowRepository } from "./user-follow.repository.js";
+import { UserBlockRepository } from "./user-block.repository.js";
 import { UserRepository } from "./user.repository.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
 import { realtimeGateway } from "../realtime/realtime.gateway.js";
@@ -41,6 +43,7 @@ export class UserService {
   public constructor(
     private readonly userRepository = new UserRepository(),
     private readonly userFollowRepository = new UserFollowRepository(),
+    private readonly userBlockRepository = new UserBlockRepository(),
     private readonly storageService = new StorageService(),
     private readonly notificationRepository = new NotificationRepository(),
   ) {}
@@ -241,6 +244,31 @@ export class UserService {
       userId: targetUserId,
       isFollowing: false,
     };
+  }
+
+  public async blockUser(user: AuthUser, targetUserId: string): Promise<BlockStatusResponse> {
+    if (user.id === targetUserId) {
+      throw new AppError("You cannot block yourself", httpStatus.BAD_REQUEST);
+    }
+
+    await this.assertFollowTarget(targetUserId);
+    await this.userBlockRepository.block(user.id, targetUserId);
+
+    return { userId: targetUserId, isBlocked: true };
+  }
+
+  public async unblockUser(user: AuthUser, targetUserId: string): Promise<BlockStatusResponse> {
+    if (user.id === targetUserId) {
+      throw new AppError("You cannot unblock yourself", httpStatus.BAD_REQUEST);
+    }
+
+    await this.userBlockRepository.unblock(user.id, targetUserId);
+
+    return { userId: targetUserId, isBlocked: false };
+  }
+
+  public async getBlockedIds(userId: string): Promise<string[]> {
+    return this.userBlockRepository.findBlockedIds(userId);
   }
 
   public async update(id: string, payload: UpdateUserDto): Promise<IUser> {

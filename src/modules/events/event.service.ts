@@ -5,6 +5,12 @@ import type { AuthUser } from "../auth/auth.interface.js";
 import { StorageService } from "../storage/storage.service.js";
 import { UserRepository } from "../user/user.repository.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
+import { UserBlockRepository } from "../user/user-block.repository.js";
+import { EventSaveRepository } from "./event-save.repository.js";
+import { MomentRepository } from "../moments/moment.repository.js";
+import { MomentReactionRepository } from "../moments/moment-reaction.repository.js";
+import { MomentCommentRepository } from "../moments/moment-comment.repository.js";
+import { MomentShareRepository } from "../moments/moment-share.repository.js";
 import type { IUser } from "../user/user.interface.js";
 import { ProductRepository } from "../products/product.repository.js";
 import { EventRepository } from "./event.repository.js";
@@ -14,13 +20,16 @@ import { CheckoutPaymentRepository } from "../payments/checkout-payment.reposito
 import { CheckoutPaymentService } from "../payments/checkout-payment.service.js";
 import { CreatorEarningRepository } from "../payments/creator-earning.repository.js";
 import { TicketShareRepository } from "../payments/ticket-share.repository.js";
+import { NotificationRepository } from "../notifications/notification.repository.js";
 import type {
   CreateEventRewardDto,
   EventHostResponse,
+  EventJoinRequestStatus,
   EventMapQuery,
   EventMemberResponse,
   EventReward,
   EventRewardInput,
+  JoinRequestResponse,
   ProfileEventGroupsResponse,
   CreateEventTicketDto,
   EventResponse,
@@ -80,6 +89,13 @@ export class EventService {
     private readonly checkoutPaymentService = new CheckoutPaymentService(),
     private readonly creatorEarningRepository = new CreatorEarningRepository(),
     private readonly ticketShareRepository = new TicketShareRepository(),
+    private readonly notificationRepository = new NotificationRepository(),
+    private readonly userBlockRepository = new UserBlockRepository(),
+    private readonly eventSaveRepository = new EventSaveRepository(),
+    private readonly momentRepository = new MomentRepository(),
+    private readonly momentReactionRepository = new MomentReactionRepository(),
+    private readonly momentCommentRepository = new MomentCommentRepository(),
+    private readonly momentShareRepository = new MomentShareRepository(),
   ) {}
 
   public async saveDraft(user: AuthUser, payload: SaveEventDraftDto, eventId?: string): Promise<EventResponse> {
@@ -313,11 +329,17 @@ export class EventService {
   public async createEventReward(user: AuthUser, eventId: string, payload: CreateEventRewardDto): Promise<EventResponse> {
     const event = await this.getEventForOwner(user, eventId);
     const reward = await this.normalizeReward(payload, event, user.id);
-    const updatedEvent = await this.eventRepository.updateByIdForUser(eventId, user.id, {
-      rewards: [...this.normalizeExistingRewards(event.rewards), reward],
-    });
+    const rewards = this.normalizeExistingRewards(event.rewards);
+    this.assertTicketRewardAvailable(rewards, reward);
+    const nextRewards = [...rewards, reward];
+    const updatedEvent = reward.rewardType === "ticket" && reward.ticketId
+      ? await this.eventRepository.updateRewardsIfTicketAvailable(eventId, user.id, nextRewards, reward.ticketId)
+      : await this.eventRepository.updateByIdForUser(eventId, user.id, { rewards: nextRewards });
 
     if (!updatedEvent) {
+      if (reward.rewardType === "ticket") {
+        this.throwTicketRewardConflict(reward.ticketId);
+      }
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
@@ -359,9 +381,22 @@ export class EventService {
       throw new AppError("Event reward not found.", httpStatus.NOT_FOUND);
     }
 
-    const updatedEvent = await this.eventRepository.updateByIdForUser(eventId, user.id, { rewards: nextRewards });
+    const updatedReward = nextRewards.find((reward) => reward.id === rewardId)!;
+    this.assertTicketRewardAvailable(rewards, updatedReward, rewardId);
+    const updatedEvent = updatedReward.rewardType === "ticket" && updatedReward.ticketId
+      ? await this.eventRepository.updateRewardsIfTicketAvailable(
+          eventId,
+          user.id,
+          nextRewards,
+          updatedReward.ticketId,
+          { excludeRewardId: rewardId },
+        )
+      : await this.eventRepository.updateByIdForUser(eventId, user.id, { rewards: nextRewards });
 
     if (!updatedEvent) {
+      if (updatedReward.rewardType === "ticket") {
+        this.throwTicketRewardConflict(updatedReward.ticketId);
+      }
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
@@ -389,11 +424,23 @@ export class EventService {
   public async createDraftReward(user: AuthUser, eventId: string, payload: CreateEventRewardDto): Promise<EventResponse> {
     const event = await this.getDraftForUser(user, eventId);
     const reward = await this.normalizeReward(payload, event, user.id);
-    const updatedEvent = await this.eventRepository.updateDraftByIdForUser(eventId, user.id, {
-      rewards: [...this.normalizeExistingRewards(event.rewards), reward],
-    });
+    const rewards = this.normalizeExistingRewards(event.rewards);
+    this.assertTicketRewardAvailable(rewards, reward);
+    const nextRewards = [...rewards, reward];
+    const updatedEvent = reward.rewardType === "ticket" && reward.ticketId
+      ? await this.eventRepository.updateRewardsIfTicketAvailable(
+          eventId,
+          user.id,
+          nextRewards,
+          reward.ticketId,
+          { draftOnly: true },
+        )
+      : await this.eventRepository.updateDraftByIdForUser(eventId, user.id, { rewards: nextRewards });
 
     if (!updatedEvent) {
+      if (reward.rewardType === "ticket") {
+        this.throwTicketRewardConflict(reward.ticketId);
+      }
       throw new AppError("Event draft not found.", httpStatus.NOT_FOUND);
     }
 
@@ -435,9 +482,22 @@ export class EventService {
       throw new AppError("Event draft reward not found.", httpStatus.NOT_FOUND);
     }
 
-    const updatedEvent = await this.eventRepository.updateDraftByIdForUser(eventId, user.id, { rewards: nextRewards });
+    const updatedReward = nextRewards.find((reward) => reward.id === rewardId)!;
+    this.assertTicketRewardAvailable(rewards, updatedReward, rewardId);
+    const updatedEvent = updatedReward.rewardType === "ticket" && updatedReward.ticketId
+      ? await this.eventRepository.updateRewardsIfTicketAvailable(
+          eventId,
+          user.id,
+          nextRewards,
+          updatedReward.ticketId,
+          { excludeRewardId: rewardId, draftOnly: true },
+        )
+      : await this.eventRepository.updateDraftByIdForUser(eventId, user.id, { rewards: nextRewards });
 
     if (!updatedEvent) {
+      if (updatedReward.rewardType === "ticket") {
+        this.throwTicketRewardConflict(updatedReward.ticketId);
+      }
       throw new AppError("Event draft not found.", httpStatus.NOT_FOUND);
     }
 
@@ -472,6 +532,53 @@ export class EventService {
     const events = await this.eventRepository.findDraftsByUserId(user.id);
 
     return events.map((event) => this.toResponse(event));
+  }
+
+  public async listFeedEvents(user?: AuthUser): Promise<EventResponse[]> {
+    const [excludeUserIds, followingIds] = await Promise.all([
+      user ? this.userBlockRepository.findBlockedIds(user.id) : Promise.resolve([]),
+      user ? this.userFollowRepository.findFollowingIds(user.id) : Promise.resolve([]),
+    ]);
+
+    const followingSet = new Set(followingIds);
+    const events = await this.eventRepository.findPublicFeedEvents(excludeUserIds);
+    const hostById = await this.getHostById(events);
+    const interactionMoments = await Promise.all(events.map((event) => this.ensureEventInteractionMoment(event)));
+    const momentIds = interactionMoments.map((moment) => moment._id.toString());
+    const [likeCounts, commentCounts, shareCounts, likedMomentIds] = await Promise.all([
+      this.momentReactionRepository.countByMomentIds(momentIds),
+      this.momentCommentRepository.countByMomentIds(momentIds),
+      this.momentShareRepository.countByMomentIds(momentIds),
+      user
+        ? this.momentReactionRepository.findLikedMomentIds(user.id, momentIds)
+        : Promise.resolve(new Set<string>()),
+    ]);
+
+    return events.map((event, index) => {
+      const host = hostById.get(event.userId.toString()) ?? null;
+      const hostExtras = user && host ? { isFollowing: followingSet.has(event.userId.toString()) } : undefined;
+      const interactionMomentId = interactionMoments[index]!._id.toString();
+      return {
+        ...this.toResponse(event, host, hostExtras),
+        interactionMomentId,
+        likesCount: likeCounts.get(interactionMomentId) ?? 0,
+        commentsCount: commentCounts.get(interactionMomentId) ?? 0,
+        sharesCount: shareCounts.get(interactionMomentId) ?? 0,
+        isLiked: likedMomentIds.has(interactionMomentId),
+      };
+    });
+  }
+
+  public async toggleSaveEvent(user: AuthUser, eventId: string): Promise<{ eventId: string; isSaved: boolean }> {
+    const event = await this.eventRepository.findById(eventId);
+
+    if (!event) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    const result = await this.eventSaveRepository.toggleSave(user.id, eventId);
+
+    return { eventId, isSaved: result.isSaved };
   }
 
   public async listMyPostTagEvents(user: AuthUser): Promise<PostTagEventResponse[]> {
@@ -543,7 +650,7 @@ export class EventService {
   public async getTicketAccess(user: AuthUser, eventId: string): Promise<TicketAccessResponse> {
     const event = await this.eventRepository.findById(eventId);
 
-    if (!event || event.status !== "published") {
+    if (!event || (event.status !== "published" && event.status !== "live")) {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
@@ -571,6 +678,10 @@ export class EventService {
     return this.listProfileEventsByUserId(user.id);
   }
 
+  public async listUserEventsForAdmin(userId: string): Promise<ProfileEventGroupsResponse> {
+    return this.listProfileEventsByUserId(userId);
+  }
+
   public async listProfileEventsByUserId(userId: string): Promise<ProfileEventGroupsResponse> {
     const activeSince = new Date(Date.now() - ACTIVE_EVENT_WINDOW_MS);
     const events = await this.eventRepository.findPublishedProfileEventsByUserId(userId, activeSince);
@@ -582,11 +693,21 @@ export class EventService {
     };
   }
 
+  public async startEvent(user: AuthUser, eventId: string): Promise<EventResponse> {
+    const event = await this.eventRepository.startById(eventId, user.id);
+
+    if (!event) {
+      throw new AppError("Published event not found.", httpStatus.NOT_FOUND);
+    }
+
+    return this.toResponse(event);
+  }
+
   public async completeEvent(user: AuthUser, eventId: string): Promise<EventResponse> {
     const event = await this.eventRepository.completeById(eventId, user.id);
 
     if (!event) {
-      throw new AppError("Published event not found.", httpStatus.NOT_FOUND);
+      throw new AppError("Active event not found.", httpStatus.NOT_FOUND);
     }
 
     const completedAt = event.completedAt ?? new Date();
@@ -595,6 +716,25 @@ export class EventService {
     await this.creatorEarningRepository.setEligibleAtByEventId(eventId, eligibleAt);
 
     return this.toResponse(event);
+  }
+
+  public async autoStartScheduledEvents(): Promise<number> {
+    return this.eventRepository.autoStartScheduled(new Date());
+  }
+
+  public async autoCompleteExpiredEvents(): Promise<number> {
+    const now = new Date();
+    const expired = await this.eventRepository.findAndAutoComplete(now);
+
+    const eligibleAt = new Date(now.getTime() + 72 * 60 * 60 * 1000);
+
+    await Promise.allSettled(
+      expired.map((event) =>
+        this.creatorEarningRepository.setEligibleAtByEventId(event._id.toString(), eligibleAt),
+      ),
+    );
+
+    return expired.length;
   }
 
   public async cancelEvent(user: AuthUser, eventId: string): Promise<EventResponse> {
@@ -685,16 +825,17 @@ export class EventService {
     const [avatarUrl, followersCount, eventsCount, isFollowing] = await Promise.all([
       host?.avatarKey ? this.storageService.createDownloadUrl(host.avatarKey).then((download) => download.url) : Promise.resolve(null),
       host ? this.userFollowRepository.countFollowers(host._id.toString()) : Promise.resolve(0),
-      host ? this.eventRepository.countByUserId(host._id.toString(), "published") : Promise.resolve(0),
+      host ? this.eventRepository.countByUserId(host._id.toString(), ["published", "live"]) : Promise.resolve(0),
       host && host._id.toString() !== user.id ? this.userFollowRepository.isFollowing(user.id, host._id.toString()) : Promise.resolve(false),
     ]);
 
-    return this.toResponse(event, host, {
-      avatarUrl,
-      followersCount,
-      eventsCount,
-      isFollowing,
-    });
+    let myJoinRequestStatus: EventJoinRequestStatus | null = null;
+    if (event.privacy === "locked" && !isOwner) {
+      const joinRequest = await this.eventRepository.findUserJoinRequest(event._id.toString(), user.id);
+      myJoinRequestStatus = (joinRequest?.status as EventJoinRequestStatus) ?? null;
+    }
+
+    return this.toResponse(event, host, { avatarUrl, followersCount, eventsCount, isFollowing }, myJoinRequestStatus);
   }
 
   public async listEventMembers(user: AuthUser, eventId: string): Promise<EventMemberResponse[]> {
@@ -742,6 +883,140 @@ export class EventService {
     return this.resolveMemberResponses(updatedEvent.memberUserIds.map((id) => id.toString()));
   }
 
+  public async submitJoinRequest(user: AuthUser, eventId: string): Promise<{ status: EventJoinRequestStatus }> {
+    const event = await this.eventRepository.findById(eventId);
+
+    if (!event || (event.status !== "published" && event.status !== "live")) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    if (event.privacy !== "locked") {
+      throw new AppError("Join requests are only for locked events.", httpStatus.BAD_REQUEST);
+    }
+
+    if (event.userId.toString() === user.id) {
+      throw new AppError("You cannot request to join your own event.", httpStatus.BAD_REQUEST);
+    }
+
+    const { alreadyExists, event: updatedEvent } = await this.eventRepository.addJoinRequest(eventId, user.id);
+
+    if (alreadyExists) {
+      const existing = event.joinRequests.find((r) => r.userId.toString() === user.id);
+      return { status: (existing?.status ?? "pending") as EventJoinRequestStatus };
+    }
+
+    if (!updatedEvent) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    void this.dispatchJoinRequestNotification(user, event.userId.toString(), event.name ?? null, eventId);
+
+    return { status: "pending" };
+  }
+
+  public async listJoinRequests(user: AuthUser, eventId: string): Promise<JoinRequestResponse[]> {
+    const event = await this.eventRepository.findById(eventId);
+
+    if (!event) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    if (event.userId.toString() !== user.id) {
+      throw new AppError("Forbidden.", httpStatus.FORBIDDEN);
+    }
+
+    if (event.joinRequests.length === 0) {
+      return [];
+    }
+
+    const requestUserIds = event.joinRequests.map((r) => r.userId.toString());
+    const users = await this.userRepository.findMany({ _id: { $in: requestUserIds } }, 0, requestUserIds.length);
+    const urlResults = await Promise.all(
+      users.map((u) =>
+        u.avatarKey
+          ? this.storageService.createDownloadUrl(u.avatarKey).then((d) => d.url).catch(() => null)
+          : Promise.resolve(null),
+      ),
+    );
+    const userMap = new Map(users.map((u, i) => [u._id.toString(), { user: u, avatarUrl: urlResults[i] }]));
+
+    return event.joinRequests.map((r) => {
+      const userId = r.userId.toString();
+      const entry = userMap.get(userId);
+      return {
+        userId,
+        name: entry?.user.name ?? "Unknown",
+        username: entry?.user.username,
+        avatarKey: entry?.user.avatarKey ?? null,
+        avatarUrl: entry?.avatarUrl ?? null,
+        status: r.status,
+        createdAt: r.createdAt.toISOString(),
+      };
+    });
+  }
+
+  public async acceptJoinRequest(user: AuthUser, eventId: string, requestUserId: string): Promise<void> {
+    const updated = await this.eventRepository.updateJoinRequestStatus(eventId, user.id, requestUserId, "accepted");
+
+    if (!updated) {
+      throw new AppError("Event or join request not found.", httpStatus.NOT_FOUND);
+    }
+
+    void this.dispatchJoinRequestAcceptedNotification(user, requestUserId, updated.name ?? null, eventId);
+  }
+
+  private async dispatchJoinRequestAcceptedNotification(
+    actor: AuthUser,
+    recipientId: string,
+    eventName: string | null,
+    eventId: string,
+  ): Promise<void> {
+    try {
+      await this.notificationRepository.create({
+        recipientUserId: recipientId,
+        type: "join_request_accepted",
+        actorUserId: actor.id,
+        actorName: actor.name ?? null,
+        actorUsername: actor.username ?? null,
+        actorAvatarKey: actor.avatarKey ?? null,
+        eventId,
+        eventName,
+      });
+    } catch {
+      // non-critical
+    }
+  }
+
+  public async declineJoinRequest(user: AuthUser, eventId: string, requestUserId: string): Promise<void> {
+    const updated = await this.eventRepository.updateJoinRequestStatus(eventId, user.id, requestUserId, "declined");
+
+    if (!updated) {
+      throw new AppError("Event or join request not found.", httpStatus.NOT_FOUND);
+    }
+  }
+
+  private async dispatchJoinRequestNotification(
+    actor: AuthUser,
+    creatorId: string,
+    eventName: string | null,
+    eventId: string,
+  ): Promise<void> {
+    try {
+      await this.notificationRepository.create({
+        recipientUserId: creatorId,
+        type: "join_request",
+        actorUserId: actor.id,
+        actorName: actor.name ?? null,
+        actorUsername: actor.username ?? null,
+        actorAvatarKey: actor.avatarKey ?? null,
+        eventId,
+        eventName,
+      });
+    } catch {
+      // non-critical
+    }
+  }
+
   private async resolveMemberResponses(memberIds: string[]): Promise<EventMemberResponse[]> {
     if (memberIds.length === 0) {
       return [];
@@ -768,35 +1043,40 @@ export class EventService {
   private normalizeDraftPayload(payload: SaveEventDraftDto): SaveEventDraftDto {
     const normalized: SaveEventDraftDto = { ...payload };
 
-    if ("name" in payload) {
+    if (payload.name !== undefined) {
       normalized.name = payload.name?.trim() || null;
     }
 
-    if ("description" in payload) {
+    if (payload.description !== undefined) {
       normalized.description = payload.description?.trim() || null;
     }
 
-    if ("bannerImageKey" in payload) {
+    if (payload.bannerImageKey !== undefined) {
       normalized.bannerImageKey = payload.bannerImageKey?.trim() || null;
     }
 
-    if ("bannerOriginalImageKey" in payload) {
+    if (payload.bannerOriginalImageKey !== undefined) {
       normalized.bannerOriginalImageKey = payload.bannerOriginalImageKey?.trim() || null;
     }
 
-    if ("bannerImageDisplay" in payload) {
+    if (payload.bannerImageDisplay !== undefined) {
       normalized.bannerImageDisplay = payload.bannerImageDisplay ?? null;
     }
 
-    if ("category" in payload) {
+    if (payload.category !== undefined) {
       normalized.category = payload.category ?? null;
     }
 
-    if ("endAt" in payload) {
+    if (payload.categories !== undefined) {
+      normalized.categories = [...new Set(payload.categories)];
+      normalized.category = normalized.categories[0] ?? null;
+    }
+
+    if (payload.endAt !== undefined) {
       normalized.endAt = payload.endAt ?? null;
     }
 
-    if ("location" in payload) {
+    if (payload.location !== undefined) {
       normalized.location = payload.location
         ? {
             searchLabel: payload.location.searchLabel?.trim() || null,
@@ -809,11 +1089,11 @@ export class EventService {
         : null;
     }
 
-    if ("tickets" in payload) {
+    if (payload.tickets !== undefined) {
       normalized.tickets = payload.tickets?.map((ticket) => this.normalizeTicket(ticket)) ?? [];
     }
 
-    if ("privacy" in payload) {
+    if (payload.privacy !== undefined) {
       normalized.privacy = payload.privacy ?? "public";
     }
 
@@ -828,7 +1108,8 @@ export class EventService {
       ...draftPayload,
       name: payload.name.trim(),
       ageRestriction: payload.ageRestriction,
-      category: payload.category,
+      category: payload.categories[0],
+      categories: payload.categories,
       scheduledAt: payload.scheduledAt,
       endAt: payload.endAt,
       location: draftPayload.location ?? {},
@@ -850,7 +1131,7 @@ export class EventService {
   }
 
   private normalizeExistingRewards(rewards?: EventReward[] | null): EventReward[] {
-    return (rewards ?? []).map((reward) => ({
+    const normalizedRewards = (rewards ?? []).map((reward) => ({
       id: reward.id?.trim() || randomUUID(),
       rewardType: reward.rewardType,
       ticketId: reward.ticketId ?? null,
@@ -865,6 +1146,40 @@ export class EventService {
       freeQuantity: reward.freeQuantity,
       capacity: reward.capacity,
     }));
+
+    const ticketIds = new Set<string>();
+    return normalizedRewards.filter((reward) => {
+      if (reward.rewardType !== "ticket" || !reward.ticketId) {
+        return true;
+      }
+      if (ticketIds.has(reward.ticketId)) {
+        return false;
+      }
+      ticketIds.add(reward.ticketId);
+      return true;
+    });
+  }
+
+  private assertTicketRewardAvailable(rewards: EventReward[], candidate: EventReward, excludeRewardId?: string): void {
+    if (
+      candidate.rewardType === "ticket"
+      && candidate.ticketId
+      && rewards.some((reward) => (
+        reward.id !== excludeRewardId
+        && reward.rewardType === "ticket"
+        && reward.ticketId === candidate.ticketId
+      ))
+    ) {
+      this.throwTicketRewardConflict(candidate.ticketId);
+    }
+  }
+
+  private throwTicketRewardConflict(ticketId?: string | null): never {
+    throw new AppError(
+      "This ticket already has a reward. Each ticket can have only one reward. Edit or delete the existing reward before creating another.",
+      httpStatus.CONFLICT,
+      { code: "TICKET_REWARD_ALREADY_EXISTS", ticketId: ticketId ?? null },
+    );
   }
 
   private async normalizeReward(
@@ -934,11 +1249,11 @@ export class EventService {
   public async claimReward(user: AuthUser, eventId: string, rewardId: string): Promise<RewardClaimResponse> {
     const event = await this.eventRepository.findById(eventId);
 
-    if (!event || event.status !== "published") {
+    if (!event || (event.status !== "published" && event.status !== "live")) {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
-    const reward = event.rewards.find((r) => r.id === rewardId);
+    const reward = this.normalizeExistingRewards(event.rewards).find((r) => r.id === rewardId);
 
     if (!reward) {
       throw new AppError("Reward not found.", httpStatus.NOT_FOUND);
@@ -1015,6 +1330,15 @@ export class EventService {
     return new Map(hosts.map((host) => [host._id.toString(), host]));
   }
 
+  private async ensureEventInteractionMoment(event: IEvent) {
+    return this.momentRepository.ensureEventAnnouncement({
+      eventId: event._id.toString(),
+      userId: event.userId.toString(),
+      eventTitle: event.name ?? null,
+      caption: event.description ?? null,
+    });
+  }
+
   private toClaimResponse(claim: IRewardClaim): RewardClaimResponse {
     return {
       id: claim._id.toString(),
@@ -1061,6 +1385,7 @@ export class EventService {
       eventsCount?: number;
       isFollowing?: boolean;
     },
+    myJoinRequestStatus?: EventJoinRequestStatus | null,
   ): EventResponse {
     return {
       id: event._id.toString(),
@@ -1073,14 +1398,17 @@ export class EventService {
       bannerOriginalImageKey: event.bannerOriginalImageKey ?? null,
       bannerImageDisplay: event.bannerImageDisplay ?? null,
       ageRestriction: event.ageRestriction ?? null,
-      category: event.category ?? null,
+      category: event.categories?.[0] ?? event.category ?? null,
+      categories: event.categories?.length ? event.categories : event.category ? [event.category] : [],
       scheduledAt: event.scheduledAt ?? null,
       endAt: event.endAt ?? null,
       location: event.location ?? null,
       tickets: event.tickets,
       rewards: this.normalizeExistingRewards(event.rewards),
       privacy: event.privacy,
+      ...(myJoinRequestStatus !== undefined ? { myJoinRequestStatus: myJoinRequestStatus ?? null } : {}),
       publishedAt: event.publishedAt ?? null,
+      startedAt: event.startedAt ?? null,
       completedAt: event.completedAt ?? null,
       cancelledAt: event.cancelledAt ?? null,
       createdAt: event.createdAt,

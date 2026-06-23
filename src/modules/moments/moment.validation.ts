@@ -76,6 +76,26 @@ const mediaItem = z
   });
 
 export const momentValidation = {
+  feedQuery: z.object({
+    query: z.object({
+      hashtags: z
+        .string()
+        .max(1300)
+        .optional()
+        .transform((value) => value
+          ? [...new Set(value.split(",").map((tag) => tag.trim()).filter(Boolean))].slice(0, 20)
+          : []),
+      limit: z.coerce.number().int().min(1).max(100).default(50),
+    }).strict(),
+  }),
+  hashtagMoments: z.object({
+    params: z.object({
+      hashtag: z.string().trim().min(1).max(65),
+    }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(100).default(100),
+    }).strict(),
+  }),
   momentIdParam: z.object({
     params: z.object({
       id: objectId,

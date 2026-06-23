@@ -1,6 +1,6 @@
 import type { Types } from "mongoose";
 
-export const eventStatuses = ["draft", "published", "completed", "cancelled"] as const;
+export const eventStatuses = ["draft", "published", "live", "completed", "cancelled"] as const;
 export type EventStatus = (typeof eventStatuses)[number];
 
 export const eventAgeRestrictions = ["all_ages", "18_plus", "21_plus"] as const;
@@ -14,6 +14,15 @@ export type EventTicketType = (typeof eventTicketTypes)[number];
 
 export const eventRewardTypes = ["ticket", "product"] as const;
 export type EventRewardType = (typeof eventRewardTypes)[number];
+
+export const eventJoinRequestStatuses = ["pending", "accepted", "declined"] as const;
+export type EventJoinRequestStatus = (typeof eventJoinRequestStatuses)[number];
+
+export interface EventJoinRequest {
+  userId: Types.ObjectId;
+  status: EventJoinRequestStatus;
+  createdAt: Date;
+}
 
 export const eventCategories = [
   "Music",
@@ -112,6 +121,16 @@ export interface EventMemberResponse {
   avatarUrl?: string | null;
 }
 
+export interface JoinRequestResponse {
+  userId: string;
+  name: string;
+  username?: string;
+  avatarKey?: string | null;
+  avatarUrl?: string | null;
+  status: EventJoinRequestStatus;
+  createdAt: string;
+}
+
 export interface IEvent {
   _id: Types.ObjectId;
   userId: Types.ObjectId;
@@ -123,6 +142,7 @@ export interface IEvent {
   bannerImageDisplay?: EventImageDisplay | null;
   ageRestriction?: EventAgeRestriction | null;
   category?: EventCategory | null;
+  categories?: EventCategory[];
   scheduledAt?: Date | null;
   endAt?: Date | null;
   location?: EventLocation | null;
@@ -130,7 +150,9 @@ export interface IEvent {
   rewards: EventReward[];
   privacy: EventPrivacy;
   memberUserIds: Types.ObjectId[];
+  joinRequests: EventJoinRequest[];
   publishedAt?: Date | null;
+  startedAt?: Date | null;
   completedAt?: Date | null;
   cancelledAt?: Date | null;
   createdAt: Date;
@@ -145,6 +167,7 @@ export interface SaveEventDraftDto {
   bannerImageDisplay?: EventImageDisplay | null;
   ageRestriction?: EventAgeRestriction | null;
   category?: EventCategory | null;
+  categories?: EventCategory[];
   scheduledAt?: Date | null;
   endAt?: Date | null;
   location?: EventLocation | null;
@@ -162,7 +185,7 @@ export interface PublishEventDto extends SaveEventDraftDto {
   name: string;
   description?: string | null;
   ageRestriction: EventAgeRestriction;
-  category: EventCategory;
+  categories: EventCategory[];
   scheduledAt: Date;
   endAt: Date;
   location: EventLocation;
@@ -175,6 +198,11 @@ export interface EventResponse {
   id: string;
   userId: string;
   host?: EventHostResponse | null;
+  interactionMomentId?: string;
+  likesCount?: number;
+  commentsCount?: number;
+  sharesCount?: number;
+  isLiked?: boolean;
   status: EventStatus;
   name?: string | null;
   description?: string | null;
@@ -183,13 +211,16 @@ export interface EventResponse {
   bannerImageDisplay?: EventImageDisplay | null;
   ageRestriction?: EventAgeRestriction | null;
   category?: EventCategory | null;
+  categories: EventCategory[];
   scheduledAt?: Date | null;
   endAt?: Date | null;
   location?: EventLocation | null;
   tickets: EventTicket[];
   rewards: EventReward[];
   privacy: EventPrivacy;
+  myJoinRequestStatus?: EventJoinRequestStatus | null;
   publishedAt?: Date | null;
+  startedAt?: Date | null;
   completedAt?: Date | null;
   cancelledAt?: Date | null;
   createdAt: Date;

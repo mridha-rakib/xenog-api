@@ -26,10 +26,12 @@ export interface IMoment {
   userId: Types.ObjectId;
   mode: MomentMode;
   caption?: string | null;
+  hashtags: string[];
   audience: MomentAudience;
   taggedPeople: string[];
   eventTitle?: string | null;
   eventId?: Types.ObjectId | null;
+  isEventAnnouncement?: boolean;
   eventCode?: string | null;
   mediaItems: MomentMediaItem[];
   createdAt: Date;
@@ -94,6 +96,7 @@ export interface CreateMomentDto {
   taggedPeople?: string[];
   eventTitle?: string | null;
   eventId?: string | null;
+  isEventAnnouncement?: boolean;
   eventCode?: string | null;
   mediaItems?: MomentMediaItem[];
 }
@@ -113,6 +116,7 @@ export interface MomentResponse {
   author?: MomentAuthorResponse | null;
   mode: MomentMode;
   caption?: string | null;
+  hashtags: string[];
   audience: MomentAudience;
   taggedPeople: string[];
   eventTitle?: string | null;
@@ -126,6 +130,12 @@ export interface MomentResponse {
   isSaved: boolean;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface MomentFeedQuery {
+  hashtags?: string[];
+  limit?: number;
+  excludeUserIds?: string[];
 }
 
 export interface MomentTimelineItemResponse {

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { catchAsync } from "../../core/http/catch-async.js";
-import { authenticate, requireBusinessAccount } from "../../core/middlewares/auth.middleware.js";
+import { authenticate, authorizeRoles, requireBusinessAccount } from "../../core/middlewares/auth.middleware.js";
 import { validate } from "../../core/middlewares/validate.middleware.js";
 import { EventController } from "./event.controller.js";
 import { eventValidation } from "./event.validation.js";
@@ -15,6 +15,7 @@ router.use(authenticate);
 router.use((req, res, next) => {
   if (req.method === "GET") return next();
   if (req.method === "POST" && /\/rewards\/[^/]+\/claim$/.test(req.path)) return next();
+  if (req.method === "POST" && /\/join-requests$/.test(req.path)) return next();
   requireBusinessAccount(req, res, next);
 });
 
@@ -44,6 +45,7 @@ router.delete(
 );
 router.post("/publish", validate(eventValidation.publish), catchAsync(controller.publish));
 router.post("/:id/publish", validate(eventValidation.publishDraft), catchAsync(controller.publishDraft));
+router.get("/feed", catchAsync(controller.listFeedEvents));
 router.get("/mine/profile", catchAsync(controller.listMyProfileEvents));
 router.get("/mine/post-tag", catchAsync(controller.listMyPostTagEvents));
 router.get("/mine/drafts", catchAsync(controller.listMyDraftEvents));
@@ -69,11 +71,18 @@ router.patch(
   catchAsync(controller.updateEventReward),
 );
 router.delete("/:id/rewards/:rewardId", validate(eventValidation.eventRewardParams), catchAsync(controller.deleteEventReward));
+router.post("/:id/save", validate(eventValidation.eventParams), catchAsync(controller.saveEvent));
+router.post("/:id/start", validate(eventValidation.eventParams), catchAsync(controller.startEvent));
 router.post("/:id/complete", validate(eventValidation.eventParams), catchAsync(controller.completeEvent));
 router.post("/:id/cancel", validate(eventValidation.eventParams), catchAsync(controller.cancelEvent));
 router.get("/:id/members", validate(eventValidation.listEventMembers), catchAsync(controller.listEventMembers));
 router.post("/:id/members", validate(eventValidation.addEventMember), catchAsync(controller.addEventMember));
 router.delete("/:id/members/:userId", validate(eventValidation.removeEventMember), catchAsync(controller.removeEventMember));
+router.get("/admin/users/:userId/events", authorizeRoles("admin"), validate(eventValidation.adminUserEvents), catchAsync(controller.listUserEventsForAdmin));
+router.post("/:id/join-requests", validate(eventValidation.submitJoinRequest), catchAsync(controller.submitJoinRequest));
+router.get("/:id/join-requests", validate(eventValidation.listJoinRequests), catchAsync(controller.listJoinRequests));
+router.post("/:id/join-requests/:requestUserId/accept", validate(eventValidation.joinRequestAction), catchAsync(controller.acceptJoinRequest));
+router.post("/:id/join-requests/:requestUserId/decline", validate(eventValidation.joinRequestAction), catchAsync(controller.declineJoinRequest));
 router.patch("/:id", validate(eventValidation.updateEvent), catchAsync(controller.updateEvent));
 router.delete("/:id", validate(eventValidation.deleteEvent), catchAsync(controller.deleteEvent));
 router.get("/:id", validate(eventValidation.eventParams), catchAsync(controller.getEventById));

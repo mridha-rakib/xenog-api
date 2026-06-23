@@ -85,6 +85,11 @@ export const userValidation = {
       id: objectId,
     }),
   }),
+  block: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+  }),
   update: z.object({
     params: z.object({
       id: objectId,

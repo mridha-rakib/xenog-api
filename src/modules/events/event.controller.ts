@@ -352,6 +352,17 @@ export class EventController {
     });
   };
 
+  public listFeedEvents = async (req: Request, res: Response): Promise<void> => {
+    const events = await this.eventService.listFeedEvents(req.authUser as AuthUser | undefined);
+
+    ApiResponse.success(res, {
+      message: "Feed events retrieved",
+      data: {
+        events,
+      },
+    });
+  };
+
   public listMyPostTagEvents = async (req: Request, res: Response): Promise<void> => {
     const events = await this.eventService.listMyPostTagEvents(req.authUser as AuthUser);
 
@@ -374,6 +385,15 @@ export class EventController {
       data: {
         access,
       },
+    });
+  };
+
+  public listUserEventsForAdmin = async (req: Request, res: Response): Promise<void> => {
+    const events = await this.eventService.listUserEventsForAdmin(req.params.userId as string);
+
+    ApiResponse.success(res, {
+      message: "User events retrieved",
+      data: { events },
     });
   };
 
@@ -435,6 +455,17 @@ export class EventController {
     });
   };
 
+  public startEvent = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.startEvent(req.authUser as AuthUser, req.params.id as string);
+
+    ApiResponse.success(res, {
+      message: "Event started",
+      data: {
+        event,
+      },
+    });
+  };
+
   public completeEvent = async (req: Request, res: Response): Promise<void> => {
     const event = await this.eventService.completeEvent(req.authUser as AuthUser, req.params.id as string);
 
@@ -454,6 +485,15 @@ export class EventController {
       data: {
         event,
       },
+    });
+  };
+
+  public saveEvent = async (req: Request, res: Response): Promise<void> => {
+    const result = await this.eventService.toggleSaveEvent(req.authUser as AuthUser, req.params.id as string);
+
+    ApiResponse.success(res, {
+      message: result.isSaved ? "Event saved" : "Event unsaved",
+      data: { summary: result },
     });
   };
 
@@ -490,6 +530,57 @@ export class EventController {
     ApiResponse.success(res, {
       message: "Member removed",
       data: { members },
+    });
+  };
+
+  public submitJoinRequest = async (req: Request, res: Response): Promise<void> => {
+    const result = await this.eventService.submitJoinRequest(
+      req.authUser as AuthUser,
+      req.params.id as string,
+    );
+
+    ApiResponse.success(res, {
+      statusCode: httpStatus.CREATED,
+      message: "Join request submitted",
+      data: result,
+    });
+  };
+
+  public listJoinRequests = async (req: Request, res: Response): Promise<void> => {
+    const requests = await this.eventService.listJoinRequests(
+      req.authUser as AuthUser,
+      req.params.id as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Join requests retrieved",
+      data: { requests },
+    });
+  };
+
+  public acceptJoinRequest = async (req: Request, res: Response): Promise<void> => {
+    await this.eventService.acceptJoinRequest(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.requestUserId as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Join request accepted",
+      data: {},
+    });
+  };
+
+  public declineJoinRequest = async (req: Request, res: Response): Promise<void> => {
+    await this.eventService.declineJoinRequest(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.requestUserId as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Join request declined",
+      data: {},
     });
   };
 }

@@ -21,6 +21,11 @@ router.get(
   validate(momentValidation.profileTimeline),
   catchAsync(controller.getProfileTimeline),
 );
+router.get(
+  "/hashtags/:hashtag",
+  validate(momentValidation.hashtagMoments),
+  catchAsync(controller.listHashtagMoments),
+);
 router.post(
   "/:id/share",
   validate(momentValidation.momentIdParam),
@@ -61,7 +66,7 @@ router.get(
   validate(momentValidation.eventMoments),
   catchAsync(controller.listEventMoments),
 );
-router.get("/", catchAsync(controller.listFeedMoments));
+router.get("/", validate(momentValidation.feedQuery), catchAsync(controller.listFeedMoments));
 router.get("/mine", catchAsync(controller.listMyMoments));
 router.get("/saved", catchAsync(controller.listSavedMoments));
 

@@ -64,6 +64,14 @@ const momentSchema = new Schema<IMoment>(
       maxlength: 5000,
       default: null,
     },
+    hashtags: {
+      type: [{ type: String, trim: true, lowercase: true, maxlength: 64 }],
+      default: [],
+      validate: {
+        validator: (values: string[]) => values.length <= 20 && new Set(values).size === values.length,
+        message: "A moment can have up to 20 unique hashtags",
+      },
+    },
     audience: {
       type: String,
       enum: momentAudiences,
@@ -94,6 +102,11 @@ const momentSchema = new Schema<IMoment>(
       index: true,
       sparse: true,
     },
+    isEventAnnouncement: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
     eventCode: {
       type: String,
       trim: true,
@@ -112,5 +125,11 @@ const momentSchema = new Schema<IMoment>(
 );
 
 momentSchema.index({ caption: "text", eventTitle: "text", taggedPeople: "text" });
+momentSchema.index({ mode: 1, audience: 1, hashtags: 1, createdAt: -1 });
+momentSchema.index({ audience: 1, hashtags: 1, createdAt: -1 });
+momentSchema.index(
+  { eventId: 1, isEventAnnouncement: 1 },
+  { unique: true, partialFilterExpression: { isEventAnnouncement: true } },
+);
 
 export const MomentModel = model<IMoment>("Moment", momentSchema);

@@ -6,13 +6,25 @@ import { RedisClient } from "./config/redis.js";
 import { logger } from "./core/logger/logger.js";
 import { seedAdminUser } from "./core/seed/admin.seed.js";
 import { realtimeGateway } from "./modules/realtime/realtime.gateway.js";
+import { startEventScheduler } from "./modules/events/event.scheduler.js";
 import { createApp } from "./app.js";
 
 const startServer = async (): Promise<void> => {
   await Database.connect();
   await seedAdminUser();
-  await RedisClient.waitUntilReady();
-  await MinioClient.ensureBucket();
+  startEventScheduler();
+
+  try {
+    await RedisClient.waitUntilReady();
+  } catch (error) {
+    logger.warn({ service: "redis", error }, "Redis unavailable — starting without cache");
+  }
+
+  try {
+    await MinioClient.ensureBucket();
+  } catch (error) {
+    logger.warn({ service: "minio", error }, "MinIO unavailable — starting without object storage");
+  }
 
   const app = createApp();
   const server = createServer(app);

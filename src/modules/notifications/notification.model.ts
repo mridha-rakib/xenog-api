@@ -4,7 +4,7 @@ import type { INotification } from "./notification.interface.js";
 const notificationSchema = new Schema<INotification>(
   {
     recipientUserId: { type: Schema.Types.ObjectId, required: true, index: true },
-    type: { type: String, enum: ["follow", "ticket_buyer", "ticket_creator", "ticket_share"], required: true },
+    type: { type: String, enum: ["follow", "ticket_buyer", "ticket_creator", "ticket_share", "join_request", "join_request_accepted"], required: true },
     actorUserId: { type: Schema.Types.ObjectId, default: null },
     actorName: { type: String, default: null },
     actorUsername: { type: String, default: null },

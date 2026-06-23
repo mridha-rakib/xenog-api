@@ -5,6 +5,7 @@ import { StorageService } from "../storage/storage.service.js";
 import type { IUser } from "../user/user.interface.js";
 import { UserRepository } from "../user/user.repository.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
+import { UserBlockRepository } from "../user/user-block.repository.js";
 import { MomentShareRepository } from "./moment-share.repository.js";
 import { MomentRepository } from "./moment.repository.js";
 import type {
@@ -19,9 +20,11 @@ import type {
   MomentInteractionSummaryResponse,
   MomentMediaItem,
   MomentResponse,
+  MomentFeedQuery,
   MomentSaveSummaryResponse,
   MomentTimelineItemResponse,
 } from "./moment.interface.js";
+import { extractHashtags, normalizeHashtag } from "./moment-hashtag.js";
 import { MomentCommentRepository } from "./moment-comment.repository.js";
 import { MomentCommentReactionRepository } from "./moment-comment-reaction.repository.js";
 import { MomentReactionRepository } from "./moment-reaction.repository.js";
@@ -47,6 +50,7 @@ export class MomentService {
     private readonly userRepository = new UserRepository(),
     private readonly momentShareRepository = new MomentShareRepository(),
     private readonly userFollowRepository = new UserFollowRepository(),
+    private readonly userBlockRepository = new UserBlockRepository(),
     private readonly momentReactionRepository = new MomentReactionRepository(),
     private readonly momentCommentRepository = new MomentCommentRepository(),
     private readonly momentCommentReactionRepository = new MomentCommentReactionRepository(),
@@ -91,6 +95,7 @@ export class MomentService {
       userId: user.id,
       mode: payload.mode,
       caption: payload.caption?.trim() || null,
+      hashtags: extractHashtags(payload.caption),
       audience: payload.audience,
       taggedPeople: payload.taggedPeople ?? [],
       eventTitle: resolvedEventTitle,
@@ -144,8 +149,23 @@ export class MomentService {
     );
   }
 
-  public async listFeedMoments(user: AuthUser): Promise<MomentResponse[]> {
-    const moments = await this.momentRepository.findFeed();
+  public async listFeedMoments(user: AuthUser, query: MomentFeedQuery = {}): Promise<MomentResponse[]> {
+    const hashtags = query.hashtags?.map(normalizeHashtag).filter(Boolean);
+    const excludeUserIds = await this.userBlockRepository.findBlockedIds(user.id);
+    const moments = await this.momentRepository.findFeed({ ...query, hashtags, excludeUserIds });
+    const [viewerFollowingIds, interactionContext] = await Promise.all([
+      this.getViewerFollowingIdSet(user),
+      this.buildInteractionContext(moments, user),
+    ]);
+
+    return Promise.all(
+      moments.map((moment) => this.toResponse(moment, undefined, user, viewerFollowingIds, interactionContext)),
+    );
+  }
+
+  public async listHashtagMoments(hashtagValue: string, user: AuthUser, limit = 100): Promise<MomentResponse[]> {
+    const hashtag = normalizeHashtag(hashtagValue);
+    const moments = hashtag ? await this.momentRepository.findPublicByHashtag(hashtag, limit) : [];
     const [viewerFollowingIds, interactionContext] = await Promise.all([
       this.getViewerFollowingIdSet(user),
       this.buildInteractionContext(moments, user),
@@ -399,6 +419,7 @@ export class MomentService {
       author: await this.toAuthorResponse(resolvedAuthor, viewer, viewerFollowingIds),
       mode: moment.mode,
       caption: moment.caption ?? null,
+      hashtags: moment.hashtags ?? [],
       audience: moment.audience,
       taggedPeople: moment.taggedPeople,
       eventTitle: moment.eventTitle ?? null,

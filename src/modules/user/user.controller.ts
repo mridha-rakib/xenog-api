@@ -140,6 +140,27 @@ export class UserController {
     });
   };
 
+  public block = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const block = await this.userService.blockUser(req.authUser as AuthUser, id);
+
+    ApiResponse.success(res, {
+      statusCode: httpStatus.CREATED,
+      message: "User blocked",
+      data: { block },
+    });
+  };
+
+  public unblock = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const block = await this.userService.unblockUser(req.authUser as AuthUser, id);
+
+    ApiResponse.success(res, {
+      message: "User unblocked",
+      data: { block },
+    });
+  };
+
   public update = async (req: Request, res: Response): Promise<void> => {
     const { id } = req.params as { id: string };
     const user = await this.userService.update(id, req.body);

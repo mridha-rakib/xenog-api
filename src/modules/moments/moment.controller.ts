@@ -31,13 +31,27 @@ export class MomentController {
   };
 
   public listFeedMoments = async (req: Request, res: Response): Promise<void> => {
-    const moments = await this.momentService.listFeedMoments(req.authUser as AuthUser);
+    const moments = await this.momentService.listFeedMoments(
+      req.authUser as AuthUser,
+      req.query as { hashtags?: string[]; limit?: number },
+    );
 
     ApiResponse.success(res, {
       message: "Feed moments retrieved",
       data: {
         moments,
       },
+    });
+  };
+
+  public listHashtagMoments = async (req: Request, res: Response): Promise<void> => {
+    const { hashtag } = req.params as { hashtag: string };
+    const { limit } = req.query as { limit?: number };
+    const moments = await this.momentService.listHashtagMoments(hashtag, req.authUser as AuthUser, limit);
+
+    ApiResponse.success(res, {
+      message: "Hashtag moments retrieved",
+      data: { moments },
     });
   };
 

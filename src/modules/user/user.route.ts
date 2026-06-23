@@ -58,6 +58,18 @@ router.delete(
   validate(userValidation.follow),
   catchAsync(controller.unfollow),
 );
+router.post(
+  "/:id/block",
+  authenticate,
+  validate(userValidation.block),
+  catchAsync(controller.block),
+);
+router.delete(
+  "/:id/block",
+  authenticate,
+  validate(userValidation.block),
+  catchAsync(controller.unblock),
+);
 router.get("/:id", validate(userValidation.getById), catchAsync(controller.getById));
 router.patch("/:id", validate(userValidation.update), catchAsync(controller.update));
 router.delete("/:id", validate(userValidation.delete), catchAsync(controller.delete));

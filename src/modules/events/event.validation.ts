@@ -17,7 +17,7 @@ const optionalText = (label: string, maxLength: number) =>
     .max(maxLength, `${label} cannot exceed ${maxLength} characters`)
     .optional()
     .nullable()
-    .transform((value) => value || null);
+    .transform((value) => (value === undefined ? undefined : value || null));
 
 const dateTime = (label: string) =>
   z.preprocess(
@@ -38,7 +38,11 @@ const dateTime = (label: string) =>
 const optionalDateTime = (label: string) =>
   z.preprocess(
     (value) => {
-      if (value === undefined || value === null || value === "") {
+      if (value === undefined) {
+        return undefined;
+      }
+
+      if (value === null || value === "") {
         return null;
       }
 
@@ -50,8 +54,9 @@ const optionalDateTime = (label: string) =>
         invalid_type_error: `${label} must be a valid date and time`,
         required_error: `${label} is required`,
       })
-      .nullable(),
-  ).transform((value) => value ?? null);
+      .nullable()
+      .optional(),
+  );
 
 const queryNumber = (schema: z.ZodNumber) =>
   z.preprocess(
@@ -73,7 +78,23 @@ const eventCategory = z.preprocess(
   }),
 );
 
-const optionalEventCategory = eventCategory.optional().nullable().transform((value) => value ?? null);
+const optionalEventCategory = eventCategory.optional().nullable().transform((value) => (value === undefined ? undefined : (value ?? null)));
+
+const eventCategoryList = z
+  .array(eventCategory, {
+    required_error: "Select at least 1 category",
+    invalid_type_error: "Categories must be a list",
+  })
+  .min(1, "Select at least 1 category")
+  .max(3, "You can select up to 3 categories")
+  .refine((values) => new Set(values).size === values.length, "Categories must be unique");
+
+const draftEventCategoryList = z
+  .array(eventCategory, {
+    invalid_type_error: "Categories must be a list",
+  })
+  .max(3, "You can select up to 3 categories")
+  .refine((values) => new Set(values).size === values.length, "Categories must be unique");
 
 const normalizedNumber = z.number().min(0).max(1);
 
@@ -98,7 +119,7 @@ const bannerImageDisplay = z
   .strict()
   .optional()
   .nullable()
-  .transform((value) => value ?? null);
+  .transform((value) => (value === undefined ? undefined : (value ?? null)));
 
 const eventLocation = z
   .object({
@@ -214,8 +235,9 @@ const draftBodyBase = z
     bannerImageDisplay,
     ageRestriction: z.enum(eventAgeRestrictions).optional().nullable(),
     category: optionalEventCategory,
-    scheduledAt: optionalDateTime("Start time"),
-    endAt: optionalDateTime("End time"),
+    categories: draftEventCategoryList.optional(),
+    scheduledAt: optionalDateTime("Event start date and time"),
+    endAt: optionalDateTime("Event end date and time"),
     location: eventLocation.optional().nullable(),
     tickets: z.array(eventTicket).max(100).optional(),
     privacy: z.enum(eventPrivacyOptions).default("public").optional(),
@@ -226,20 +248,23 @@ const validateEventDateRange = (event: { scheduledAt?: Date | null; endAt?: Date
   if (event.scheduledAt && event.endAt && event.endAt <= event.scheduledAt) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "End time must be after the start time",
+      message: "Event end date and time must be after the start date and time",
       path: ["endAt"],
     });
   }
 };
+
+const draftPatchBody = draftBodyBase.superRefine(validateEventDateRange);
 
 const draftBody = draftBodyBase.superRefine(validateEventDateRange);
 
 const publishBody = draftBodyBase.extend({
   name: z.string().trim().min(1, "Event name is required").max(160),
   ageRestriction: z.enum(eventAgeRestrictions),
-  category: eventCategory,
-  scheduledAt: dateTime("Start time"),
-  endAt: dateTime("End time"),
+  category: eventCategory.optional(),
+  categories: eventCategoryList,
+  scheduledAt: dateTime("Event start date and time"),
+  endAt: dateTime("Event end date and time"),
   location: eventLocation.refine((value) => Boolean(value.venue || value.address || value.searchLabel), {
     message: "Location is required",
   }),
@@ -293,7 +318,7 @@ export const eventValidation = {
     params: z.object({
       id: objectId,
     }),
-    body: draftBody,
+    body: draftPatchBody,
   }),
   deleteEvent: z.object({
     params: z.object({
@@ -410,6 +435,27 @@ export const eventValidation = {
     params: z.object({
       id: objectId,
       userId: objectId,
+    }),
+  }),
+  adminUserEvents: z.object({
+    params: z.object({
+      userId: objectId,
+    }),
+  }),
+  submitJoinRequest: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+  }),
+  listJoinRequests: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+  }),
+  joinRequestAction: z.object({
+    params: z.object({
+      id: objectId,
+      requestUserId: objectId,
     }),
   }),
 };

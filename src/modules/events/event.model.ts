@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Schema, model } from "mongoose";
-import type { EventLocation, EventReward, EventTicket, IEvent } from "./event.interface.js";
+import type { EventJoinRequest, EventLocation, EventReward, EventTicket, IEvent } from "./event.interface.js";
 import {
   eventAgeRestrictions,
   eventCategories,
@@ -48,6 +48,15 @@ const eventLocationSchema = new Schema<EventLocation>(
       max: 180,
       default: null,
     },
+  },
+  { _id: false },
+);
+
+const eventJoinRequestSchema = new Schema<EventJoinRequest>(
+  {
+    userId: { type: Schema.Types.ObjectId, ref: "User", required: true },
+    status: { type: String, enum: ["pending", "accepted", "declined"], default: "pending" },
+    createdAt: { type: Date, default: Date.now },
   },
   { _id: false },
 );
@@ -279,6 +288,14 @@ const eventSchema = new Schema<IEvent>(
       maxlength: 120,
       default: null,
     },
+    categories: {
+      type: [{ type: String, enum: eventCategories, trim: true, maxlength: 120 }],
+      default: [],
+      validate: {
+        validator: (values: string[]) => values.length <= 3 && new Set(values).size === values.length,
+        message: "An event can have up to 3 unique categories",
+      },
+    },
     scheduledAt: {
       type: Date,
       default: null,
@@ -311,7 +328,15 @@ const eventSchema = new Schema<IEvent>(
       type: [{ type: Schema.Types.ObjectId, ref: "User" }],
       default: [],
     },
+    joinRequests: {
+      type: [eventJoinRequestSchema],
+      default: [],
+    },
     publishedAt: {
+      type: Date,
+      default: null,
+    },
+    startedAt: {
       type: Date,
       default: null,
     },

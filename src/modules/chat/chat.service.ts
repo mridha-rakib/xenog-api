@@ -3,8 +3,11 @@ import { AppError } from "../../core/errors/app-error.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { StorageService } from "../storage/storage.service.js";
 import type { IUser } from "../user/user.interface.js";
+import { UserBlockRepository } from "../user/user-block.repository.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
 import { UserRepository } from "../user/user.repository.js";
+import { presenceService } from "../realtime/presence.service.js";
+import { ChatDeletionRepository } from "./chat-deletion.repository.js";
 import { ChatMessageRepository } from "./chat-message.repository.js";
 import type {
   CreateDirectMessageDto,
@@ -19,8 +22,10 @@ export class ChatService {
   public constructor(
     private readonly userRepository = new UserRepository(),
     private readonly userFollowRepository = new UserFollowRepository(),
+    private readonly userBlockRepository = new UserBlockRepository(),
     private readonly storageService = new StorageService(),
     private readonly chatMessageRepository = new ChatMessageRepository(),
+    private readonly chatDeletionRepository = new ChatDeletionRepository(),
   ) {}
 
   public async listDirectMessages(
@@ -33,26 +38,45 @@ export class ChatService {
       return [];
     }
 
-    const friends = await this.userRepository.findFriendsByIds(friendIds, query.search, query.limit ?? friendIds.length);
+    const friends = await this.userRepository.findFriendsByIds(
+      friendIds,
+      query.search,
+      query.limit ?? friendIds.length,
+    );
+
     const conversationIdsByFriendId = new Map(
-      friends.map((friend) => [friend._id.toString(), this.getConversationId(user.id, friend._id.toString())]),
+      friends.map((f) => [f._id.toString(), this.getConversationId(user.id, f._id.toString())]),
     );
     const conversationIds = [...conversationIdsByFriendId.values()];
-    const [latestMessages, unreadCounts] = await Promise.all([
+
+    const [latestMessages, unreadCounts, blockedIds, hiddenConversationIds] = await Promise.all([
       this.chatMessageRepository.findLatestByConversationIds(conversationIds),
       this.chatMessageRepository.countUnreadByConversationIds(user.id, conversationIds),
+      this.userBlockRepository.findBlockedIds(user.id),
+      this.chatDeletionRepository.findHiddenIds(user.id),
     ]);
 
+    const blockedSet = new Set(blockedIds);
+
+    const visible = friends.filter((f) => {
+      const conversationId =
+        conversationIdsByFriendId.get(f._id.toString()) ??
+        this.getConversationId(user.id, f._id.toString());
+      return !hiddenConversationIds.has(conversationId);
+    });
+
     const conversations = await Promise.all(
-      friends.map((friend) => {
+      visible.map((friend) => {
         const friendId = friend._id.toString();
-        const conversationId = conversationIdsByFriendId.get(friendId) ?? this.getConversationId(user.id, friendId);
+        const conversationId =
+          conversationIdsByFriendId.get(friendId) ?? this.getConversationId(user.id, friendId);
 
         return this.toDirectMessageConversation(
           friend,
           conversationId,
           latestMessages.get(conversationId) ?? null,
           unreadCounts.get(conversationId) ?? 0,
+          blockedSet.has(friendId),
         );
       }),
     );
@@ -61,15 +85,8 @@ export class ChatService {
       if (a.lastMessageAt && b.lastMessageAt) {
         return b.lastMessageAt.getTime() - a.lastMessageAt.getTime();
       }
-
-      if (a.lastMessageAt) {
-        return -1;
-      }
-
-      if (b.lastMessageAt) {
-        return 1;
-      }
-
+      if (a.lastMessageAt) return -1;
+      if (b.lastMessageAt) return 1;
       return a.name.localeCompare(b.name);
     });
   }
@@ -90,7 +107,7 @@ export class ChatService {
 
     await this.chatMessageRepository.markConversationRead(conversationId, user.id);
 
-    return messages.reverse().map((message) => this.toDirectMessageResponse(message));
+    return messages.reverse().map((m) => this.toDirectMessageResponse(m));
   }
 
   public async createDirectMessage(
@@ -100,8 +117,13 @@ export class ChatService {
   ): Promise<DirectMessageResponse> {
     await this.assertCanDirectMessage(user.id, friendId);
 
+    const conversationId = this.getConversationId(user.id, friendId);
+
+    // Restore conversation if the user had previously deleted it
+    await this.chatDeletionRepository.restore(user.id, conversationId);
+
     const message = await this.chatMessageRepository.create({
-      conversationId: this.getConversationId(user.id, friendId),
+      conversationId,
       recipientId: friendId,
       senderId: user.id,
       text: payload.text,
@@ -111,14 +133,26 @@ export class ChatService {
     return this.toDirectMessageResponse(message);
   }
 
+  public async deleteConversation(user: AuthUser, friendId: string): Promise<void> {
+    if (user.id === friendId) {
+      throw new AppError("Invalid conversation.", httpStatus.BAD_REQUEST);
+    }
+
+    const conversationId = this.getConversationId(user.id, friendId);
+    await this.chatDeletionRepository.hide(user.id, conversationId);
+  }
+
   private async toDirectMessageConversation(
     user: IUser,
     conversationId: string,
     latestMessage: IChatMessage | null,
     unreadCount: number,
+    isBlocked: boolean,
   ): Promise<DirectMessageConversationResponse> {
     const friendId = user._id.toString();
-    const avatarUrl = user.avatarKey ? (await this.storageService.createDownloadUrl(user.avatarKey)).url : null;
+    const avatarUrl = user.avatarKey
+      ? (await this.storageService.createDownloadUrl(user.avatarKey)).url
+      : null;
 
     return {
       id: conversationId,
@@ -131,8 +165,8 @@ export class ChatService {
       lastMessage: latestMessage?.text ?? null,
       lastMessageAt: latestMessage?.createdAt ?? null,
       unreadCount,
-      isOnline: false,
-      isBlocked: false,
+      isOnline: presenceService.isOnline(friendId),
+      isBlocked,
     };
   }
 

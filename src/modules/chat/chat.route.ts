@@ -28,4 +28,10 @@ router.post(
   catchAsync(controller.createDirectMessage),
 );
 
+router.delete(
+  "/dms/:friendId",
+  validate(chatValidation.deleteConversation),
+  catchAsync(controller.deleteConversation),
+);
+
 export const chatRoutes = router;

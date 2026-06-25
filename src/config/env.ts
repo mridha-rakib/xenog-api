@@ -23,22 +23,11 @@ const envSchema = z.object({
   REDIS_PASSWORD: z.string().optional(),
   REDIS_DB: z.coerce.number().int().min(0).default(0),
 
-  MINIO_ENDPOINT: z.string().default("localhost"),
-  MINIO_PORT: z.coerce.number().int().positive().default(9000),
-  MINIO_ACCESS_KEY: z.string().min(1),
-  MINIO_SECRET_KEY: z.string().min(1),
-  MINIO_BUCKET: z.string().min(1),
-  MINIO_PUBLIC_ENDPOINT: z.string().optional(),
-  MINIO_PUBLIC_PORT: z.coerce.number().int().positive().optional(),
-  MINIO_PUBLIC_USE_SSL: z
-    .string()
-    .optional()
-    .transform((value) => (value ? value === "true" : undefined)),
   AWS_REGION: z.string().default("us-east-1"),
-  MINIO_USE_SSL: z
-    .string()
-    .default("false")
-    .transform((value) => value === "true"),
+  AWS_ACCESS_KEY_ID: z.string().min(1, "AWS_ACCESS_KEY_ID is required"),
+  AWS_SECRET_ACCESS_KEY: z.string().min(1, "AWS_SECRET_ACCESS_KEY is required"),
+  AWS_S3_BUCKET: z.string().min(1, "AWS_S3_BUCKET is required"),
+  AWS_S3_PUBLIC_BASE_URL: z.string().url().optional(),
 
   JWT_ACCESS_SECRET: z.string().min(32).default("development-access-secret-change-before-production"),
   JWT_REFRESH_SECRET: z.string().min(32).optional(),

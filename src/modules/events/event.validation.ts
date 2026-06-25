@@ -254,6 +254,33 @@ const validateEventDateRange = (event: { scheduledAt?: Date | null; endAt?: Date
   }
 };
 
+const validateTicketSalesEndDates = (
+  event: { scheduledAt?: Date | null; tickets?: { name?: string; salesEndAt?: Date | null }[] },
+  ctx: z.RefinementCtx,
+) => {
+  if (!event.scheduledAt || !event.tickets?.length) return;
+
+  const now = new Date();
+
+  event.tickets.forEach((ticket, index) => {
+    if (!ticket.salesEndAt) return;
+
+    if (ticket.salesEndAt <= now) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Ticket "${ticket.name}" has a sales end date in the past. Update it or remove the sales end date before publishing.`,
+        path: ["tickets", index, "salesEndAt"],
+      });
+    } else if (ticket.salesEndAt > event.scheduledAt!) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Ticket "${ticket.name}" sales end date must not be after the event start date and time.`,
+        path: ["tickets", index, "salesEndAt"],
+      });
+    }
+  });
+};
+
 const draftPatchBody = draftBodyBase.superRefine(validateEventDateRange);
 
 const draftBody = draftBodyBase.superRefine(validateEventDateRange);
@@ -270,7 +297,7 @@ const publishBody = draftBodyBase.extend({
   }),
   tickets: z.array(eventTicket).max(100).default([]),
   privacy: z.enum(eventPrivacyOptions).default("public"),
-}).superRefine(validateEventDateRange);
+}).superRefine(validateEventDateRange).superRefine(validateTicketSalesEndDates);
 
 const mapQuery = z
   .object({
@@ -280,6 +307,19 @@ const mapQuery = z
     limit: queryNumber(z.number().int().min(1).max(200)),
   })
   .strict()
+  .refine((query) => (query.latitude === undefined) === (query.longitude === undefined), {
+    message: "Latitude and longitude must be provided together",
+    path: ["longitude"],
+  });
+
+const feedQuery = z
+  .object({
+    category: eventCategory.optional(),
+    latitude: queryNumber(z.number().min(-90).max(90)),
+    longitude: queryNumber(z.number().min(-180).max(180)),
+    radiusKm: queryNumber(z.number().min(1).max(500)),
+    limit: queryNumber(z.number().int().min(1).max(200)),
+  })
   .refine((query) => (query.latitude === undefined) === (query.longitude === undefined), {
     message: "Latitude and longitude must be provided together",
     path: ["longitude"],
@@ -400,6 +440,9 @@ export const eventValidation = {
       id: objectId,
       rewardId: ticketId,
     }),
+  }),
+  feedEvents: z.object({
+    query: feedQuery,
   }),
   mapEvents: z.object({
     query: mapQuery,

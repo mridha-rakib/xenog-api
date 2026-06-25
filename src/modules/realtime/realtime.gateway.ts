@@ -13,6 +13,8 @@ import { ChatService } from "../chat/chat.service.js";
 import type { GroupMessageResponse } from "../chat/group.interface.js";
 import { GroupService } from "../chat/group.service.js";
 import { LiveRoomService } from "../live-rooms/live-room.service.js";
+import { UserFollowRepository } from "../user/user-follow.repository.js";
+import { presenceService } from "./presence.service.js";
 
 type RealtimeClient = {
   socket: WebSocket;
@@ -71,7 +73,13 @@ export class RealtimeGateway {
     private readonly chatService = new ChatService(),
     private readonly groupService = new GroupService(),
     private readonly liveRoomService = new LiveRoomService(),
+    private readonly userFollowRepository = new UserFollowRepository(),
   ) {}
+
+  public isUserOnline(userId: string): boolean {
+    const clients = this.clientsByUserId.get(userId);
+    return Boolean(clients && clients.size > 0);
+  }
 
   public notifyUser(userId: string, payload: unknown): void {
     this.broadcastToUser(userId, payload);
@@ -373,9 +381,15 @@ export class RealtimeGateway {
 
   private addUserClient(client: RealtimeClient): void {
     const userClients = this.clientsByUserId.get(client.user.id) ?? new Set<RealtimeClient>();
+    const wasOffline = userClients.size === 0;
 
     userClients.add(client);
     this.clientsByUserId.set(client.user.id, userClients);
+    presenceService.markConnected(client.user.id);
+
+    if (wasOffline) {
+      void this.broadcastPresence(client.user.id, true);
+    }
   }
 
   private removeClient(client: RealtimeClient): void {
@@ -385,10 +399,25 @@ export class RealtimeGateway {
 
     if (userClients?.size === 0) {
       this.clientsByUserId.delete(client.user.id);
+      presenceService.markDisconnected(client.user.id);
+      void this.broadcastPresence(client.user.id, false);
     }
 
     for (const roomId of Array.from(client.liveRooms)) {
       this.leaveLiveRoom(client, roomId);
+    }
+  }
+
+  private async broadcastPresence(userId: string, isOnline: boolean): Promise<void> {
+    try {
+      const friendIds = await this.userFollowRepository.findMutualFriendIds(userId);
+      const payload = { type: isOnline ? "user:online" : "user:offline", userId };
+
+      for (const friendId of friendIds) {
+        this.broadcastToUser(friendId, payload);
+      }
+    } catch (error) {
+      logger.warn({ error, userId }, "Failed to broadcast user presence");
     }
   }
 

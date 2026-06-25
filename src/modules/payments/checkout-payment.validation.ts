@@ -99,4 +99,9 @@ export const checkoutPaymentValidation = {
       shareId: objectId,
     }),
   }),
+  idParam: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+  }),
 };

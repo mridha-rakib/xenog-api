@@ -71,6 +71,31 @@ export class CheckoutPaymentService {
     return this.repository.getPurchasedTicketCountsByEvent(user.id, eventId);
   }
 
+  public async getEventTicketStats(
+    user: AuthUser,
+    eventId: string,
+  ): Promise<{ stats: Record<string, { sold: number; available: number; capacity: number }> }> {
+    const event = await this.eventRepository.findByIdForUser(eventId, user.id);
+
+    if (!event) {
+      throw new AppError("Event not found", httpStatus.NOT_FOUND);
+    }
+
+    const sales = await this.repository.getEventTicketSales(eventId);
+    const stats: Record<string, { sold: number; available: number; capacity: number }> = {};
+
+    for (const ticket of event.tickets) {
+      const sold = sales[ticket.id] ?? 0;
+      stats[ticket.id] = {
+        sold,
+        available: Math.max(0, ticket.capacity - sold),
+        capacity: ticket.capacity,
+      };
+    }
+
+    return { stats };
+  }
+
   public async getMyTicketWallet(user: AuthUser): Promise<TicketWalletItem[]> {
     const [orders, ownerShares, receivedShares] = await Promise.all([
       this.repository.findTicketWalletOrdersByUserId(user.id),
@@ -844,6 +869,13 @@ export class CheckoutPaymentService {
         throw new AppError("Event ticket not found", httpStatus.NOT_FOUND);
       }
 
+      if (ticket.salesEndAt && ticket.salesEndAt <= new Date()) {
+        throw new AppError(
+          "Ticket sales have ended for this ticket. Please choose another available ticket.",
+          httpStatus.BAD_REQUEST,
+        );
+      }
+
       const linkedReward = event.rewards.find(
         (reward) => reward.rewardType === "ticket" && reward.ticketId === ticket.id,
       );
@@ -1337,6 +1369,7 @@ export class CheckoutPaymentService {
         bannerImageKey: event.bannerImageKey ?? null,
         bannerOriginalImageKey: event.bannerOriginalImageKey ?? null,
         scheduledAt: event.scheduledAt ?? null,
+        endAt: event.endAt ?? null,
         location: event.location
           ? {
               searchLabel: event.location.searchLabel ?? null,
@@ -1414,6 +1447,7 @@ export class CheckoutPaymentService {
         bannerImageKey: event.bannerImageKey ?? null,
         bannerOriginalImageKey: event.bannerOriginalImageKey ?? null,
         scheduledAt: event.scheduledAt ?? null,
+        endAt: event.endAt ?? null,
         location: event.location
           ? {
               searchLabel: event.location.searchLabel ?? null,

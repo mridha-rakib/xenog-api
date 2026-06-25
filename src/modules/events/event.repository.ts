@@ -1,12 +1,52 @@
-import type { FilterQuery, UpdateQuery } from "mongoose";
+import type { FilterQuery, SortOrder, UpdateQuery } from "mongoose";
 import { EventModel } from "./event.model.js";
-import type { EventMapQuery, EventReward, IEvent, NowModeQuery, PublishEventDto, SaveEventDraftDto } from "./event.interface.js";
+import type {
+  EventCategory,
+  EventMapQuery,
+  EventReward,
+  IEvent,
+  NowModeQuery,
+  PublishEventDto,
+  SaveEventDraftDto,
+} from "./event.interface.js";
 
 interface CreateEventRecord extends SaveEventDraftDto {
   userId: string;
   status: "draft" | "published" | "live";
   publishedAt?: Date | null;
 }
+
+type PublicFeedEventOptions = {
+  category?: EventCategory;
+  latitude?: number;
+  longitude?: number;
+  radiusKm?: number;
+  activeOnly?: boolean;
+  limit?: number;
+};
+
+const toRadians = (value: number) => (value * Math.PI) / 180;
+
+const getDistanceKm = (
+  first: { latitude: number; longitude: number },
+  second: { latitude: number; longitude: number },
+) => {
+  const earthRadiusKm = 6371;
+  const latitudeDelta = toRadians(second.latitude - first.latitude);
+  const longitudeDelta = toRadians(second.longitude - first.longitude);
+  const firstLatitude = toRadians(first.latitude);
+  const secondLatitude = toRadians(second.latitude);
+  const a =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(firstLatitude) *
+      Math.cos(secondLatitude) *
+      Math.sin(longitudeDelta / 2) ** 2;
+
+  return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
+const isFiniteCoordinate = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value);
 
 export class EventRepository {
   public async create(payload: CreateEventRecord): Promise<IEvent> {
@@ -91,12 +131,88 @@ export class EventRepository {
     return EventModel.find({ userId, status: "draft" }).sort({ updatedAt: -1, _id: -1 });
   }
 
-  public async findPublicFeedEvents(excludeUserIds: string[] = []): Promise<IEvent[]> {
-    return EventModel.find({
+  public async findPublicFeedEvents(
+    excludeUserIds: string[] = [],
+    options: PublicFeedEventOptions = {},
+  ): Promise<IEvent[]> {
+    const filters: FilterQuery<IEvent>[] = [{
       status: { $in: ["published", "live"] },
       privacy: { $in: ["public", "locked"] },
-      ...(excludeUserIds.length > 0 ? { userId: { $nin: excludeUserIds } } : {}),
-    }).sort({ publishedAt: -1, createdAt: -1, _id: -1 });
+    }];
+
+    if (excludeUserIds.length > 0) {
+      filters.push({ userId: { $nin: excludeUserIds } });
+    }
+
+    if (options.category) {
+      filters.push({ $or: [{ categories: options.category }, { category: options.category }] });
+    }
+
+    if (options.activeOnly) {
+      const now = new Date();
+      const activeSince = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+      filters.push({
+        $or: [
+          { endAt: { $gte: now } },
+          { endAt: null, scheduledAt: { $gte: activeSince } },
+          { endAt: { $exists: false }, scheduledAt: { $gte: activeSince } },
+        ],
+      });
+    }
+
+    const locationFilter =
+      isFiniteCoordinate(options.latitude) &&
+      isFiniteCoordinate(options.longitude) &&
+      isFiniteCoordinate(options.radiusKm)
+        ? {
+            latitude: options.latitude,
+            longitude: options.longitude,
+            radiusKm: options.radiusKm,
+          }
+        : null;
+
+    if (locationFilter) {
+      const radiusKm = Math.max(1, locationFilter.radiusKm);
+      const latitudeDelta = radiusKm / 111.32;
+      const longitudeDelta = radiusKm / (111.32 * Math.max(Math.cos((locationFilter.latitude * Math.PI) / 180), 0.01));
+
+      filters.push({
+        "location.latitude": {
+          $type: "number",
+          $gte: locationFilter.latitude - latitudeDelta,
+          $lte: locationFilter.latitude + latitudeDelta,
+        },
+        "location.longitude": {
+          $type: "number",
+          $gte: locationFilter.longitude - longitudeDelta,
+          $lte: locationFilter.longitude + longitudeDelta,
+        },
+      });
+    }
+
+    const query: FilterQuery<IEvent> = filters.length > 1 ? { $and: filters } : filters[0]!;
+    const sort: Record<string, SortOrder> = locationFilter
+      ? { scheduledAt: 1, publishedAt: -1, _id: -1 }
+      : { publishedAt: -1, createdAt: -1, _id: -1 };
+    const events = await EventModel.find(query).sort(sort);
+
+    const exactEvents = locationFilter
+      ? events.filter((event) => {
+          const latitude = event.location?.latitude;
+          const longitude = event.location?.longitude;
+
+          if (!isFiniteCoordinate(latitude) || !isFiniteCoordinate(longitude)) {
+            return false;
+          }
+
+          return getDistanceKm(
+            { latitude: locationFilter.latitude, longitude: locationFilter.longitude },
+            { latitude, longitude },
+          ) <= locationFilter.radiusKm;
+        })
+      : events;
+
+    return options.limit ? exactEvents.slice(0, options.limit) : exactEvents;
   }
 
   public async findActiveAndUpcomingByUserId(userId: string, activeSince: Date, now: Date): Promise<IEvent[]> {
@@ -144,31 +260,31 @@ export class EventRepository {
 
   public async findPublishedProfileEventsByUserId(
     userId: string,
-    activeSince: Date,
+    includePrivateEvents: boolean,
   ): Promise<{ active: IEvent[]; past: IEvent[] }> {
     const baseQuery: FilterQuery<IEvent> = {
       userId,
-      status: { $in: ["published", "live"] },
+      ...(includePrivateEvents ? {} : { privacy: { $in: ["public", "locked"] } }),
     };
 
     const now = new Date();
-    const activeFallbackQuery = {
-      $or: [{ endAt: null }, { endAt: { $exists: false } }],
-      scheduledAt: { $gte: activeSince },
-    };
 
     const [active, past] = await Promise.all([
       EventModel.find({
         ...baseQuery,
-        $or: [{ endAt: { $gte: now } }, activeFallbackQuery],
+        status: { $in: ["published", "live"] },
+        $or: [
+          { scheduledAt: { $gt: now } },
+          { scheduledAt: { $lte: now }, endAt: { $gte: now } },
+        ],
       }).sort({ scheduledAt: 1, publishedAt: -1, _id: -1 }),
       EventModel.find({
         ...baseQuery,
         $or: [
-          { endAt: { $lt: now } },
+          { status: { $in: ["completed", "cancelled"] } },
           {
-            $or: [{ endAt: null }, { endAt: { $exists: false } }],
-            scheduledAt: { $lt: activeSince },
+            status: { $in: ["published", "live"] },
+            endAt: { $lt: now },
           },
         ],
       }).sort({ scheduledAt: -1, publishedAt: -1, _id: -1 }),
@@ -260,7 +376,7 @@ export class EventRepository {
     const now = new Date();
 
     return EventModel.findOneAndUpdate(
-      { _id: id, userId, status: { $in: ["published", "live"] } },
+      { _id: id, userId, status: "live" },
       { $set: { status: "completed", completedAt: now } },
       { new: true, runValidators: true },
     );
@@ -270,7 +386,7 @@ export class EventRepository {
     const now = new Date();
 
     return EventModel.findOneAndUpdate(
-      { _id: id, userId, status: { $in: ["published", "live", "completed"] } },
+      { _id: id, userId, status: "published" },
       { $set: { status: "cancelled", cancelledAt: now } },
       { new: true, runValidators: true },
     );
@@ -286,17 +402,23 @@ export class EventRepository {
     return EventModel.countDocuments(filter);
   }
 
-  public async autoStartScheduled(now: Date): Promise<number> {
-    const result = await EventModel.updateMany(
-      {
-        status: "published",
-        scheduledAt: { $ne: null, $lte: now },
-        $or: [{ endAt: null }, { endAt: { $exists: false } }, { endAt: { $gt: now } }],
-      },
+  public async autoStartScheduled(now: Date): Promise<IEvent[]> {
+    const events = await EventModel.find({
+      status: "published",
+      scheduledAt: { $ne: null, $lte: now },
+      $or: [{ endAt: null }, { endAt: { $exists: false } }, { endAt: { $gt: now } }],
+    });
+
+    if (events.length === 0) {
+      return [];
+    }
+
+    await EventModel.updateMany(
+      { _id: { $in: events.map((event) => event._id) }, status: "published" },
       { $set: { status: "live", startedAt: now } },
     );
 
-    return result.modifiedCount;
+    return events;
   }
 
   public async findAndAutoComplete(now: Date): Promise<IEvent[]> {

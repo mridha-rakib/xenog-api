@@ -1,7 +1,7 @@
 {
   "name": "spark-tech-backend",
   "version": "1.0.0",
-  "description": "Module based Express.js backend with TypeScript, MongoDB, Redis, and MinIO.",
+  "description": "Module based Express.js backend with TypeScript, MongoDB, Redis, and AWS S3.",
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
@@ -24,7 +24,7 @@
     "mongodb",
     "mongoose",
     "redis",
-    "minio"
+    "aws-s3"
   ],
   "author": "",
   "license": "MIT",

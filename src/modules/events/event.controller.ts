@@ -5,6 +5,7 @@ import type { AuthUser } from "../auth/auth.interface.js";
 import type {
   CreateEventTicketDto,
   CreateEventRewardDto,
+  EventFeedQuery,
   EventMapQuery,
   NowModeQuery,
   PublishEventDto,
@@ -353,7 +354,10 @@ export class EventController {
   };
 
   public listFeedEvents = async (req: Request, res: Response): Promise<void> => {
-    const events = await this.eventService.listFeedEvents(req.authUser as AuthUser | undefined);
+    const events = await this.eventService.listFeedEvents(
+      req.authUser as AuthUser | undefined,
+      req.query as unknown as EventFeedQuery,
+    );
 
     ApiResponse.success(res, {
       message: "Feed events retrieved",

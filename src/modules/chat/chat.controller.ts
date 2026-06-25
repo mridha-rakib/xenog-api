@@ -51,9 +51,16 @@ export class ChatController {
     ApiResponse.success(res, {
       statusCode: httpStatus.CREATED,
       message: "Direct message sent",
-      data: {
-        message,
-      },
+      data: { message },
     });
+  };
+
+  public deleteConversation = async (req: Request, res: Response): Promise<void> => {
+    await this.chatService.deleteConversation(
+      req.authUser as AuthUser,
+      req.params.friendId as string,
+    );
+
+    ApiResponse.success(res, { message: "Conversation deleted" });
   };
 }

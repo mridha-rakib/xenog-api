@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import httpStatus from "http-status";
+import { RedisClient } from "../../config/redis.js";
 import { AppError } from "../../core/errors/app-error.js";
+import { logger } from "../../core/logger/logger.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { StorageService } from "../storage/storage.service.js";
 import { UserRepository } from "../user/user.repository.js";
@@ -24,6 +26,7 @@ import { TicketShareRepository } from "../payments/ticket-share.repository.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
 import type {
   CreateEventRewardDto,
+  EventFeedQuery,
   EventHostResponse,
   EventJoinRequestStatus,
   EventMapQuery,
@@ -53,6 +56,8 @@ import type {
 const ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
 const NOW_MODE_LOOKAHEAD_MS = 3 * 60 * 60 * 1000;
 const STARTING_SOON_MS = 60 * 60 * 1000;
+const PROFILE_EVENTS_CACHE_VERSION = "v1";
+const PROFILE_EVENTS_CACHE_TTL_SECONDS = 30;
 
 const getNowStatus = (scheduledAt: Date | null | undefined, endAt?: Date | null): NowEventStatus | null => {
   if (!scheduledAt) {
@@ -135,7 +140,7 @@ export class EventService {
           throw new AppError("Event not found.", httpStatus.NOT_FOUND);
         }
 
-        return this.toResponse(event);
+        return this.toProfileMutatingResponse(event);
       }
 
       const event = await this.eventRepository.publishDraftByIdForUser(eventId, user.id, normalizedPayload);
@@ -144,7 +149,7 @@ export class EventService {
         throw new AppError("Event draft not found.", httpStatus.NOT_FOUND);
       }
 
-      return this.toResponse(event);
+      return this.toProfileMutatingResponse(event);
     }
 
     const event = await this.eventRepository.create({
@@ -154,17 +159,18 @@ export class EventService {
       publishedAt: new Date(),
     });
 
-    return this.toResponse(event);
+    return this.toProfileMutatingResponse(event);
   }
 
   public async updateEvent(user: AuthUser, eventId: string, payload: SaveEventDraftDto): Promise<EventResponse> {
+    await this.getModifiableEventForOwner(user, eventId);
     const event = await this.eventRepository.updateByIdForUser(eventId, user.id, this.normalizeDraftPayload(payload));
 
     if (!event) {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
-    return this.toResponse(event);
+    return this.toProfileMutatingResponse(event);
   }
 
   public async deleteEvent(user: AuthUser, eventId: string): Promise<EventResponse> {
@@ -174,7 +180,7 @@ export class EventService {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
-    return this.toResponse(event);
+    return this.toProfileMutatingResponse(event);
   }
 
   public async getEventTicket(user: AuthUser, eventId: string, ticketId: string): Promise<EventResponse> {
@@ -199,7 +205,7 @@ export class EventService {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
-    return this.toResponse(updatedEvent);
+    return this.toProfileMutatingResponse(updatedEvent);
   }
 
   public async updateEventTicket(
@@ -237,7 +243,7 @@ export class EventService {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
-    return this.toResponse(updatedEvent);
+    return this.toProfileMutatingResponse(updatedEvent);
   }
 
   public async deleteEventTicket(user: AuthUser, eventId: string, ticketId: string): Promise<EventResponse> {
@@ -255,7 +261,7 @@ export class EventService {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
-    return this.toResponse(updatedEvent);
+    return this.toProfileMutatingResponse(updatedEvent);
   }
 
   public async createDraftTicket(user: AuthUser, eventId: string, payload: CreateEventTicketDto): Promise<EventResponse> {
@@ -329,7 +335,7 @@ export class EventService {
   }
 
   public async createEventReward(user: AuthUser, eventId: string, payload: CreateEventRewardDto): Promise<EventResponse> {
-    const event = await this.getEventForOwner(user, eventId);
+    const event = await this.getModifiableEventForOwner(user, eventId);
     const reward = await this.normalizeReward(payload, event, user.id);
     const rewards = this.normalizeExistingRewards(event.rewards);
     this.assertTicketRewardAvailable(rewards, reward);
@@ -345,7 +351,7 @@ export class EventService {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
-    return this.toResponse(updatedEvent);
+    return this.toProfileMutatingResponse(updatedEvent);
   }
 
   public async updateEventReward(
@@ -354,7 +360,7 @@ export class EventService {
     rewardId: string,
     payload: UpdateEventRewardDto,
   ): Promise<EventResponse> {
-    const event = await this.getEventForOwner(user, eventId);
+    const event = await this.getModifiableEventForOwner(user, eventId);
     const rewards = this.normalizeExistingRewards(event.rewards);
     let foundReward = false;
     const nextRewards = await Promise.all(
@@ -402,11 +408,11 @@ export class EventService {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
-    return this.toResponse(updatedEvent);
+    return this.toProfileMutatingResponse(updatedEvent);
   }
 
   public async deleteEventReward(user: AuthUser, eventId: string, rewardId: string): Promise<EventResponse> {
-    const event = await this.getEventForOwner(user, eventId);
+    const event = await this.getModifiableEventForOwner(user, eventId);
     const rewards = this.normalizeExistingRewards(event.rewards);
     const nextRewards = rewards.filter((reward) => reward.id !== rewardId);
 
@@ -420,7 +426,7 @@ export class EventService {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
-    return this.toResponse(updatedEvent);
+    return this.toProfileMutatingResponse(updatedEvent);
   }
 
   public async createDraftReward(user: AuthUser, eventId: string, payload: CreateEventRewardDto): Promise<EventResponse> {
@@ -536,14 +542,22 @@ export class EventService {
     return events.map((event) => this.toResponse(event));
   }
 
-  public async listFeedEvents(user?: AuthUser): Promise<EventResponse[]> {
+  public async listFeedEvents(user?: AuthUser, query: EventFeedQuery = {}): Promise<EventResponse[]> {
     const [excludeUserIds, followingIds] = await Promise.all([
       user ? this.userBlockRepository.findBlockedIds(user.id) : Promise.resolve([]),
       user ? this.userFollowRepository.findFollowingIds(user.id) : Promise.resolve([]),
     ]);
 
     const followingSet = new Set(followingIds);
-    const events = await this.eventRepository.findPublicFeedEvents(excludeUserIds);
+    const hasNearbyFilter = typeof query.latitude === "number" && typeof query.longitude === "number";
+    const events = await this.eventRepository.findPublicFeedEvents(excludeUserIds, {
+      category: query.category,
+      latitude: query.latitude,
+      longitude: query.longitude,
+      radiusKm: query.radiusKm,
+      activeOnly: hasNearbyFilter,
+      limit: query.limit,
+    });
     const hostById = await this.getHostById(events);
     const interactionMoments = await Promise.all(events.map((event) => this.ensureEventInteractionMoment(event)));
     const momentIds = interactionMoments.map((moment) => moment._id.toString());
@@ -669,30 +683,42 @@ export class EventService {
   }
 
   public async listMyProfileEvents(user: AuthUser): Promise<ProfileEventGroupsResponse> {
-    return this.listProfileEventsByUserId(user.id);
+    return this.listProfileEventsByUserId(user.id, true);
   }
 
   public async listProfileEventsForUser(user: AuthUser, userId: string): Promise<ProfileEventGroupsResponse> {
-    if (user.id.toLowerCase() !== userId.toLowerCase()) {
-      throw new AppError("Profile events are only available for the authenticated user.", httpStatus.FORBIDDEN);
-    }
-
-    return this.listProfileEventsByUserId(user.id);
+    const isOwner = user.id.toLowerCase() === userId.toLowerCase();
+    return this.listProfileEventsByUserId(userId, isOwner);
   }
 
   public async listUserEventsForAdmin(userId: string): Promise<ProfileEventGroupsResponse> {
-    return this.listProfileEventsByUserId(userId);
+    return this.listProfileEventsByUserId(userId, true);
   }
 
-  public async listProfileEventsByUserId(userId: string): Promise<ProfileEventGroupsResponse> {
-    const activeSince = new Date(Date.now() - ACTIVE_EVENT_WINDOW_MS);
-    const events = await this.eventRepository.findPublishedProfileEventsByUserId(userId, activeSince);
-    const host = await this.userRepository.findById(userId);
+  public async listProfileEventsByUserId(
+    userId: string,
+    includePrivateEvents = true,
+  ): Promise<ProfileEventGroupsResponse> {
+    const cacheKey = this.getProfileEventsCacheKey(userId, includePrivateEvents);
+    const cachedEvents = await this.getCachedProfileEvents(cacheKey);
 
-    return {
+    if (cachedEvents) {
+      return cachedEvents;
+    }
+
+    const [events, host] = await Promise.all([
+      this.eventRepository.findPublishedProfileEventsByUserId(userId, includePrivateEvents),
+      this.userRepository.findById(userId),
+    ]);
+
+    const response = {
       active: events.active.map((event) => this.toResponse(event, host)),
       past: events.past.map((event) => this.toResponse(event, host)),
     };
+
+    await this.cacheProfileEvents(cacheKey, response);
+
+    return response;
   }
 
   public async startEvent(user: AuthUser, eventId: string): Promise<EventResponse> {
@@ -702,14 +728,14 @@ export class EventService {
       throw new AppError("Published event not found.", httpStatus.NOT_FOUND);
     }
 
-    return this.toResponse(event);
+    return this.toProfileMutatingResponse(event);
   }
 
   public async completeEvent(user: AuthUser, eventId: string): Promise<EventResponse> {
     const event = await this.eventRepository.completeById(eventId, user.id);
 
     if (!event) {
-      throw new AppError("Active event not found.", httpStatus.NOT_FOUND);
+      throw new AppError("Live event not found.", httpStatus.NOT_FOUND);
     }
 
     const completedAt = event.completedAt ?? new Date();
@@ -717,11 +743,15 @@ export class EventService {
 
     await this.creatorEarningRepository.setEligibleAtByEventId(eventId, eligibleAt);
 
-    return this.toResponse(event);
+    return this.toProfileMutatingResponse(event);
   }
 
   public async autoStartScheduledEvents(): Promise<number> {
-    return this.eventRepository.autoStartScheduled(new Date());
+    const started = await this.eventRepository.autoStartScheduled(new Date());
+
+    await this.invalidateProfileEventsCacheForEvents(started);
+
+    return started.length;
   }
 
   public async autoCompleteExpiredEvents(): Promise<number> {
@@ -735,6 +765,7 @@ export class EventService {
         this.creatorEarningRepository.setEligibleAtByEventId(event._id.toString(), eligibleAt),
       ),
     );
+    await this.invalidateProfileEventsCacheForEvents(expired);
 
     return expired.length;
   }
@@ -743,7 +774,7 @@ export class EventService {
     const event = await this.eventRepository.cancelById(eventId, user.id);
 
     if (!event) {
-      throw new AppError("Active event not found.", httpStatus.NOT_FOUND);
+      throw new AppError("Published event not found or event has already started.", httpStatus.NOT_FOUND);
     }
 
     const paidOrders = await this.checkoutPaymentRepository.findPaidTicketOrdersByEventId(eventId);
@@ -754,7 +785,7 @@ export class EventService {
 
     await this.creatorEarningRepository.markRefundedByEventId(eventId);
 
-    return this.toResponse(event);
+    return this.toProfileMutatingResponse(event);
   }
 
   public async listMapEvents(query: EventMapQuery): Promise<EventResponse[]> {
@@ -867,6 +898,10 @@ export class EventService {
 
     if (!event) {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    if (event.status === "completed" || event.status === "cancelled") {
+      throw new AppError("Members cannot be added to an event that has been completed or cancelled.", httpStatus.UNPROCESSABLE_ENTITY);
     }
 
     if (event.privacy !== "private") {
@@ -1343,7 +1378,17 @@ export class EventService {
   }
 
   private async getEventForTicketOwner(user: AuthUser, eventId: string): Promise<IEvent> {
-    return this.getEventForOwner(user, eventId);
+    return this.getModifiableEventForOwner(user, eventId);
+  }
+
+  private async getModifiableEventForOwner(user: AuthUser, eventId: string): Promise<IEvent> {
+    const event = await this.getEventForOwner(user, eventId);
+
+    if (event.status === "completed" || event.status === "cancelled") {
+      throw new AppError("This event cannot be modified because it has been completed or cancelled.", httpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    return event;
   }
 
   private async getEventForOwner(user: AuthUser, eventId: string): Promise<IEvent> {
@@ -1419,6 +1464,99 @@ export class EventService {
       eventsCount: extras?.eventsCount,
       ...(extras?.isFollowing !== undefined ? { isFollowing: extras.isFollowing } : {}),
     };
+  }
+
+  private getProfileEventsCacheKey(userId: string, includePrivateEvents: boolean): string {
+    return [
+      "events",
+      "profile",
+      PROFILE_EVENTS_CACHE_VERSION,
+      userId.toLowerCase(),
+      includePrivateEvents ? "owner" : "public",
+    ].join(":");
+  }
+
+  private async getCachedProfileEvents(cacheKey: string): Promise<ProfileEventGroupsResponse | null> {
+    try {
+      const redis = RedisClient.getClient();
+
+      if (redis.status !== "ready") {
+        return null;
+      }
+
+      const cached = await redis.get(cacheKey);
+
+      if (!cached) {
+        return null;
+      }
+
+      const parsed = JSON.parse(cached) as Partial<ProfileEventGroupsResponse>;
+
+      if (!Array.isArray(parsed.active) || !Array.isArray(parsed.past)) {
+        return null;
+      }
+
+      return parsed as ProfileEventGroupsResponse;
+    } catch (error) {
+      logger.warn({ error, cacheKey }, "Profile events cache read failed");
+      return null;
+    }
+  }
+
+  private async cacheProfileEvents(cacheKey: string, events: ProfileEventGroupsResponse): Promise<void> {
+    try {
+      const redis = RedisClient.getClient();
+
+      if (redis.status !== "ready") {
+        return;
+      }
+
+      await redis.set(cacheKey, JSON.stringify(events), "EX", this.getProfileEventsCacheTtlSeconds(events));
+    } catch (error) {
+      logger.warn({ error, cacheKey }, "Profile events cache write failed");
+    }
+  }
+
+  private getProfileEventsCacheTtlSeconds(events: ProfileEventGroupsResponse): number {
+    const now = Date.now();
+    const eventTimes = [...events.active, ...events.past]
+      .map((event) => event.endAt)
+      .filter((value): value is Date => Boolean(value))
+      .map((value) => new Date(value).getTime())
+      .filter((time) => Number.isFinite(time) && time > now);
+    const nextBoundaryMs = eventTimes.length > 0 ? Math.min(...eventTimes) - now : PROFILE_EVENTS_CACHE_TTL_SECONDS * 1000;
+    const ttlMs = Math.min(PROFILE_EVENTS_CACHE_TTL_SECONDS * 1000, Math.max(1000, nextBoundaryMs));
+
+    return Math.ceil(ttlMs / 1000);
+  }
+
+  private async invalidateProfileEventsCache(userId: string): Promise<void> {
+    try {
+      const redis = RedisClient.getClient();
+
+      if (redis.status !== "ready") {
+        return;
+      }
+
+      await redis.del(
+        this.getProfileEventsCacheKey(userId, true),
+        this.getProfileEventsCacheKey(userId, false),
+      );
+    } catch (error) {
+      logger.warn({ error, userId }, "Profile events cache invalidation failed");
+    }
+  }
+
+  private async invalidateProfileEventsCacheForEvents(events: IEvent[]): Promise<void> {
+    const userIds = [...new Set(events.map((event) => event.userId.toString()))];
+
+    await Promise.all(userIds.map((userId) => this.invalidateProfileEventsCache(userId)));
+  }
+
+  private async toProfileMutatingResponse(event: IEvent): Promise<EventResponse> {
+    await this.invalidateProfileEventsCache(event.userId.toString());
+
+    return this.toResponse(event);
   }
 
   private toResponse(

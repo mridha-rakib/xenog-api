@@ -239,6 +239,14 @@ export interface EventMapQuery {
   limit?: number;
 }
 
+export interface EventFeedQuery {
+  category?: EventCategory;
+  latitude?: number;
+  longitude?: number;
+  radiusKm?: number;
+  limit?: number;
+}
+
 export interface RewardClaimResponse {
   id: string;
   userId: string;

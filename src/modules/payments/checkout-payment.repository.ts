@@ -188,6 +188,31 @@ export class CheckoutPaymentRepository {
     return [...eventIds];
   }
 
+  public async getEventTicketSales(eventId: string): Promise<Record<string, number>> {
+    const orders = await CheckoutOrderModel.find({
+      kind: "ticket",
+      paymentStatus: "paid",
+      "lineItems.eventId": eventId,
+    })
+      .select("lineItems")
+      .lean();
+
+    const sales: Record<string, number> = {};
+
+    for (const order of orders) {
+      for (const item of order.lineItems) {
+        if (item.itemId && item.eventId === eventId) {
+          const qty =
+            item.totalQuantity ??
+            (item.paidQuantity ?? item.quantity) + (item.freeQuantity ?? 0);
+          sales[item.itemId] = (sales[item.itemId] ?? 0) + qty;
+        }
+      }
+    }
+
+    return sales;
+  }
+
   public async getPurchasedTicketCountsByEvent(
     userId: string,
     eventId: string,

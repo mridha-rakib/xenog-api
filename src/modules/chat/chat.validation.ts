@@ -18,6 +18,9 @@ export const chatValidation = {
       limit: z.coerce.number().int().min(1).max(100).optional(),
     }),
   }),
+  deleteConversation: z.object({
+    params: z.object({ friendId: objectId }),
+  }),
   createDirectMessage: z.object({
     params: z.object({
       friendId: objectId,

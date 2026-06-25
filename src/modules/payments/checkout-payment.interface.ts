@@ -138,6 +138,7 @@ export interface TicketWalletEvent {
   bannerImageKey?: string | null;
   bannerOriginalImageKey?: string | null;
   scheduledAt?: Date | null;
+  endAt?: Date | null;
   location?: {
     searchLabel?: string | null;
     venue?: string | null;

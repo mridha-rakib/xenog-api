@@ -45,7 +45,7 @@ router.delete(
 );
 router.post("/publish", validate(eventValidation.publish), catchAsync(controller.publish));
 router.post("/:id/publish", validate(eventValidation.publishDraft), catchAsync(controller.publishDraft));
-router.get("/feed", catchAsync(controller.listFeedEvents));
+router.get("/feed", validate(eventValidation.feedEvents), catchAsync(controller.listFeedEvents));
 router.get("/mine/profile", catchAsync(controller.listMyProfileEvents));
 router.get("/mine/post-tag", catchAsync(controller.listMyPostTagEvents));
 router.get("/mine/drafts", catchAsync(controller.listMyDraftEvents));

@@ -356,6 +356,11 @@ const eventSchema = new Schema<IEvent>(
 );
 
 eventSchema.index({ userId: 1, status: 1, createdAt: -1 });
+eventSchema.index({ userId: 1, status: 1, scheduledAt: 1, endAt: 1, publishedAt: -1, _id: -1 });
+eventSchema.index({ userId: 1, privacy: 1, status: 1, scheduledAt: 1, endAt: 1, publishedAt: -1, _id: -1 });
+eventSchema.index({ categories: 1, status: 1, privacy: 1, publishedAt: -1, createdAt: -1, _id: -1 });
+eventSchema.index({ category: 1, status: 1, privacy: 1, publishedAt: -1, createdAt: -1, _id: -1 });
+eventSchema.index({ status: 1, privacy: 1, "location.latitude": 1, "location.longitude": 1, scheduledAt: 1, endAt: 1 });
 eventSchema.index({ name: "text", description: "text", category: "text", "location.venue": "text", "location.address": "text" });
 
 export const EventModel = model<IEvent>("Event", eventSchema);

@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { env } from "./config/env.js";
 import { Database } from "./config/database.js";
-import { MinioClient } from "./config/minio.js";
+import { S3ClientManager } from "./config/minio.js";
 import { RedisClient } from "./config/redis.js";
 import { logger } from "./core/logger/logger.js";
 import { seedAdminUser } from "./core/seed/admin.seed.js";
@@ -25,9 +25,9 @@ const startServer = async (): Promise<void> => {
   }
 
   try {
-    await MinioClient.ensureBucket();
+    await S3ClientManager.ensureBucket();
   } catch (error) {
-    logger.warn({ service: "minio", error }, "MinIO unavailable — starting without object storage");
+    logger.warn({ service: "s3", error }, "S3 bucket not ready — starting without object storage");
   }
 
   const app = createApp();

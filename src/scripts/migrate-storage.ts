@@ -1,3 +1,22 @@
+/**
+ * Storage migration script — copies all objects from one S3 bucket to another.
+ *
+ * Required env vars:
+ *   SOURCE_S3_ENDPOINT   — e.g. https://play.min.io  (omit for native AWS S3)
+ *   SOURCE_S3_BUCKET     — source bucket name (falls back to AWS_S3_BUCKET)
+ *   SOURCE_S3_ACCESS_KEY — source AWS_ACCESS_KEY_ID  (falls back to AWS_ACCESS_KEY_ID)
+ *   SOURCE_S3_SECRET_KEY — source AWS_SECRET_ACCESS_KEY (falls back to AWS_SECRET_ACCESS_KEY)
+ *
+ *   TARGET_S3_ENDPOINT   — omit for native AWS S3
+ *   TARGET_S3_BUCKET     — defaults to source bucket name
+ *   TARGET_S3_ACCESS_KEY — required
+ *   TARGET_S3_SECRET_KEY — required
+ *
+ * Optional:
+ *   MIGRATE_STORAGE_PREFIX    — only copy keys with this prefix
+ *   MIGRATE_STORAGE_OVERWRITE — set to "true" to overwrite existing objects
+ *   AWS_REGION                — default "us-east-1"
+ */
 import {
   GetObjectCommand,
   HeadObjectCommand,
@@ -31,54 +50,39 @@ const asBoolean = (value: string | undefined, fallback = false): boolean => {
   return value.toLowerCase() === "true";
 };
 
-const createEndpoint = (host: string, port: string, useSsl: boolean): string => {
-  const protocol = useSsl ? "https" : "http";
-  const isDefaultPort = (useSsl && port === "443") || (!useSsl && port === "80");
-  return `${protocol}://${host}${isDefaultPort ? "" : `:${port}`}`;
-};
-
 const createClient = (
-  endpoint: string,
   accessKeyId: string,
   secretAccessKey: string,
+  endpoint?: string,
 ): S3Client => {
   const config: S3ClientConfig = {
     region: process.env.AWS_REGION || "us-east-1",
-    endpoint,
-    forcePathStyle: true,
     credentials: { accessKeyId, secretAccessKey },
   };
+
+  if (endpoint) {
+    config.endpoint = endpoint;
+    config.forcePathStyle = true;
+  }
 
   return new S3Client(config);
 };
 
-const sourceEndpoint = createEndpoint(
-  required("SOURCE_MINIO_ENDPOINT", "MINIO_ENDPOINT"),
-  process.env.SOURCE_MINIO_PORT || process.env.MINIO_PORT || "9000",
-  asBoolean(process.env.SOURCE_MINIO_USE_SSL, asBoolean(process.env.MINIO_USE_SSL)),
-);
-
-const targetEndpoint = createEndpoint(
-  required("TARGET_MINIO_ENDPOINT"),
-  process.env.TARGET_MINIO_PORT || "443",
-  asBoolean(process.env.TARGET_MINIO_USE_SSL, true),
-);
-
 const source: StorageConfig = {
-  bucket: required("SOURCE_MINIO_BUCKET", "MINIO_BUCKET"),
+  bucket: required("SOURCE_S3_BUCKET", "AWS_S3_BUCKET"),
   client: createClient(
-    sourceEndpoint,
-    required("SOURCE_MINIO_ACCESS_KEY", "MINIO_ACCESS_KEY"),
-    required("SOURCE_MINIO_SECRET_KEY", "MINIO_SECRET_KEY"),
+    required("SOURCE_S3_ACCESS_KEY", "AWS_ACCESS_KEY_ID"),
+    required("SOURCE_S3_SECRET_KEY", "AWS_SECRET_ACCESS_KEY"),
+    process.env.SOURCE_S3_ENDPOINT,
   ),
 };
 
 const target: StorageConfig = {
-  bucket: process.env.TARGET_MINIO_BUCKET || source.bucket,
+  bucket: process.env.TARGET_S3_BUCKET || source.bucket,
   client: createClient(
-    targetEndpoint,
-    required("TARGET_MINIO_ACCESS_KEY"),
-    required("TARGET_MINIO_SECRET_KEY"),
+    required("TARGET_S3_ACCESS_KEY", "AWS_ACCESS_KEY_ID"),
+    required("TARGET_S3_SECRET_KEY", "AWS_SECRET_ACCESS_KEY"),
+    process.env.TARGET_S3_ENDPOINT,
   ),
 };
 
@@ -136,7 +140,7 @@ const migrate = async (): Promise<void> => {
   let skipped = 0;
   let discovered = 0;
 
-  console.log(`Migrating ${source.bucket} (${sourceEndpoint}) -> ${target.bucket} (${targetEndpoint})`);
+  console.log(`Migrating ${source.bucket} -> ${target.bucket}`);
 
   do {
     const page = await source.client.send(

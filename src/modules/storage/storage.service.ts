@@ -1,4 +1,4 @@
-import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Readable } from "node:stream";
 import { env } from "../../config/env.js";
@@ -20,6 +20,11 @@ export interface StorageObject {
   body: Readable;
   contentLength?: number;
   contentRange?: string;
+  contentType?: string;
+}
+
+export interface StorageObjectMetadata {
+  contentLength?: number;
   contentType?: string;
 }
 
@@ -105,6 +110,21 @@ export class StorageService {
       body: response.Body as Readable,
       contentLength: response.ContentLength,
       contentRange: response.ContentRange,
+      contentType: response.ContentType,
+    };
+  }
+
+  public async getObjectMetadata(key: string): Promise<StorageObjectMetadata> {
+    const client = S3ClientManager.getClient();
+    const response = await client.send(
+      new HeadObjectCommand({
+        Bucket: env.AWS_S3_BUCKET,
+        Key: key,
+      }),
+    );
+
+    return {
+      contentLength: response.ContentLength,
       contentType: response.ContentType,
     };
   }

@@ -22,6 +22,10 @@ export class CreatorEarningRepository {
     return CreatorEarningModel.find({ creatorUserId }).sort({ createdAt: -1 });
   }
 
+  public async findByCreatorUserIdAndEventId(creatorUserId: string, eventId: string): Promise<ICreatorEarning[]> {
+    return CreatorEarningModel.find({ creatorUserId, eventId }).sort({ createdAt: -1 });
+  }
+
   public async findEligibleByCreatorUserId(creatorUserId: string): Promise<ICreatorEarning[]> {
     const now = new Date();
 
@@ -62,19 +66,19 @@ export class CreatorEarningRepository {
     );
   }
 
-  public async markConvertedToCredits(earningIds: string[], payoutId: string): Promise<void> {
-    await CreatorEarningModel.updateMany(
-      { _id: { $in: earningIds }, status: { $in: ["held", "eligible"] } },
-      { $set: { status: "converted_to_credits", payoutId } },
-    );
-  }
-
   public async releaseEligibleEarnings(creatorUserId: string): Promise<void> {
     const now = new Date();
 
     await CreatorEarningModel.updateMany(
       { creatorUserId, status: "held", eligibleAt: { $lte: now } },
       { $set: { status: "eligible" } },
+    );
+  }
+
+  public async releaseToEligible(earningIds: string[]): Promise<void> {
+    await CreatorEarningModel.updateMany(
+      { _id: { $in: earningIds }, status: "withdrawn" },
+      { $set: { status: "eligible" }, $unset: { payoutId: "" } },
     );
   }
 }

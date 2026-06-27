@@ -51,49 +51,6 @@ const legalDocumentClause = z
   })
   .strict();
 
-const moomentCreditPackage = z
-  .object({
-    id: objectId.optional(),
-    name: z
-      .string({
-        required_error: "Package name is required",
-        invalid_type_error: "Package name must be a string",
-      })
-      .trim()
-      .min(2, "Package name must contain at least 2 characters")
-      .max(120, "Package name cannot exceed 120 characters"),
-    credits: z.coerce
-      .number({
-        required_error: "Mooment credit amount is required",
-        invalid_type_error: "Mooment credit amount must be a number",
-      })
-      .int("Mooment credit amount must be a whole number")
-      .positive("Mooment credit amount must be greater than zero")
-      .max(1_000_000, "Mooment credit amount is too large"),
-    priceUsd: z.coerce
-      .number({
-        required_error: "USD price is required",
-        invalid_type_error: "USD price must be a number",
-      })
-      .positive("USD price must be greater than zero")
-      .max(1_000_000, "USD price is too large"),
-    commissionPercent: z.coerce
-      .number({
-        required_error: "Commission is required",
-        invalid_type_error: "Commission must be a number",
-      })
-      .min(0, "Commission cannot be negative")
-      .max(100, "Commission cannot exceed 100%"),
-    sortOrder: z.coerce
-      .number({
-        invalid_type_error: "Package sort order must be a number",
-      })
-      .int("Package sort order must be an integer")
-      .min(0, "Package sort order cannot be negative")
-      .optional(),
-  })
-  .strict();
-
 const pricingPercent = z.coerce
   .number({
     required_error: "Pricing value is required",
@@ -125,19 +82,6 @@ export const settingsValidation = {
             invalid_type_error: "Display on landing page must be true or false",
           })
           .optional(),
-      })
-      .strict(),
-  }),
-  updateMoomentCreditSettings: z.object({
-    body: z
-      .object({
-        packages: z
-          .array(moomentCreditPackage, {
-            required_error: "Packages are required",
-            invalid_type_error: "Packages must be an array",
-          })
-          .min(1, "At least one Mooment credit package is required")
-          .max(50, "Mooment credit settings cannot contain more than 50 packages"),
       })
       .strict(),
   }),

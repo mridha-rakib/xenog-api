@@ -30,14 +30,22 @@ const chatMessageSchema = new Schema<IChatMessage>(
     },
     text: {
       type: String,
-      required: true,
+      default: "",
       trim: true,
       maxlength: 2000,
+    },
+    attachment: {
+      type: Schema.Types.Mixed,
+      default: null,
     },
     readAt: {
       type: Date,
       default: null,
       index: true,
+    },
+    editedAt: {
+      type: Date,
+      default: null,
     },
   },
   {

@@ -26,6 +26,15 @@ export class CreatorEarningController {
     });
   };
 
+  public getEarningsByEvent = async (req: Request, res: Response): Promise<void> => {
+    const summary = await this.service.getEarningsByEvent(req.authUser as AuthUser, req.params.eventId as string);
+
+    ApiResponse.success(res, {
+      message: "Event earnings retrieved",
+      data: { summary },
+    });
+  };
+
   public getMyPayouts = async (req: Request, res: Response): Promise<void> => {
     const payouts = await this.service.getMyPayouts(req.authUser as AuthUser);
 

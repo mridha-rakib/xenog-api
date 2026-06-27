@@ -5,10 +5,10 @@ interface CreatePayoutRecord {
   creatorUserId: string;
   earningIds: string[];
   totalAmount: number;
+  currency: string;
   payoutType: CreatorPayoutType;
   status: CreatorPayoutStatus;
   scheduledDate: Date;
-  moomentCreditsAwarded?: number | null;
 }
 
 export class CreatorPayoutRepository {
@@ -36,5 +36,38 @@ export class CreatorPayoutRepository {
       },
       { new: true, runValidators: true },
     );
+  }
+
+  public async markProcessingIfPending(id: string): Promise<ICreatorPayout | null> {
+    return CreatorPayoutModel.findOneAndUpdate(
+      { _id: id, status: "pending" },
+      { $set: { status: "processing", processingStartedAt: new Date() } },
+      { new: true, runValidators: true },
+    );
+  }
+
+  public async markFailed(id: string, reason: string): Promise<ICreatorPayout | null> {
+    return CreatorPayoutModel.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          status: "failed",
+          failureReason: reason.slice(0, 500),
+          processedAt: new Date(),
+        },
+      },
+      { new: true, runValidators: true },
+    );
+  }
+
+  public async findPendingOrProcessingByCreatorUserId(creatorUserId: string): Promise<ICreatorPayout[]> {
+    return CreatorPayoutModel.find({
+      creatorUserId,
+      status: { $in: ["pending", "processing"] },
+    });
+  }
+
+  public async findAllPending(): Promise<ICreatorPayout[]> {
+    return CreatorPayoutModel.find({ status: "pending" }).sort({ createdAt: 1 });
   }
 }

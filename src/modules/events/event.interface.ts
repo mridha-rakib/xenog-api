@@ -63,6 +63,7 @@ export interface EventTicket {
   type: EventTicketType;
   price: number;
   capacity: number;
+  availableCount: number | null;
 }
 
 export type EventTicketInput = Omit<EventTicket, "id"> & {
@@ -218,6 +219,8 @@ export interface EventResponse {
   tickets: EventTicket[];
   rewards: EventReward[];
   privacy: EventPrivacy;
+  memberCount?: number;
+  isMember?: boolean;
   myJoinRequestStatus?: EventJoinRequestStatus | null;
   publishedAt?: Date | null;
   startedAt?: Date | null;

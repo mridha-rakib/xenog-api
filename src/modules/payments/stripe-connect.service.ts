@@ -12,6 +12,7 @@ import type {
   StripeConnectPayoutAccountView,
   StripeConnectRequirements,
 } from "./stripe-connect.interface.js";
+import type { CreatorPayoutType } from "./creator-payout.interface.js";
 import { StripeConnectRepository } from "./stripe-connect.repository.js";
 
 type StripeClient = InstanceType<typeof Stripe>;
@@ -105,6 +106,97 @@ export class StripeConnectService {
   private stripe: StripeClient | null = null;
 
   public constructor(private readonly repository = new StripeConnectRepository()) {}
+
+  public async validateReadyForPayout(userId: string, payoutType: CreatorPayoutType = "bank_transfer"): Promise<string> {
+    const account = await this.getAccount(userId);
+
+    if (!account) {
+      throw new AppError(
+        "Bank account not connected. Please connect your bank account in Settings → Bank Account.",
+        httpStatus.BAD_REQUEST,
+        { code: "STRIPE_NOT_CONNECTED" },
+      );
+    }
+
+    if (!account.payoutsEnabled) {
+      throw new AppError(
+        "Payouts are not enabled on your account. Please complete Stripe onboarding.",
+        httpStatus.BAD_REQUEST,
+        { code: "STRIPE_PAYOUTS_DISABLED" },
+      );
+    }
+
+    const hasBankAccount = account.payoutAccounts.some((a) => a.type === "bank_account");
+
+    if (!hasBankAccount) {
+      throw new AppError(
+        "No bank account found. Please add a bank account via Settings → Bank Account.",
+        httpStatus.BAD_REQUEST,
+        { code: "NO_BANK_ACCOUNT" },
+      );
+    }
+
+    if (payoutType === "instant_debit_card") {
+      const hasInstantCard = account.payoutAccounts.some(
+        (a) => a.type === "card" && (a.availablePayoutMethods ?? []).includes("instant"),
+      );
+
+      if (!hasInstantCard) {
+        throw new AppError(
+          "Instant payout is not available. Your account has no eligible debit card. Please switch to Bank Transfer in Settings → Withdrawal Method.",
+          httpStatus.BAD_REQUEST,
+          { code: "INSTANT_PAYOUT_NOT_ELIGIBLE" },
+        );
+      }
+    }
+
+    return account.stripeAccountId;
+  }
+
+  public async createTransfer(params: {
+    stripeAccountId: string;
+    amountCents: number;
+    currency: string;
+    transferGroup: string;
+    metadata?: Record<string, string>;
+    idempotencyKey?: string;
+  }): Promise<string> {
+    const stripe = this.getStripe();
+    const transfer = await stripe.transfers.create(
+      {
+        amount: params.amountCents,
+        currency: params.currency,
+        destination: params.stripeAccountId,
+        transfer_group: params.transferGroup,
+        ...(params.metadata ? { metadata: params.metadata } : {}),
+      },
+      params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined,
+    );
+
+    return transfer.id;
+  }
+
+  public async createInstantPayoutOnConnectedAccount(params: {
+    stripeAccountId: string;
+    amountCents: number;
+    currency: string;
+    idempotencyKey: string;
+  }): Promise<string> {
+    const stripe = this.getStripe();
+    const payout = await stripe.payouts.create(
+      {
+        amount: params.amountCents,
+        currency: params.currency,
+        method: "instant",
+      },
+      {
+        stripeAccount: params.stripeAccountId,
+        idempotencyKey: params.idempotencyKey,
+      },
+    );
+
+    return payout.id;
+  }
 
   public async getAccount(userId: string): Promise<StripeConnectAccountView | null> {
     const existingAccount = await this.repository.findByUserId(userId);

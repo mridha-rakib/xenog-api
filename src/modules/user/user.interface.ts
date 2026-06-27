@@ -1,5 +1,16 @@
 import type { Types } from "mongoose";
 
+export const payoutPreferences = ["manual", "weekly", "monthly"] as const;
+export type PayoutPreference = (typeof payoutPreferences)[number];
+
+export const withdrawalMethods = ["bank_transfer", "instant_debit_card"] as const;
+export type WithdrawalMethod = (typeof withdrawalMethods)[number];
+
+export interface IBusinessProfileSettings {
+  payoutPreference: PayoutPreference;
+  withdrawalMethod: WithdrawalMethod;
+}
+
 export interface IUser {
   _id: Types.ObjectId;
   name: string;
@@ -15,12 +26,14 @@ export interface IUser {
   bio?: string | null;
   address?: string | null;
   businessDocumentKey?: string | null;
+  businessProfile?: IBusinessProfileSettings | null;
   currentLocationSharingEnabled?: boolean;
   currentLocation?: UserCurrentLocation | null;
   notificationsEnabled?: boolean;
   role: "user" | "admin";
   isActive: boolean;
   emailVerified: boolean;
+  deletedAt?: Date | null;
   emailVerificationCodeHash?: string;
   emailVerificationExpiresAt?: Date;
   createdAt: Date;
@@ -73,12 +86,45 @@ export interface UpdateUserDto {
   bio?: string | null;
   address?: string | null;
   businessDocumentKey?: string | null;
+  businessProfile?: IBusinessProfileSettings | null;
   currentLocationSharingEnabled?: boolean;
   currentLocation?: UserCurrentLocation | null;
   notificationsEnabled?: boolean;
   role?: "user" | "admin";
   isActive?: boolean;
   emailVerified?: boolean;
+}
+
+export interface AdminManagedUserResponse {
+  id: string;
+  name: string;
+  username?: string;
+  email: string;
+  contact?: string | null;
+  accountType: "personal" | "business";
+  avatarKey?: string | null;
+  avatarUrl?: string | null;
+  gender?: string | null;
+  age?: number | null;
+  bio?: string | null;
+  address?: string | null;
+  businessDocumentKey?: string | null;
+  role: "user" | "admin";
+  isActive: boolean;
+  emailVerified: boolean;
+  isDeleted: boolean;
+  totalEvents: number;
+  completedEvents: number;
+  cancelledEvents: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface AdminUserStatsResponse {
+  total: number;
+  active: number;
+  suspended: number;
+  business: number;
 }
 
 export interface SuggestedUserResponse {
@@ -143,4 +189,16 @@ export interface UserReviewResponse {
   text: string;
   liked: boolean;
   createdAt: Date;
+}
+
+export interface UserResponse {
+  id: string;
+  name: string;
+  username?: string;
+  email?: string;
+  accountType: "personal" | "business";
+  avatarKey?: string | null;
+  avatarUrl?: string | null;
+  bio?: string | null;
+  isFollowing?: boolean;
 }

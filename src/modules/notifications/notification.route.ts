@@ -11,5 +11,6 @@ router.use(authenticate);
 router.get("/", catchAsync(controller.list));
 router.get("/unread-count", catchAsync(controller.countUnread));
 router.patch("/read-all", catchAsync(controller.markAllRead));
+router.patch("/:notificationId/read", catchAsync(controller.markRead));
 
 export const notificationRoutes = router;

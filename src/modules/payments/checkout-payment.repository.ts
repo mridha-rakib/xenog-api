@@ -1,3 +1,4 @@
+import type { Types } from "mongoose";
 import type {
   CheckoutPaymentStatus,
   CheckoutPayoutStatus,
@@ -9,6 +10,7 @@ type CreateCheckoutOrderRecord = Omit<
   ICheckoutOrder,
   "_id" | "userId" | "createdAt" | "updatedAt" | "paidAt" | "failedAt" | "failureMessage"
 > & {
+  _id?: Types.ObjectId;
   userId: string;
   paidAt?: Date | null;
 };
@@ -81,6 +83,18 @@ export class CheckoutPaymentRepository {
     );
   }
 
+  public async updatePaymentStatusIf(
+    orderId: string,
+    fromStatuses: CheckoutPaymentStatus[],
+    payload: UpdatePaymentStatusPayload,
+  ): Promise<ICheckoutOrder | null> {
+    return CheckoutOrderModel.findOneAndUpdate(
+      { _id: orderId, paymentStatus: { $in: fromStatuses } },
+      { $set: payload },
+      { new: true, runValidators: true },
+    );
+  }
+
   public async processRefundForCancelledEvent(orderId: string): Promise<ICheckoutOrder | null> {
     return CheckoutOrderModel.findByIdAndUpdate(
       orderId,
@@ -112,6 +126,70 @@ export class CheckoutPaymentRepository {
           .reduce((sum, item) => sum + item.quantity, 0)
       );
     }, 0);
+  }
+
+  public async getActivePurchasedCountForTicket(
+    userId: string,
+    eventId: string,
+    ticketId: string,
+  ): Promise<number> {
+    const orders = await CheckoutOrderModel.find({
+      userId,
+      kind: "ticket",
+      paymentStatus: { $in: ["paid", "requires_payment", "processing"] },
+      "lineItems.eventId": eventId,
+      "lineItems.itemId": ticketId,
+    })
+      .select("lineItems")
+      .lean();
+
+    return orders.reduce((total, order) => {
+      return (
+        total +
+        order.lineItems
+          .filter((item) => item.itemId === ticketId)
+          .reduce((sum, item) => sum + item.quantity, 0)
+      );
+    }, 0);
+  }
+
+  public async findExistingPendingTicketOrder(
+    userId: string,
+    eventId: string,
+    ticketId: string,
+  ): Promise<ICheckoutOrder | null> {
+    return CheckoutOrderModel.findOne({
+      userId,
+      kind: "ticket",
+      paymentStatus: "requires_payment",
+      reservedUntil: { $gt: new Date() },
+      stripePaymentIntentId: { $exists: true, $ne: null },
+      "lineItems.eventId": eventId,
+      "lineItems.itemId": ticketId,
+    });
+  }
+
+  public async findExistingPaidFreeOrder(
+    userId: string,
+    eventId: string,
+    ticketId: string,
+  ): Promise<ICheckoutOrder | null> {
+    return CheckoutOrderModel.findOne({
+      userId,
+      kind: "ticket",
+      paymentStatus: "paid",
+      totalAmount: 0,
+      "lineItems.eventId": eventId,
+      "lineItems.itemId": ticketId,
+    });
+  }
+
+  public async findStaleReservedOrders(limit: number): Promise<ICheckoutOrder[]> {
+    return CheckoutOrderModel.find({
+      paymentStatus: "requires_payment",
+      reservedUntil: { $lt: new Date() },
+      stripePaymentIntentId: { $exists: true, $ne: null },
+    }).limit(limit);
   }
 
   public async getOwnedTicketCountForTicket(

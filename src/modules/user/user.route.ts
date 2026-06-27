@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { catchAsync } from "../../core/http/catch-async.js";
-import { authenticate } from "../../core/middlewares/auth.middleware.js";
+import { authenticate, authorizeRoles, optionallyAuthenticate } from "../../core/middlewares/auth.middleware.js";
 import { validate } from "../../core/middlewares/validate.middleware.js";
 import { UserController } from "./user.controller.js";
 import { userValidation } from "./user.validation.js";
@@ -10,6 +10,34 @@ const controller = new UserController();
 
 router.post("/", validate(userValidation.create), catchAsync(controller.create));
 router.get("/", validate(userValidation.list), catchAsync(controller.list));
+router.get(
+  "/admin/management",
+  authenticate,
+  authorizeRoles("admin"),
+  validate(userValidation.adminList),
+  catchAsync(controller.listForAdmin),
+);
+router.get(
+  "/admin/management/:id",
+  authenticate,
+  authorizeRoles("admin"),
+  validate(userValidation.adminUser),
+  catchAsync(controller.getForAdmin),
+);
+router.patch(
+  "/admin/management/:id",
+  authenticate,
+  authorizeRoles("admin"),
+  validate(userValidation.adminUpdate),
+  catchAsync(controller.updateForAdmin),
+);
+router.delete(
+  "/admin/management/:id",
+  authenticate,
+  authorizeRoles("admin"),
+  validate(userValidation.adminUser),
+  catchAsync(controller.deleteForAdmin),
+);
 router.get(
   "/suggestions",
   authenticate,
@@ -70,8 +98,20 @@ router.delete(
   validate(userValidation.block),
   catchAsync(controller.unblock),
 );
-router.get("/:id", validate(userValidation.getById), catchAsync(controller.getById));
-router.patch("/:id", validate(userValidation.update), catchAsync(controller.update));
-router.delete("/:id", validate(userValidation.delete), catchAsync(controller.delete));
+router.get("/:id", optionallyAuthenticate, validate(userValidation.getById), catchAsync(controller.getById));
+router.patch(
+  "/:id",
+  authenticate,
+  authorizeRoles("admin"),
+  validate(userValidation.update),
+  catchAsync(controller.update),
+);
+router.delete(
+  "/:id",
+  authenticate,
+  authorizeRoles("admin"),
+  validate(userValidation.delete),
+  catchAsync(controller.delete),
+);
 
 export const userRoutes = router;

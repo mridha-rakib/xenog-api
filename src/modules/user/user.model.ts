@@ -1,5 +1,6 @@
 import { Schema, model } from "mongoose";
 import type { IUser } from "./user.interface.js";
+import { payoutPreferences, withdrawalMethods } from "./user.interface.js";
 
 const currentLocationSchema = new Schema(
   {
@@ -106,6 +107,16 @@ const userSchema = new Schema<IUser>(
       trim: true,
       default: null,
     },
+    businessProfile: {
+      type: new Schema(
+        {
+          payoutPreference: { type: String, enum: payoutPreferences, default: "manual" },
+          withdrawalMethod: { type: String, enum: withdrawalMethods, default: "bank_transfer" },
+        },
+        { _id: false },
+      ),
+      default: null,
+    },
     currentLocationSharingEnabled: {
       type: Boolean,
       default: false,
@@ -131,6 +142,11 @@ const userSchema = new Schema<IUser>(
     emailVerified: {
       type: Boolean,
       default: false,
+      index: true,
+    },
+    deletedAt: {
+      type: Date,
+      default: null,
       index: true,
     },
     emailVerificationCodeHash: {

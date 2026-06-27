@@ -3,6 +3,7 @@ import { AppError } from "../../core/errors/app-error.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { StorageService } from "../storage/storage.service.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
+import { ChatService } from "./chat.service.js";
 import { GroupRepository } from "./group.repository.js";
 import type {
   CreateGroupDto,
@@ -10,6 +11,7 @@ import type {
   GroupConversationResponse,
   GroupMessageResponse,
   IGroup,
+  IGroupMessage,
   ListGroupMessageHistoryQuery,
   ListGroupsQuery,
 } from "./group.interface.js";
@@ -19,6 +21,7 @@ export class GroupService {
     private readonly groupRepository = new GroupRepository(),
     private readonly userFollowRepository = new UserFollowRepository(),
     private readonly storageService = new StorageService(),
+    private readonly chatService = new ChatService(),
   ) {}
 
   public async createGroup(user: AuthUser, payload: CreateGroupDto): Promise<GroupConversationResponse> {
@@ -79,20 +82,33 @@ export class GroupService {
       throw new AppError("You are not a member of this group.", httpStatus.FORBIDDEN);
     }
 
+    const type = payload.type ?? payload.attachment?.type ?? "text";
+    const text = payload.text?.trim() ?? "";
+    const attachment = await this.chatService.normalizeAttachment(user.id, type, payload.attachment ?? null);
+
     const message = await this.groupRepository.createMessage({
       groupId,
       senderId: user.id,
-      text: payload.text,
+      type,
+      text,
+      attachment,
     });
 
-    await this.groupRepository.updateLastMessage(groupId, payload.text, message.createdAt);
+    await this.groupRepository.updateLastMessage(
+      groupId,
+      this.chatService.getMessageSummary(message.type, message.text, message.attachment ?? null),
+      message.createdAt,
+    );
 
     return {
       id: message._id.toString(),
       groupId: message.groupId.toString(),
       senderId: message.senderId.toString(),
       senderName: user.name,
+      type: message.type,
       text: message.text,
+      attachment: await this.chatService.resolveAttachmentUrls(message.attachment ?? null),
+      editedAt: message.editedAt ?? null,
       createdAt: message.createdAt,
       updatedAt: message.updatedAt,
     };
@@ -111,15 +127,73 @@ export class GroupService {
 
     const messages = await this.groupRepository.findMessages(groupId, query.limit ?? 50, query.before);
 
-    return messages.reverse().map((message) => ({
-      id: message._id.toString(),
-      groupId: message.groupId.toString(),
-      senderId: message.senderId.toString(),
-      senderName: "",
-      text: message.text,
-      createdAt: message.createdAt,
-      updatedAt: message.updatedAt,
-    }));
+    return Promise.all(
+      messages.reverse().map(async (message) => ({
+        id: message._id.toString(),
+        groupId: message.groupId.toString(),
+        senderId: message.senderId.toString(),
+        senderName: "",
+        type: message.type,
+        text: message.text,
+        attachment: await this.chatService.resolveAttachmentUrls(message.attachment ?? null),
+        editedAt: message.editedAt ?? null,
+        createdAt: message.createdAt,
+        updatedAt: message.updatedAt,
+      })),
+    );
+  }
+
+  public async editGroupMessage(
+    user: AuthUser,
+    messageId: string,
+    text: string,
+  ): Promise<GroupMessageResponse> {
+    const message = await this.groupRepository.findMessageById(messageId);
+
+    if (!message) {
+      throw new AppError("Message not found.", httpStatus.NOT_FOUND);
+    }
+
+    if (message.senderId.toString() !== user.id) {
+      throw new AppError("You can only edit your own messages.", httpStatus.FORBIDDEN);
+    }
+
+    if (message.type !== "text") {
+      throw new AppError("Only text messages can be edited.", httpStatus.BAD_REQUEST);
+    }
+
+    const trimmedText = text.trim();
+    if (!trimmedText) {
+      throw new AppError("Message text is required.", httpStatus.BAD_REQUEST);
+    }
+
+    const updated = await this.groupRepository.updateOwnedMessageText(messageId, user.id, trimmedText);
+    if (!updated) {
+      throw new AppError("Message not found.", httpStatus.NOT_FOUND);
+    }
+
+    await this.syncGroupLastMessage(updated.groupId.toString());
+    return this.toGroupMessageResponse(updated, user.name);
+  }
+
+  public async deleteGroupMessage(user: AuthUser, messageId: string): Promise<GroupMessageResponse> {
+    const message = await this.groupRepository.findMessageById(messageId);
+
+    if (!message) {
+      throw new AppError("Message not found.", httpStatus.NOT_FOUND);
+    }
+
+    if (message.senderId.toString() !== user.id) {
+      throw new AppError("You can only delete your own messages.", httpStatus.FORBIDDEN);
+    }
+
+    const deleted = await this.groupRepository.deleteOwnedMessage(messageId, user.id);
+    if (!deleted) {
+      throw new AppError("Message not found.", httpStatus.NOT_FOUND);
+    }
+
+    await this.syncGroupLastMessage(deleted.groupId.toString());
+    return this.toGroupMessageResponse(deleted, user.name);
   }
 
   public async assertIsMember(userId: string, groupId: string): Promise<void> {
@@ -132,6 +206,35 @@ export class GroupService {
 
   public async getGroupMemberIds(groupId: string): Promise<string[]> {
     return this.groupRepository.getMemberIds(groupId);
+  }
+
+  private async syncGroupLastMessage(groupId: string): Promise<void> {
+    const latest = await this.groupRepository.findLatestMessage(groupId);
+    await this.groupRepository.updateLastMessage(
+      groupId,
+      latest
+        ? this.chatService.getMessageSummary(latest.type, latest.text, latest.attachment ?? null)
+        : null,
+      latest?.createdAt ?? null,
+    );
+  }
+
+  private async toGroupMessageResponse(
+    message: IGroupMessage,
+    senderName: string,
+  ): Promise<GroupMessageResponse> {
+    return {
+      id: message._id.toString(),
+      groupId: message.groupId.toString(),
+      senderId: message.senderId.toString(),
+      senderName,
+      type: message.type,
+      text: message.text,
+      attachment: await this.chatService.resolveAttachmentUrls(message.attachment ?? null),
+      editedAt: message.editedAt ?? null,
+      createdAt: message.createdAt,
+      updatedAt: message.updatedAt,
+    };
   }
 
   private async toGroupConversationResponse(group: IGroup): Promise<GroupConversationResponse> {

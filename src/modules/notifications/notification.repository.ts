@@ -13,6 +13,7 @@ export class NotificationRepository {
       eventId: data.eventId ?? null,
       eventName: data.eventName ?? null,
       ticketName: data.ticketName ?? null,
+      message: data.message ?? null,
       isRead: false,
     });
 
@@ -28,6 +29,14 @@ export class NotificationRepository {
 
   public async markAllReadByRecipientId(recipientUserId: string): Promise<void> {
     await NotificationModel.updateMany({ recipientUserId, isRead: false }, { $set: { isRead: true } });
+  }
+
+  public async markReadByIdForRecipient(notificationId: string, recipientUserId: string): Promise<INotification | null> {
+    return NotificationModel.findOneAndUpdate(
+      { _id: notificationId, recipientUserId },
+      { $set: { isRead: true } },
+      { new: true },
+    ).lean<INotification | null>();
   }
 
   public async countUnreadByRecipientId(recipientUserId: string): Promise<number> {

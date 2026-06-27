@@ -1,4 +1,5 @@
 import type { Types } from "mongoose";
+import type { ChatMessageAttachment, ChatMessageType } from "./chat.interface.js";
 
 export type GroupMemberRole = "admin" | "member";
 
@@ -24,7 +25,10 @@ export interface IGroupMessage {
   _id: Types.ObjectId;
   groupId: Types.ObjectId;
   senderId: Types.ObjectId;
+  type: ChatMessageType;
   text: string;
+  attachment?: ChatMessageAttachment | null;
+  editedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -45,7 +49,9 @@ export interface ListGroupMessageHistoryQuery {
 }
 
 export interface CreateGroupMessageDto {
-  text: string;
+  text?: string;
+  type?: ChatMessageType;
+  attachment?: ChatMessageAttachment;
 }
 
 export interface GroupConversationResponse {
@@ -66,7 +72,10 @@ export interface GroupMessageResponse {
   groupId: string;
   senderId: string;
   senderName: string;
+  type: ChatMessageType;
   text: string;
+  attachment?: ChatMessageAttachment | null;
+  editedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }

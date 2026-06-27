@@ -1,6 +1,18 @@
 import type { Types } from "mongoose";
 
-export type NotificationType = "follow" | "ticket_buyer" | "ticket_creator" | "ticket_share" | "join_request" | "join_request_accepted";
+export type NotificationType =
+  | "follow"
+  | "ticket_buyer"
+  | "ticket_creator"
+  | "ticket_share"
+  | "join_request"
+  | "join_request_accepted"
+  | "event_member_added"
+  | "moderation_warning"
+  | "payout_requested"
+  | "payout_processing"
+  | "payout_completed"
+  | "payout_failed";
 
 export interface INotification {
   _id: Types.ObjectId;
@@ -13,6 +25,7 @@ export interface INotification {
   eventId?: string | null;
   eventName?: string | null;
   ticketName?: string | null;
+  message?: string | null;
   isRead: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -28,6 +41,7 @@ export interface CreateNotificationDto {
   eventId?: string | null;
   eventName?: string | null;
   ticketName?: string | null;
+  message?: string | null;
 }
 
 export interface NotificationResponse {
@@ -41,6 +55,7 @@ export interface NotificationResponse {
   eventId?: string | null;
   eventName?: string | null;
   ticketName?: string | null;
+  message?: string | null;
   isRead: boolean;
   createdAt: string;
 }

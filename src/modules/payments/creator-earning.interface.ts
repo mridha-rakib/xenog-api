@@ -4,7 +4,6 @@ export const creatorEarningStatuses = [
   "held",
   "eligible",
   "withdrawn",
-  "converted_to_credits",
   "refunded",
 ] as const;
 export type CreatorEarningStatus = (typeof creatorEarningStatuses)[number];
@@ -46,8 +45,18 @@ export interface CreatorEarningResponse {
 export interface CreatorEarningsSummaryResponse {
   heldAmount: number;
   eligibleAmount: number;
+  pendingWithdrawalAmount: number;
   withdrawnAmount: number;
-  convertedToCreditsAmount: number;
   totalEarnedAmount: number;
+  earnings: CreatorEarningResponse[];
+}
+
+export interface EventEarningsSummaryResponse {
+  grossAmount: number;
+  platformFeeAmount: number;
+  netAmount: number;
+  refundedAmount: number;
+  ticketNetAmount: number;
+  productNetAmount: number;
   earnings: CreatorEarningResponse[];
 }

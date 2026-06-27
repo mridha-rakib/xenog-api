@@ -18,6 +18,14 @@ export class UserRepository {
     return UserModel.findById(id);
   }
 
+  public async findByIds(ids: string[]): Promise<IUser[]> {
+    if (ids.length === 0) {
+      return [];
+    }
+
+    return UserModel.find({ _id: { $in: ids } });
+  }
+
   public async findByIdWithPassword(id: string): Promise<IUser | null> {
     return UserModel.findById(id).select("+passwordHash");
   }
@@ -170,5 +178,40 @@ export class UserRepository {
 
   public async deleteById(id: string): Promise<IUser | null> {
     return UserModel.findByIdAndDelete(id);
+  }
+
+  public async deactivateAccountById(id: string): Promise<IUser | null> {
+    const deletedAccountToken = `deleted-${id}`;
+
+    return UserModel.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          name: "Deleted User",
+          email: `${deletedAccountToken}@deleted.local`,
+          contact: null,
+          avatarKey: null,
+          gender: null,
+          age: null,
+          bio: null,
+          address: null,
+          businessDocumentKey: null,
+          currentLocationSharingEnabled: false,
+          currentLocation: null,
+          notificationsEnabled: false,
+          isActive: false,
+          emailVerified: false,
+          deletedAt: new Date(),
+          passwordChangedAt: new Date(),
+        },
+        $unset: {
+          username: "",
+          passwordHash: "",
+          emailVerificationCodeHash: "",
+          emailVerificationExpiresAt: "",
+        },
+      },
+      { new: true, runValidators: true },
+    );
   }
 }

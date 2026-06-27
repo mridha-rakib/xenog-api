@@ -16,6 +16,7 @@ import { settingsRoutes } from "../modules/settings/settings.route.js";
 import { storyRoutes } from "../modules/stories/story.route.js";
 import { supportTicketRoutes } from "../modules/support/support-ticket.route.js";
 import { momentRoutes } from "../modules/moments/moment.route.js";
+import { reportRoutes } from "../modules/reports/report.route.js";
 
 const router = Router();
 
@@ -31,6 +32,7 @@ router.use("/moments", momentRoutes);
 router.use("/payments", paymentRoutes);
 router.use("/plans", planRoutes);
 router.use("/products", productRoutes);
+router.use("/reports", reportRoutes);
 router.use("/storage", storageRoutes);
 router.use("/settings", settingsRoutes);
 router.use("/stories", storyRoutes);

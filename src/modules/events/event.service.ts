@@ -13,7 +13,9 @@ import { LiveRoomRepository } from "../live-rooms/live-room.repository.js";
 import { MomentRepository } from "../moments/moment.repository.js";
 import { MomentReactionRepository } from "../moments/moment-reaction.repository.js";
 import { MomentCommentRepository } from "../moments/moment-comment.repository.js";
+import { MomentCommentReactionRepository } from "../moments/moment-comment-reaction.repository.js";
 import { MomentShareRepository } from "../moments/moment-share.repository.js";
+import { MomentSaveRepository } from "../moments/moment-save.repository.js";
 import type { IUser } from "../user/user.interface.js";
 import { ProductRepository } from "../products/product.repository.js";
 import { EventRepository } from "./event.repository.js";
@@ -102,7 +104,9 @@ export class EventService {
     private readonly momentRepository = new MomentRepository(),
     private readonly momentReactionRepository = new MomentReactionRepository(),
     private readonly momentCommentRepository = new MomentCommentRepository(),
+    private readonly momentCommentReactionRepository = new MomentCommentReactionRepository(),
     private readonly momentShareRepository = new MomentShareRepository(),
+    private readonly momentSaveRepository = new MomentSaveRepository(),
   ) {}
 
   public async saveDraft(user: AuthUser, payload: SaveEventDraftDto, eventId?: string): Promise<EventResponse> {
@@ -134,7 +138,25 @@ export class EventService {
       const existingEvent = await this.eventRepository.findByIdForUser(eventId, user.id);
 
       if (existingEvent && existingEvent.status !== "draft") {
-        const event = await this.eventRepository.updateByIdForUser(eventId, user.id, normalizedPayload);
+        // Preserve the atomic availableCount counter — do NOT reset it to capacity on re-publish.
+        // For new tickets added in the payload, start fully available.
+        // For capacity changes, adjust the counter by the delta.
+        const existingById = new Map(existingEvent.tickets.map((t) => [t.id, t]));
+        const ticketsWithCounts = (normalizedPayload.tickets ?? []).map((ticket) => {
+          // After normalizePublishPayload, every ticket has a UUID id — the optional type is a type-system artifact
+          const existing = existingById.get(ticket.id ?? "");
+          if (!existing) {
+            return { ...ticket, availableCount: ticket.capacity };
+          }
+          const delta = ticket.capacity - existing.capacity;
+          const currentAvailable = existing.availableCount ?? existing.capacity;
+          return { ...ticket, availableCount: Math.max(0, currentAvailable + delta) };
+        });
+
+        const event = await this.eventRepository.updateByIdForUser(eventId, user.id, {
+          ...normalizedPayload,
+          tickets: ticketsWithCounts,
+        });
 
         if (!event) {
           throw new AppError("Event not found.", httpStatus.NOT_FOUND);
@@ -180,6 +202,23 @@ export class EventService {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
+    const shadowMoment = await this.momentRepository.findEventAnnouncement(eventId);
+
+    if (shadowMoment) {
+      const shadowMomentId = shadowMoment._id.toString();
+      const comments = await this.momentCommentRepository.findByMomentId(shadowMomentId);
+      const commentIds = comments.map((c) => c._id.toString());
+
+      await Promise.all([
+        this.momentReactionRepository.deleteByMomentId(shadowMomentId),
+        this.momentCommentRepository.deleteByMomentId(shadowMomentId),
+        this.momentCommentReactionRepository.deleteByCommentIds(commentIds),
+        this.momentShareRepository.deleteByMomentId(shadowMomentId),
+        this.momentSaveRepository.deleteByMomentId(shadowMomentId),
+        this.momentRepository.deleteEventAnnouncement(eventId),
+      ]);
+    }
+
     return this.toProfileMutatingResponse(event);
   }
 
@@ -195,11 +234,10 @@ export class EventService {
   }
 
   public async createEventTicket(user: AuthUser, eventId: string, payload: CreateEventTicketDto): Promise<EventResponse> {
-    const event = await this.getEventForTicketOwner(user, eventId);
-    const ticket = this.normalizeTicket(payload);
-    const updatedEvent = await this.eventRepository.updateByIdForUser(eventId, user.id, {
-      tickets: [...event.tickets.map((item) => this.normalizeTicket(item)), ticket],
-    });
+    await this.getEventForTicketOwner(user, eventId);
+    // New published tickets start fully available — availableCount is set here, not by normalizeTicket.
+    const ticket: EventTicket = { ...this.normalizeTicket(payload), availableCount: payload.capacity };
+    const updatedEvent = await this.eventRepository.addTicketToEvent(eventId, user.id, ticket);
 
     if (!updatedEvent) {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
@@ -215,29 +253,48 @@ export class EventService {
     payload: UpdateEventTicketDto,
   ): Promise<EventResponse> {
     const event = await this.getEventForTicketOwner(user, eventId);
-    let foundTicket = false;
-    const tickets = event.tickets.map((ticket) => {
-      const normalizedTicket = this.normalizeTicket(ticket);
+    const existingTicket = event.tickets.find((t) => t.id === ticketId);
 
-      if (normalizedTicket.id !== ticketId) {
-        return normalizedTicket;
-      }
-
-      foundTicket = true;
-
-      return this.normalizeTicket({
-        ...normalizedTicket,
-        ...payload,
-        id: normalizedTicket.id,
-        type: payload.type ?? normalizedTicket.type,
-      });
-    });
-
-    if (!foundTicket) {
+    if (!existingTicket) {
       throw new AppError("Event ticket not found.", httpStatus.NOT_FOUND);
     }
 
-    const updatedEvent = await this.eventRepository.updateByIdForUser(eventId, user.id, { tickets });
+    const isCapacityChanging = payload.capacity !== undefined && payload.capacity !== existingTicket.capacity;
+
+    if (isCapacityChanging) {
+      const delta = payload.capacity! - existingTicket.capacity;
+      const capacityUpdated = await this.eventRepository.adjustTicketCapacityAndCount(
+        eventId,
+        ticketId,
+        payload.capacity!,
+        delta,
+      );
+
+      if (!capacityUpdated) {
+        throw new AppError(
+          "Cannot reduce ticket capacity below the number of tickets already sold.",
+          httpStatus.CONFLICT,
+        );
+      }
+    }
+
+    // Merge payload into existing ticket, then normalize all mutable fields except capacity/availableCount
+    // (capacity is handled above; availableCount is never touched by updateTicketFields).
+    const merged = this.normalizeTicket({
+      ...existingTicket,
+      ...payload,
+      id: existingTicket.id,
+      type: payload.type ?? existingTicket.type,
+    });
+
+    const updatedEvent = await this.eventRepository.updateTicketFields(eventId, user.id, ticketId, {
+      name: merged.name,
+      description: merged.description,
+      salesEndAt: merged.salesEndAt,
+      type: merged.type,
+      price: merged.price,
+      ...(!isCapacityChanging ? { capacity: merged.capacity } : {}),
+    });
 
     if (!updatedEvent) {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
@@ -248,14 +305,13 @@ export class EventService {
 
   public async deleteEventTicket(user: AuthUser, eventId: string, ticketId: string): Promise<EventResponse> {
     const event = await this.getEventForTicketOwner(user, eventId);
-    const tickets = event.tickets.map((ticket) => this.normalizeTicket(ticket));
-    const nextTickets = tickets.filter((ticket) => ticket.id !== ticketId);
+    const exists = event.tickets.some((t) => t.id === ticketId);
 
-    if (nextTickets.length === tickets.length) {
+    if (!exists) {
       throw new AppError("Event ticket not found.", httpStatus.NOT_FOUND);
     }
 
-    const updatedEvent = await this.eventRepository.updateByIdForUser(eventId, user.id, { tickets: nextTickets });
+    const updatedEvent = await this.eventRepository.removeTicketFromEvent(eventId, user.id, ticketId);
 
     if (!updatedEvent) {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
@@ -885,6 +941,7 @@ export class EventService {
       commentsCount: commentCounts.get(interactionMomentId) ?? 0,
       sharesCount: shareCounts.get(interactionMomentId) ?? 0,
       isLiked: likedMomentIds.has(interactionMomentId),
+      isMember: !isOwner && event.memberUserIds.some((id) => id.toString() === user.id),
     };
   }
 
@@ -918,11 +975,19 @@ export class EventService {
       throw new AppError("User not found.", httpStatus.NOT_FOUND);
     }
 
+    const isConnectedToCreator = await this.userFollowRepository.hasAnyFollowRelation(user.id, memberId);
+
+    if (!isConnectedToCreator) {
+      throw new AppError("Only your followers and people you follow can be added to a private event.", httpStatus.FORBIDDEN);
+    }
+
     const updatedEvent = await this.eventRepository.addMemberById(eventId, user.id, memberId);
 
     if (!updatedEvent) {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
+
+    void this.dispatchMemberAddedNotification(user, memberId, event.name ?? null, eventId);
 
     return this.resolveMemberResponses(updatedEvent.memberUserIds.map((id) => id.toString()));
   }
@@ -1017,6 +1082,28 @@ export class EventService {
     }
 
     void this.dispatchJoinRequestAcceptedNotification(user, requestUserId, updated.name ?? null, eventId);
+  }
+
+  private async dispatchMemberAddedNotification(
+    actor: AuthUser,
+    recipientId: string,
+    eventName: string | null,
+    eventId: string,
+  ): Promise<void> {
+    try {
+      await this.notificationRepository.create({
+        recipientUserId: recipientId,
+        type: "event_member_added",
+        actorUserId: actor.id,
+        actorName: actor.name ?? null,
+        actorUsername: actor.username ?? null,
+        actorAvatarKey: actor.avatarKey ?? null,
+        eventId,
+        eventName,
+      });
+    } catch {
+      // non-critical
+    }
   }
 
   private async dispatchJoinRequestAcceptedNotification(
@@ -1167,7 +1254,11 @@ export class EventService {
       scheduledAt: payload.scheduledAt,
       endAt: payload.endAt,
       location: draftPayload.location ?? {},
-      tickets: payload.tickets.map((ticket) => this.normalizeTicket(ticket)),
+      tickets: payload.tickets.map((ticket) => {
+        const normalized = this.normalizeTicket(ticket);
+        // On first publish, every ticket starts fully available.
+        return { ...normalized, availableCount: normalized.capacity };
+      }),
       privacy: payload.privacy,
     };
   }
@@ -1181,6 +1272,7 @@ export class EventService {
       type: ticket.type,
       price: ticket.type === "free" ? 0 : ticket.price,
       capacity: ticket.capacity,
+      availableCount: null,
     };
   }
 
@@ -1589,6 +1681,7 @@ export class EventService {
       tickets: event.tickets,
       rewards: this.normalizeExistingRewards(event.rewards),
       privacy: event.privacy,
+      memberCount: event.memberUserIds.length,
       ...(myJoinRequestStatus !== undefined ? { myJoinRequestStatus: myJoinRequestStatus ?? null } : {}),
       publishedAt: event.publishedAt ?? null,
       startedAt: event.startedAt ?? null,

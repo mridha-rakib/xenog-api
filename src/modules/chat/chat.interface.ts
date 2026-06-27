@@ -1,8 +1,45 @@
 import type { Types } from "mongoose";
 
-export const chatMessageTypes = ["text"] as const;
+export const chatMessageTypes = ["text", "image", "video", "audio", "location", "event"] as const;
 
 export type ChatMessageType = (typeof chatMessageTypes)[number];
+
+export const fileAttachmentTypes = ["image", "video", "audio"] as const;
+export type FileAttachmentType = (typeof fileAttachmentTypes)[number];
+
+export interface ChatFileAttachment {
+  type: FileAttachmentType;
+  key: string;
+  url?: string | null;
+  mimeType: string;
+  size: number;
+  fileName?: string | null;
+  width?: number | null;
+  height?: number | null;
+  durationSeconds?: number | null;
+}
+
+export interface ChatLocationAttachment {
+  type: "location";
+  latitude: number;
+  longitude: number;
+  label?: string | null;
+  address?: string | null;
+}
+
+export interface ChatEventAttachment {
+  type: "event";
+  eventId: string;
+  title?: string | null;
+  scheduledAt?: Date | null;
+  endAt?: Date | null;
+  coverImageKey?: string | null;
+  coverImageUrl?: string | null;
+  locationName?: string | null;
+  address?: string | null;
+}
+
+export type ChatMessageAttachment = ChatFileAttachment | ChatLocationAttachment | ChatEventAttachment;
 
 export interface ListDirectMessagesQuery {
   limit?: number;
@@ -15,7 +52,9 @@ export interface ListDirectMessageHistoryQuery {
 }
 
 export interface CreateDirectMessageDto {
-  text: string;
+  text?: string;
+  type?: ChatMessageType;
+  attachment?: ChatMessageAttachment;
 }
 
 export interface IChatMessage {
@@ -25,7 +64,9 @@ export interface IChatMessage {
   recipientId: Types.ObjectId;
   type: ChatMessageType;
   text: string;
+  attachment?: ChatMessageAttachment | null;
   readAt?: Date | null;
+  editedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -52,7 +93,9 @@ export interface DirectMessageResponse {
   recipientId: string;
   type: ChatMessageType;
   text: string;
+  attachment?: ChatMessageAttachment | null;
   readAt: Date | null;
+  editedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }

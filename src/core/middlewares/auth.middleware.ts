@@ -37,6 +37,24 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
   }
 };
 
+export const optionallyAuthenticate: RequestHandler = async (req, _res, next) => {
+  try {
+    const token = getBearerToken(req.headers.authorization);
+
+    if (!token) {
+      next();
+      return;
+    }
+
+    const payload = authService.verifyAccessToken(token);
+    req.authUser = await authService.getCurrentUser(payload.sub);
+
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const authorizeRoles =
   (...roles: AuthUser["role"][]): RequestHandler =>
   (req, _res, next) => {

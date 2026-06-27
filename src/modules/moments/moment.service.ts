@@ -127,25 +127,35 @@ export class MomentService {
     }
 
     const moments = await this.momentRepository.findByEventId(eventId);
-    const [viewerFollowingIds, interactionContext] = await Promise.all([
+    const uniqueUserIds = [...new Set(moments.map((m) => m.userId.toString()))];
+    const [authors, viewerFollowingIds, interactionContext] = await Promise.all([
+      this.userRepository.findByIds(uniqueUserIds),
       this.getViewerFollowingIdSet(user),
       this.buildInteractionContext(moments, user),
     ]);
+    const authorById = new Map(authors.map((a) => [a._id.toString(), a]));
 
     return Promise.all(
-      moments.map((moment) => this.toResponse(moment, undefined, user, viewerFollowingIds, interactionContext)),
+      moments.map((moment) => this.toResponse(
+        moment,
+        authorById.get(moment.userId.toString()) ?? null,
+        user,
+        viewerFollowingIds,
+        interactionContext,
+      )),
     );
   }
 
   public async listMyMoments(user: AuthUser): Promise<MomentResponse[]> {
     const moments = await this.momentRepository.findByUserId(user.id);
-    const [viewerFollowingIds, interactionContext] = await Promise.all([
+    const [userDoc, viewerFollowingIds, interactionContext] = await Promise.all([
+      this.userRepository.findById(user.id),
       this.getViewerFollowingIdSet(user),
       this.buildInteractionContext(moments, user),
     ]);
 
     return Promise.all(
-      moments.map((moment) => this.toResponse(moment, undefined, user, viewerFollowingIds, interactionContext)),
+      moments.map((moment) => this.toResponse(moment, userDoc, user, viewerFollowingIds, interactionContext)),
     );
   }
 
@@ -153,26 +163,44 @@ export class MomentService {
     const hashtags = query.hashtags?.map(normalizeHashtag).filter(Boolean);
     const excludeUserIds = await this.userBlockRepository.findBlockedIds(user.id);
     const moments = await this.momentRepository.findFeed({ ...query, hashtags, excludeUserIds });
-    const [viewerFollowingIds, interactionContext] = await Promise.all([
+    const uniqueUserIds = [...new Set(moments.map((m) => m.userId.toString()))];
+    const [authors, viewerFollowingIds, interactionContext] = await Promise.all([
+      this.userRepository.findByIds(uniqueUserIds),
       this.getViewerFollowingIdSet(user),
       this.buildInteractionContext(moments, user),
     ]);
+    const authorById = new Map(authors.map((a) => [a._id.toString(), a]));
 
     return Promise.all(
-      moments.map((moment) => this.toResponse(moment, undefined, user, viewerFollowingIds, interactionContext)),
+      moments.map((moment) => this.toResponse(
+        moment,
+        authorById.get(moment.userId.toString()) ?? null,
+        user,
+        viewerFollowingIds,
+        interactionContext,
+      )),
     );
   }
 
   public async listHashtagMoments(hashtagValue: string, user: AuthUser, limit = 100): Promise<MomentResponse[]> {
     const hashtag = normalizeHashtag(hashtagValue);
     const moments = hashtag ? await this.momentRepository.findPublicByHashtag(hashtag, limit) : [];
-    const [viewerFollowingIds, interactionContext] = await Promise.all([
+    const uniqueUserIds = [...new Set(moments.map((m) => m.userId.toString()))];
+    const [authors, viewerFollowingIds, interactionContext] = await Promise.all([
+      this.userRepository.findByIds(uniqueUserIds),
       this.getViewerFollowingIdSet(user),
       this.buildInteractionContext(moments, user),
     ]);
+    const authorById = new Map(authors.map((a) => [a._id.toString(), a]));
 
     return Promise.all(
-      moments.map((moment) => this.toResponse(moment, undefined, user, viewerFollowingIds, interactionContext)),
+      moments.map((moment) => this.toResponse(
+        moment,
+        authorById.get(moment.userId.toString()) ?? null,
+        user,
+        viewerFollowingIds,
+        interactionContext,
+      )),
     );
   }
 
@@ -180,6 +208,10 @@ export class MomentService {
     const moment = await this.momentRepository.findById(momentId);
 
     if (!moment) {
+      throw new AppError("Moment not found", httpStatus.NOT_FOUND);
+    }
+
+    if (moment.isEventAnnouncement) {
       throw new AppError("Moment not found", httpStatus.NOT_FOUND);
     }
 
@@ -267,6 +299,10 @@ export class MomentService {
     const moment = await this.momentRepository.findById(momentId);
 
     if (!moment) {
+      throw new AppError("Moment not found", httpStatus.NOT_FOUND);
+    }
+
+    if (moment.isEventAnnouncement) {
       throw new AppError("Moment not found", httpStatus.NOT_FOUND);
     }
 

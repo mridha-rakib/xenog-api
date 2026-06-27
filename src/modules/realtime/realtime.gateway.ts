@@ -9,6 +9,7 @@ import { logger } from "../../core/logger/logger.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { AuthService } from "../auth/auth.service.js";
 import type { DirectMessageResponse } from "../chat/chat.interface.js";
+import { chatMessageAttachmentSchema, chatMessageBodySchema } from "../chat/chat.validation.js";
 import { ChatService } from "../chat/chat.service.js";
 import type { GroupMessageResponse } from "../chat/group.interface.js";
 import { GroupService } from "../chat/group.service.js";
@@ -23,19 +24,49 @@ type RealtimeClient = {
 };
 
 const objectId = z.string().trim().regex(/^[a-f\d]{24}$/i);
+const chatMessageFields = {
+  messageType: z.enum(["text", "image", "video", "audio", "location", "event"]).optional(),
+  text: z.string().trim().max(2000).optional(),
+  attachment: chatMessageAttachmentSchema.optional(),
+};
+const validateRealtimeChatBody = (
+  value: { messageType?: string; text?: string; attachment?: unknown },
+  ctx: z.RefinementCtx,
+) => {
+  const result = chatMessageBodySchema.safeParse({
+    type: value.messageType,
+    text: value.text,
+    attachment: value.attachment,
+  });
 
-const clientMessageSchema = z.discriminatedUnion("type", [
+  if (!result.success) {
+    for (const issue of result.error.issues) {
+      ctx.addIssue(issue);
+    }
+  }
+};
+
+const clientMessageSchema = z.union([
   z.object({
     type: z.literal("dm:message"),
     clientMessageId: z.string().trim().min(1).max(120).optional(),
     recipientId: objectId,
-    text: z.string().trim().min(1).max(2000),
-  }),
+    ...chatMessageFields,
+  }).strict().superRefine(validateRealtimeChatBody),
   z.object({
     type: z.literal("dm:typing"),
     recipientId: objectId,
     isTyping: z.boolean(),
   }),
+  z.object({
+    type: z.literal("dm:message:edit"),
+    messageId: objectId,
+    text: z.string().trim().min(1).max(2000),
+  }).strict(),
+  z.object({
+    type: z.literal("dm:message:delete"),
+    messageId: objectId,
+  }).strict(),
   z.object({
     type: z.literal("live:join"),
     roomId: z.string().trim().min(1).max(160),
@@ -54,8 +85,17 @@ const clientMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("group:message"),
     clientMessageId: z.string().trim().min(1).max(120).optional(),
     groupId: objectId,
+    ...chatMessageFields,
+  }).strict().superRefine(validateRealtimeChatBody),
+  z.object({
+    type: z.literal("group:message:edit"),
+    messageId: objectId,
     text: z.string().trim().min(1).max(2000),
-  }),
+  }).strict(),
+  z.object({
+    type: z.literal("group:message:delete"),
+    messageId: objectId,
+  }).strict(),
   z.object({
     type: z.literal("ping"),
   }),
@@ -180,8 +220,20 @@ export class RealtimeGateway {
       case "dm:typing":
         await this.handleDirectTyping(client, message);
         return;
+      case "dm:message:edit":
+        await this.handleDirectMessageEdit(client, message);
+        return;
+      case "dm:message:delete":
+        await this.handleDirectMessageDelete(client, message);
+        return;
       case "group:message":
         await this.handleGroupMessage(client, message);
+        return;
+      case "group:message:edit":
+        await this.handleGroupMessageEdit(client, message);
+        return;
+      case "group:message:delete":
+        await this.handleGroupMessageDelete(client, message);
         return;
       case "live:join":
         this.joinLiveRoom(client, message.roomId);
@@ -209,7 +261,9 @@ export class RealtimeGateway {
 
     try {
       savedMessage = await this.chatService.createDirectMessage(client.user, recipientId, {
+        type: message.messageType,
         text: message.text,
+        attachment: message.attachment,
       });
     } catch (error) {
       if (error instanceof AppError && error.statusCode === httpStatus.FORBIDDEN) {
@@ -232,11 +286,75 @@ export class RealtimeGateway {
         senderName: client.user.name,
         text: savedMessage.text,
         type: savedMessage.type,
+        attachment: savedMessage.attachment ?? null,
+        editedAt: savedMessage.editedAt?.toISOString() ?? null,
       },
     };
 
     this.broadcastToUser(client.user.id, payload);
     this.broadcastToUser(recipientId, payload);
+  }
+
+  private async handleDirectMessageEdit(
+    client: RealtimeClient,
+    message: Extract<ClientMessage, { type: "dm:message:edit" }>,
+  ): Promise<void> {
+    let updated: DirectMessageResponse;
+
+    try {
+      updated = await this.chatService.editDirectMessage(client.user, message.messageId, message.text);
+    } catch (error) {
+      if (error instanceof AppError) {
+        this.sendError(client.socket, "MESSAGE_EDIT_FAILED", error.message);
+        return;
+      }
+      throw error;
+    }
+
+    const payload = {
+      type: "dm:message:updated",
+      message: {
+        conversationId: updated.conversationId,
+        createdAt: updated.createdAt.toISOString(),
+        editedAt: updated.editedAt?.toISOString() ?? null,
+        id: updated.id,
+        recipientId: updated.recipientId,
+        senderId: updated.senderId,
+        senderName: client.user.name,
+        text: updated.text,
+        type: updated.type,
+        attachment: updated.attachment ?? null,
+      },
+    };
+
+    this.broadcastToUser(updated.senderId, payload);
+    this.broadcastToUser(updated.recipientId, payload);
+  }
+
+  private async handleDirectMessageDelete(
+    client: RealtimeClient,
+    message: Extract<ClientMessage, { type: "dm:message:delete" }>,
+  ): Promise<void> {
+    let deleted: DirectMessageResponse;
+
+    try {
+      deleted = await this.chatService.deleteDirectMessage(client.user, message.messageId);
+    } catch (error) {
+      if (error instanceof AppError) {
+        this.sendError(client.socket, "MESSAGE_DELETE_FAILED", error.message);
+        return;
+      }
+      throw error;
+    }
+
+    const payload = {
+      type: "dm:message:deleted",
+      messageId: deleted.id,
+      conversationId: deleted.conversationId,
+    };
+
+    this.broadcastToUser(deleted.senderId, payload);
+    this.broadcastToUser(deleted.recipientId, payload);
   }
 
   private async handleDirectTyping(
@@ -278,7 +396,9 @@ export class RealtimeGateway {
 
     try {
       savedMessage = await this.groupService.createGroupMessage(client.user, message.groupId, {
+        type: message.messageType,
         text: message.text,
+        attachment: message.attachment,
       });
     } catch (error) {
       if (error instanceof AppError) {
@@ -304,8 +424,76 @@ export class RealtimeGateway {
         senderId: savedMessage.senderId,
         senderName: client.user.name,
         text: savedMessage.text,
+        type: savedMessage.type,
+        attachment: savedMessage.attachment ?? null,
         createdAt: savedMessage.createdAt.toISOString(),
+        editedAt: savedMessage.editedAt?.toISOString() ?? null,
       },
+    };
+
+    for (const memberId of memberIds) {
+      this.broadcastToUser(memberId, payload);
+    }
+  }
+
+  private async handleGroupMessageEdit(
+    client: RealtimeClient,
+    message: Extract<ClientMessage, { type: "group:message:edit" }>,
+  ): Promise<void> {
+    let updated: GroupMessageResponse;
+
+    try {
+      updated = await this.groupService.editGroupMessage(client.user, message.messageId, message.text);
+    } catch (error) {
+      if (error instanceof AppError) {
+        this.sendError(client.socket, "MESSAGE_EDIT_FAILED", error.message);
+        return;
+      }
+      throw error;
+    }
+
+    const memberIds = await this.groupService.getGroupMemberIds(updated.groupId);
+    const payload = {
+      type: "group:message:updated",
+      message: {
+        groupId: updated.groupId,
+        id: updated.id,
+        senderId: updated.senderId,
+        senderName: client.user.name,
+        text: updated.text,
+        type: updated.type,
+        attachment: updated.attachment ?? null,
+        createdAt: updated.createdAt.toISOString(),
+        editedAt: updated.editedAt?.toISOString() ?? null,
+      },
+    };
+
+    for (const memberId of memberIds) {
+      this.broadcastToUser(memberId, payload);
+    }
+  }
+
+  private async handleGroupMessageDelete(
+    client: RealtimeClient,
+    message: Extract<ClientMessage, { type: "group:message:delete" }>,
+  ): Promise<void> {
+    let deleted: GroupMessageResponse;
+
+    try {
+      deleted = await this.groupService.deleteGroupMessage(client.user, message.messageId);
+    } catch (error) {
+      if (error instanceof AppError) {
+        this.sendError(client.socket, "MESSAGE_DELETE_FAILED", error.message);
+        return;
+      }
+      throw error;
+    }
+
+    const memberIds = await this.groupService.getGroupMemberIds(deleted.groupId);
+    const payload = {
+      type: "group:message:deleted",
+      messageId: deleted.id,
+      groupId: deleted.groupId,
     };
 
     for (const memberId of memberIds) {

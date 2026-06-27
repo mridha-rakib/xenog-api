@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { chatMessageBodySchema } from "./chat.validation.js";
 
 const objectId = z.string().trim().regex(/^[a-f\d]{24}$/i, "Invalid id");
 
@@ -19,11 +20,7 @@ export const groupValidation = {
   }),
   createGroupMessage: z.object({
     params: z.object({ groupId: objectId }),
-    body: z
-      .object({
-        text: z.string().trim().min(1, "Message text is required").max(2000),
-      })
-      .strict(),
+    body: chatMessageBodySchema,
   }),
   listGroupMessages: z.object({
     params: z.object({ groupId: objectId }),

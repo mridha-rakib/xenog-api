@@ -7,9 +7,13 @@ import { UserBlockRepository } from "../user/user-block.repository.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
 import { UserRepository } from "../user/user.repository.js";
 import { presenceService } from "../realtime/presence.service.js";
+import { EventRepository } from "../events/event.repository.js";
 import { ChatDeletionRepository } from "./chat-deletion.repository.js";
 import { ChatMessageRepository } from "./chat-message.repository.js";
 import type {
+  ChatFileAttachment,
+  ChatMessageAttachment,
+  ChatMessageType,
   CreateDirectMessageDto,
   DirectMessageConversationResponse,
   DirectMessageResponse,
@@ -26,6 +30,7 @@ export class ChatService {
     private readonly storageService = new StorageService(),
     private readonly chatMessageRepository = new ChatMessageRepository(),
     private readonly chatDeletionRepository = new ChatDeletionRepository(),
+    private readonly eventRepository = new EventRepository(),
   ) {}
 
   public async listDirectMessages(
@@ -107,7 +112,7 @@ export class ChatService {
 
     await this.chatMessageRepository.markConversationRead(conversationId, user.id);
 
-    return messages.reverse().map((m) => this.toDirectMessageResponse(m));
+    return Promise.all(messages.reverse().map((m) => this.toDirectMessageResponse(m)));
   }
 
   public async createDirectMessage(
@@ -118,6 +123,9 @@ export class ChatService {
     await this.assertCanDirectMessage(user.id, friendId);
 
     const conversationId = this.getConversationId(user.id, friendId);
+    const type = payload.type ?? payload.attachment?.type ?? "text";
+    const text = payload.text?.trim() ?? "";
+    const attachment = await this.normalizeAttachment(user.id, type, payload.attachment ?? null);
 
     // Restore conversation if the user had previously deleted it
     await this.chatDeletionRepository.restore(user.id, conversationId);
@@ -126,11 +134,63 @@ export class ChatService {
       conversationId,
       recipientId: friendId,
       senderId: user.id,
-      text: payload.text,
-      type: "text",
+      text,
+      type,
+      attachment,
     });
 
     return this.toDirectMessageResponse(message);
+  }
+
+  public async editDirectMessage(
+    user: AuthUser,
+    messageId: string,
+    text: string,
+  ): Promise<DirectMessageResponse> {
+    const message = await this.chatMessageRepository.findById(messageId);
+
+    if (!message) {
+      throw new AppError("Message not found.", httpStatus.NOT_FOUND);
+    }
+
+    if (message.senderId.toString() !== user.id) {
+      throw new AppError("You can only edit your own messages.", httpStatus.FORBIDDEN);
+    }
+
+    if (message.type !== "text") {
+      throw new AppError("Only text messages can be edited.", httpStatus.BAD_REQUEST);
+    }
+
+    const trimmedText = text.trim();
+    if (!trimmedText) {
+      throw new AppError("Message text is required.", httpStatus.BAD_REQUEST);
+    }
+
+    const updated = await this.chatMessageRepository.updateOwnedText(messageId, user.id, trimmedText);
+    if (!updated) {
+      throw new AppError("Message not found.", httpStatus.NOT_FOUND);
+    }
+
+    return this.toDirectMessageResponse(updated);
+  }
+
+  public async deleteDirectMessage(user: AuthUser, messageId: string): Promise<DirectMessageResponse> {
+    const message = await this.chatMessageRepository.findById(messageId);
+
+    if (!message) {
+      throw new AppError("Message not found.", httpStatus.NOT_FOUND);
+    }
+
+    if (message.senderId.toString() !== user.id) {
+      throw new AppError("You can only delete your own messages.", httpStatus.FORBIDDEN);
+    }
+
+    const deleted = await this.chatMessageRepository.deleteOwned(messageId, user.id);
+    if (!deleted) {
+      throw new AppError("Message not found.", httpStatus.NOT_FOUND);
+    }
+
+    return this.toDirectMessageResponse(deleted);
   }
 
   public async deleteConversation(user: AuthUser, friendId: string): Promise<void> {
@@ -162,7 +222,9 @@ export class ChatService {
       username: user.username,
       avatarKey: user.avatarKey ?? null,
       avatarUrl,
-      lastMessage: latestMessage?.text ?? null,
+      lastMessage: latestMessage
+        ? this.getMessageSummary(latestMessage.type, latestMessage.text, latestMessage.attachment ?? null)
+        : null,
       lastMessageAt: latestMessage?.createdAt ?? null,
       unreadCount,
       isOnline: presenceService.isOnline(friendId),
@@ -170,7 +232,7 @@ export class ChatService {
     };
   }
 
-  private toDirectMessageResponse(message: IChatMessage): DirectMessageResponse {
+  private async toDirectMessageResponse(message: IChatMessage): Promise<DirectMessageResponse> {
     return {
       id: message._id.toString(),
       conversationId: message.conversationId,
@@ -178,10 +240,187 @@ export class ChatService {
       recipientId: message.recipientId.toString(),
       type: message.type,
       text: message.text,
+      attachment: await this.resolveAttachmentUrls(message.attachment ?? null),
       readAt: message.readAt ?? null,
+      editedAt: message.editedAt ?? null,
       createdAt: message.createdAt,
       updatedAt: message.updatedAt,
     };
+  }
+
+  public async normalizeAttachment(
+    userId: string,
+    type: ChatMessageType,
+    attachment: ChatMessageAttachment | null,
+  ): Promise<ChatMessageAttachment | null> {
+    if (type === "text") {
+      return null;
+    }
+
+    if (!attachment || attachment.type !== type) {
+      throw new AppError("Attachment is required.", httpStatus.BAD_REQUEST);
+    }
+
+    if (attachment.type === "location") {
+      return {
+        type: "location",
+        latitude: attachment.latitude,
+        longitude: attachment.longitude,
+        label: attachment.label?.trim() || null,
+        address: attachment.address?.trim() || null,
+      };
+    }
+
+    if (attachment.type === "event") {
+      return this.normalizeEventAttachment(userId, attachment.eventId);
+    }
+
+    return this.normalizeFileAttachment(userId, attachment);
+  }
+
+  public async resolveAttachmentUrls(
+    attachment: ChatMessageAttachment | null,
+  ): Promise<ChatMessageAttachment | null> {
+    if (!attachment) {
+      return null;
+    }
+
+    if (attachment.type === "image" || attachment.type === "video" || attachment.type === "audio") {
+      const download = await this.storageService.createDownloadUrl(attachment.key);
+      return { ...attachment, url: download.url };
+    }
+
+    if (attachment.type === "event" && attachment.coverImageKey) {
+      const download = await this.storageService.createDownloadUrl(attachment.coverImageKey);
+      return { ...attachment, coverImageUrl: download.url };
+    }
+
+    return attachment;
+  }
+
+  public getMessageSummary(
+    type: ChatMessageType,
+    text: string,
+    attachment: ChatMessageAttachment | null,
+  ): string {
+    if (type === "text") {
+      return text;
+    }
+
+    if (type === "event" && attachment?.type === "event") {
+      return `Event: ${attachment.title ?? "Shared event"}`;
+    }
+
+    const labels: Record<Exclude<ChatMessageType, "text">, string> = {
+      image: "Photo",
+      video: "Video",
+      audio: "Audio",
+      location: "Location",
+      event: "Event",
+    };
+
+    return text || labels[type];
+  }
+
+  private async normalizeFileAttachment(
+    userId: string,
+    attachment: ChatFileAttachment,
+  ): Promise<ChatFileAttachment> {
+    const key = attachment.key.trim();
+    const mimeType = attachment.mimeType.trim().toLowerCase();
+    const maxSize = this.getMaxFileSize(attachment.type);
+
+    if (!key.startsWith(`chat/${userId}/`)) {
+      throw new AppError("Attachment key does not belong to this user.", httpStatus.FORBIDDEN);
+    }
+
+    if (!this.isAllowedMimeType(attachment.type, mimeType)) {
+      throw new AppError("Unsupported attachment file type.", httpStatus.BAD_REQUEST);
+    }
+
+    if (attachment.size > maxSize) {
+      throw new AppError("Attachment file is too large.", 413);
+    }
+
+    const metadata = await this.storageService.getObjectMetadata(key).catch(() => null);
+
+    if (!metadata) {
+      throw new AppError("Attachment file was not found in storage.", httpStatus.BAD_REQUEST);
+    }
+
+    const storedContentType = metadata.contentType?.toLowerCase().split(";")[0] ?? null;
+    const storedSize = metadata.contentLength ?? attachment.size;
+
+    if (storedSize > maxSize) {
+      throw new AppError("Attachment file is too large.", 413);
+    }
+
+    if (storedContentType && storedContentType !== mimeType) {
+      throw new AppError("Attachment MIME type does not match the uploaded file.", httpStatus.BAD_REQUEST);
+    }
+
+    return {
+      type: attachment.type,
+      key,
+      mimeType,
+      size: storedSize,
+      fileName: attachment.fileName?.trim() || null,
+      width: attachment.width ?? null,
+      height: attachment.height ?? null,
+      durationSeconds: attachment.durationSeconds ?? null,
+    };
+  }
+
+  private async normalizeEventAttachment(userId: string, eventId: string): Promise<ChatMessageAttachment> {
+    const event = await this.eventRepository.findById(eventId);
+
+    if (!event || event.status === "draft") {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    const isOwner = event.userId.toString() === userId;
+    const isMember = event.memberUserIds.some((id) => id.toString() === userId);
+
+    if (event.privacy === "private" && !isOwner && !isMember) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    return {
+      type: "event",
+      eventId: event._id.toString(),
+      title: event.name ?? "Event",
+      scheduledAt: event.scheduledAt ?? null,
+      endAt: event.endAt ?? null,
+      coverImageKey: event.bannerImageKey ?? null,
+      locationName: event.location?.venue ?? event.location?.searchLabel ?? null,
+      address: event.location?.address ?? null,
+    };
+  }
+
+  private getMaxFileSize(type: ChatFileAttachment["type"]): number {
+    if (type === "image") return 15 * 1024 * 1024;
+    if (type === "audio") return 50 * 1024 * 1024;
+    return 250 * 1024 * 1024;
+  }
+
+  private isAllowedMimeType(type: ChatFileAttachment["type"], mimeType: string): boolean {
+    const allowed: Record<ChatFileAttachment["type"], Set<string>> = {
+      image: new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]),
+      video: new Set(["video/mp4", "video/quicktime", "video/webm", "video/3gpp", "video/x-m4v"]),
+      audio: new Set([
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/x-m4a",
+        "audio/aac",
+        "audio/wav",
+        "audio/x-wav",
+        "audio/webm",
+        "audio/3gpp",
+        "audio/ogg",
+      ]),
+    };
+
+    return allowed[type].has(mimeType);
   }
 
   public async assertCanDirectMessage(userId: string, friendId: string): Promise<void> {

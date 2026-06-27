@@ -21,6 +21,7 @@ router.post(
 );
 router.get("/me", authenticate, catchAsync(controller.me));
 router.patch("/me", authenticate, validate(authValidation.updateProfile), catchAsync(controller.updateMe));
+router.delete("/me", authenticate, catchAsync(controller.deleteMe));
 router.post("/logout", authenticate, catchAsync(controller.logout));
 
 export const authRoutes = router;

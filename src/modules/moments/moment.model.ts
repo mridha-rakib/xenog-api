@@ -131,5 +131,7 @@ momentSchema.index(
   { eventId: 1, isEventAnnouncement: 1 },
   { unique: true, partialFilterExpression: { isEventAnnouncement: true } },
 );
+// Supports isEventAnnouncement filter on profile and post-count queries
+momentSchema.index({ userId: 1, isEventAnnouncement: 1, createdAt: -1 });
 
 export const MomentModel = model<IMoment>("Moment", momentSchema);

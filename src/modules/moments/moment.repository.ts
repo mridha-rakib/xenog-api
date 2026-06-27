@@ -17,7 +17,7 @@ export class MomentRepository {
       taggedPeople: payload.taggedPeople ?? [],
       eventTitle: payload.eventTitle ?? null,
       eventId: payload.eventId ?? null,
-      isEventAnnouncement: payload.isEventAnnouncement ?? false,
+      isEventAnnouncement: false,
       eventCode: payload.eventCode ?? null,
       mediaItems: payload.mediaItems ?? [],
     });
@@ -61,13 +61,22 @@ export class MomentRepository {
       .limit(limit);
   }
 
+  public async findEventAnnouncement(eventId: string): Promise<IMoment | null> {
+    return MomentModel.findOne({ eventId, isEventAnnouncement: true });
+  }
+
+  public async deleteEventAnnouncement(eventId: string): Promise<void> {
+    await MomentModel.deleteOne({ eventId, isEventAnnouncement: true });
+  }
+
   public async findByUserId(userId: string): Promise<IMoment[]> {
-    return MomentModel.find({ userId }).sort({ createdAt: -1 });
+    return MomentModel.find({ userId, isEventAnnouncement: { $ne: true } }).sort({ createdAt: -1 });
   }
 
   public async findByUserIdForProfile(userId: string, includePrivate: boolean): Promise<IMoment[]> {
     return MomentModel.find({
       userId,
+      isEventAnnouncement: { $ne: true },
       ...(includePrivate ? {} : { audience: "public" }),
     }).sort({ createdAt: -1 });
   }
@@ -91,6 +100,7 @@ export class MomentRepository {
   public async countByUserId(userId: string, includePrivate: boolean): Promise<number> {
     return MomentModel.countDocuments({
       userId,
+      isEventAnnouncement: { $ne: true },
       ...(includePrivate ? {} : { audience: "public" }),
     });
   }
@@ -110,7 +120,7 @@ export class MomentRepository {
   }
 
   public async findPublicByHashtag(hashtag: string, limit = 100): Promise<IMoment[]> {
-    return MomentModel.find({ audience: "public", hashtags: hashtag })
+    return MomentModel.find({ audience: "public", hashtags: hashtag, isEventAnnouncement: { $ne: true } })
       .sort({ createdAt: -1 })
       .limit(limit);
   }

@@ -7,8 +7,11 @@ import {
   type PaginatedResult,
 } from "../../core/utils/pagination.js";
 import type { AuthUser } from "../auth/auth.interface.js";
+import { EventRepository } from "../events/event.repository.js";
 import { StorageService } from "../storage/storage.service.js";
 import type {
+  AdminManagedUserResponse,
+  AdminUserStatsResponse,
   BlockStatusResponse,
   CreateUserDto,
   FollowStatusResponse,
@@ -18,6 +21,7 @@ import type {
   SuggestedUserResponse,
   UpdateUserDto,
   UserProfileStatsResponse,
+  UserResponse,
   UserReviewResponse,
 } from "./user.interface.js";
 import { UserFollowRepository } from "./user-follow.repository.js";
@@ -39,6 +43,14 @@ interface ListProfileUsersQuery {
   limit?: number;
 }
 
+interface AdminListUsersQuery {
+  page?: number;
+  limit?: number;
+  search?: string;
+  isActive?: boolean;
+  accountType?: "personal" | "business";
+}
+
 export class UserService {
   public constructor(
     private readonly userRepository = new UserRepository(),
@@ -46,6 +58,7 @@ export class UserService {
     private readonly userBlockRepository = new UserBlockRepository(),
     private readonly storageService = new StorageService(),
     private readonly notificationRepository = new NotificationRepository(),
+    private readonly eventRepository = new EventRepository(),
   ) {}
 
   public async create(payload: CreateUserDto): Promise<IUser> {
@@ -105,14 +118,79 @@ export class UserService {
     };
   }
 
-  public async getById(id: string): Promise<IUser> {
+  public async listForAdmin(query: AdminListUsersQuery): Promise<{
+    data: AdminManagedUserResponse[];
+    meta: ReturnType<typeof createPaginationMeta>;
+    stats: AdminUserStatsResponse;
+  }> {
+    const { page, limit, skip } = getPaginationOptions(query);
+    const activeUserFilter: Record<string, unknown> = {
+      role: "user",
+      deletedAt: null,
+      email: { $not: /@deleted\.local$/i },
+    };
+    const filter: Record<string, unknown> = { ...activeUserFilter };
+
+    if (query.search) {
+      const escapedSearch = query.search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      filter.$or = [
+        { name: { $regex: escapedSearch, $options: "i" } },
+        { email: { $regex: escapedSearch, $options: "i" } },
+      ];
+    }
+
+    if (typeof query.isActive === "boolean") filter.isActive = query.isActive;
+    if (query.accountType) filter.accountType = query.accountType;
+
+    const [users, total, totalUsers, active, suspended, business] = await Promise.all([
+      this.userRepository.findMany(filter, skip, limit),
+      this.userRepository.count(filter),
+      this.userRepository.count(activeUserFilter),
+      this.userRepository.count({ ...activeUserFilter, isActive: true }),
+      this.userRepository.count({ ...activeUserFilter, isActive: false }),
+      this.userRepository.count({ ...activeUserFilter, accountType: "business" }),
+    ]);
+    const eventCounts = await this.eventRepository.countStatusesByUserIds(users.map((user) => user._id));
+    const data = await Promise.all(users.map((user) => this.toAdminManagedUser(user, eventCounts.get(user._id.toString()))));
+
+    return {
+      data,
+      meta: createPaginationMeta(page, limit, total),
+      stats: { total: totalUsers, active, suspended, business },
+    };
+  }
+
+  public async getForAdmin(id: string): Promise<AdminManagedUserResponse> {
+    const user = await this.assertAdminManagedUser(id);
+    const counts = await this.eventRepository.countStatusesByUserIds([user._id]);
+    return this.toAdminManagedUser(user, counts.get(id));
+  }
+
+  public async updateForAdmin(
+    id: string,
+    payload: Pick<UpdateUserDto, "isActive" | "emailVerified">,
+  ): Promise<AdminManagedUserResponse> {
+    await this.assertAdminManagedUser(id);
+    const user = await this.userRepository.updateById(id, payload);
+    if (!user) throw new AppError("User not found", httpStatus.NOT_FOUND);
+    const counts = await this.eventRepository.countStatusesByUserIds([user._id]);
+    return this.toAdminManagedUser(user, counts.get(id));
+  }
+
+  public async deleteForAdmin(id: string): Promise<void> {
+    await this.assertAdminManagedUser(id);
+    const user = await this.userRepository.deactivateAccountById(id);
+    if (!user) throw new AppError("User not found", httpStatus.NOT_FOUND);
+  }
+
+  public async getById(id: string, viewer?: AuthUser): Promise<UserResponse> {
     const user = await this.userRepository.findById(id);
 
     if (!user) {
       throw new AppError("User not found", httpStatus.NOT_FOUND);
     }
 
-    return user;
+    return this.toUserResponse(user, viewer);
   }
 
   public async listSuggestedUsers(user: AuthUser, limit = 10): Promise<SuggestedUserResponse[]> {
@@ -309,13 +387,58 @@ export class UserService {
   }
 
   public async delete(id: string): Promise<IUser> {
-    const user = await this.userRepository.deleteById(id);
+    const user = await this.userRepository.deactivateAccountById(id);
 
     if (!user) {
       throw new AppError("User not found", httpStatus.NOT_FOUND);
     }
 
     return user;
+  }
+
+  private async assertAdminManagedUser(id: string): Promise<IUser> {
+    const user = await this.userRepository.findById(id);
+    const isAnonymized = Boolean(user?.deletedAt) || user?.email.endsWith("@deleted.local");
+
+    if (!user || user.role !== "user" || isAnonymized) {
+      throw new AppError("User not found", httpStatus.NOT_FOUND);
+    }
+
+    return user;
+  }
+
+  private async toAdminManagedUser(
+    user: IUser,
+    eventCounts?: { total: number; completed: number; cancelled: number },
+  ): Promise<AdminManagedUserResponse> {
+    const avatarUrl = user.avatarKey
+      ? await this.storageService.createDownloadUrl(user.avatarKey).then((download) => download.url).catch(() => null)
+      : null;
+
+    return {
+      id: user._id.toString(),
+      name: user.name || "Deleted User",
+      username: user.username,
+      email: user.email || "Unavailable",
+      contact: user.contact ?? null,
+      accountType: user.accountType ?? "personal",
+      avatarKey: user.avatarKey ?? null,
+      avatarUrl,
+      gender: user.gender ?? null,
+      age: user.age ?? null,
+      bio: user.bio ?? null,
+      address: user.address ?? null,
+      businessDocumentKey: user.businessDocumentKey ?? null,
+      role: user.role,
+      isActive: Boolean(user.isActive),
+      emailVerified: Boolean(user.emailVerified),
+      isDeleted: Boolean(user.deletedAt) || user.email.endsWith("@deleted.local"),
+      totalEvents: eventCounts?.total ?? 0,
+      completedEvents: eventCounts?.completed ?? 0,
+      cancelledEvents: eventCounts?.cancelled ?? 0,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+    };
   }
 
   private async assertFollowTarget(targetUserId: string): Promise<IUser> {
@@ -367,6 +490,30 @@ export class UserService {
       avatarKey: user.avatarKey ?? null,
       avatarUrl,
       isFollowing: viewerFollowingIds.has(userId),
+    };
+  }
+
+  private async toUserResponse(user: IUser, viewer?: AuthUser): Promise<UserResponse> {
+    const userId = user._id.toString();
+    const [avatarUrl, isFollowing] = await Promise.all([
+      user.avatarKey
+        ? this.storageService.createDownloadUrl(user.avatarKey).then((download) => download.url).catch(() => null)
+        : Promise.resolve(null),
+      viewer && viewer.id !== userId
+        ? this.userFollowRepository.isFollowing(viewer.id, userId)
+        : Promise.resolve(false),
+    ]);
+
+    return {
+      id: userId,
+      name: user.name,
+      username: user.username,
+      email: user.email,
+      accountType: user.accountType ?? "personal",
+      avatarKey: user.avatarKey ?? null,
+      avatarUrl,
+      bio: user.bio ?? null,
+      ...(viewer && viewer.id !== userId ? { isFollowing } : {}),
     };
   }
 }

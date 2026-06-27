@@ -96,7 +96,6 @@ export interface CreateMomentDto {
   taggedPeople?: string[];
   eventTitle?: string | null;
   eventId?: string | null;
-  isEventAnnouncement?: boolean;
   eventCode?: string | null;
   mediaItems?: MomentMediaItem[];
 }

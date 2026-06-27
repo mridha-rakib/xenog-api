@@ -3,7 +3,7 @@ import type { Types } from "mongoose";
 export const checkoutOrderKinds = ["ticket", "product", "custom"] as const;
 export type CheckoutOrderKind = (typeof checkoutOrderKinds)[number];
 
-export const checkoutPaymentMethods = ["card", "apple_pay", "mooment_credits"] as const;
+export const checkoutPaymentMethods = ["card", "apple_pay"] as const;
 export type CheckoutPaymentMethod = (typeof checkoutPaymentMethods)[number];
 
 export const checkoutPaymentStatuses = [
@@ -50,6 +50,7 @@ export interface ICheckoutOrder {
   lineItems: CheckoutOrderLineItem[];
   stripePaymentIntentId?: string | null;
   stripeClientSecret?: string | null;
+  reservedUntil?: Date | null;
   anonymous: boolean;
   termsAcceptedAt?: Date | null;
   paidAt?: Date | null;

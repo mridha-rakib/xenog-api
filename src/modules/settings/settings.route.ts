@@ -14,23 +14,12 @@ router.get(
   catchAsync(controller.getLegalDocument),
 );
 
-router.get(
-  "/mooment-credit",
-  catchAsync(controller.getMoomentCreditSettings),
-);
-
 router.use(authenticate, authorizeRoles("admin"));
 
 router.put(
   "/legal-documents/:type",
   validate(settingsValidation.updateLegalDocument),
   catchAsync(controller.updateLegalDocument),
-);
-
-router.put(
-  "/mooment-credit",
-  validate(settingsValidation.updateMoomentCreditSettings),
-  catchAsync(controller.updateMoomentCreditSettings),
 );
 
 router.get(

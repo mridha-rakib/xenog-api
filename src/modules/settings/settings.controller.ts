@@ -3,13 +3,11 @@ import { ApiResponse } from "../../core/http/api-response.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { LegalDocumentService } from "./legal-document.service.js";
 import type { LegalDocumentType } from "./legal-document.interface.js";
-import { MoomentCreditService } from "./mooment-credit.service.js";
 import { PricingSettingsService } from "./pricing-settings.service.js";
 
 export class SettingsController {
   public constructor(
     private readonly legalDocumentService = new LegalDocumentService(),
-    private readonly moomentCreditService = new MoomentCreditService(),
     private readonly pricingSettingsService = new PricingSettingsService(),
   ) {}
 
@@ -33,28 +31,6 @@ export class SettingsController {
       message: "Legal document updated",
       data: {
         document,
-      },
-    });
-  };
-
-  public getMoomentCreditSettings = async (req: Request, res: Response): Promise<void> => {
-    const settings = await this.moomentCreditService.getSettings(req.authUser);
-
-    ApiResponse.success(res, {
-      message: "Mooment credit settings retrieved",
-      data: {
-        settings,
-      },
-    });
-  };
-
-  public updateMoomentCreditSettings = async (req: Request, res: Response): Promise<void> => {
-    const settings = await this.moomentCreditService.updateSettings(req.body, req.authUser as AuthUser);
-
-    ApiResponse.success(res, {
-      message: "Mooment credit settings updated",
-      data: {
-        settings,
       },
     });
   };

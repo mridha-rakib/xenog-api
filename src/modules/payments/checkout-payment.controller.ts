@@ -43,6 +43,18 @@ export class CheckoutPaymentController {
     });
   };
 
+  public cancelOrder = async (req: Request, res: Response): Promise<void> => {
+    const { orderId } = req.params as { orderId: string };
+    const order = await this.service.cancelOrder(req.authUser as AuthUser, orderId);
+
+    ApiResponse.success(res, {
+      message: "Order cancelled successfully",
+      data: {
+        order,
+      },
+    });
+  };
+
   public getMyTicketPurchaseCounts = async (req: Request, res: Response): Promise<void> => {
     const { eventId } = req.params as { eventId: string };
     const counts = await this.service.getMyTicketPurchaseCounts(req.authUser as AuthUser, eventId);

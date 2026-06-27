@@ -50,6 +50,31 @@ export const userValidation = {
         .optional(),
     }),
   }),
+  adminList: z.object({
+    query: z.object({
+      page: z.coerce.number().int().positive().optional(),
+      limit: z.coerce.number().int().positive().max(100).optional(),
+      search: z.string().trim().max(120).optional(),
+      isActive: z
+        .enum(["true", "false"])
+        .transform((value) => value === "true")
+        .optional(),
+      accountType: z.enum(["personal", "business"]).optional(),
+    }),
+  }),
+  adminUser: z.object({
+    params: z.object({ id: objectId }),
+  }),
+  adminUpdate: z.object({
+    params: z.object({ id: objectId }),
+    body: z
+      .object({
+        isActive: z.boolean().optional(),
+        emailVerified: z.boolean().optional(),
+      })
+      .strict()
+      .refine((value) => Object.keys(value).length > 0, "At least one field is required"),
+  }),
   suggestions: z.object({
     query: z.object({
       limit: z.coerce.number().int().min(1).max(50).optional(),
@@ -58,7 +83,7 @@ export const userValidation = {
   friends: z.object({
     query: z.object({
       search: z.string().trim().max(120).optional(),
-      limit: z.coerce.number().int().min(1).max(100).optional(),
+      limit: z.coerce.number().int().min(1).max(200).optional(),
     }),
   }),
   profileList: z.object({
@@ -67,7 +92,7 @@ export const userValidation = {
     }),
     query: z.object({
       search: z.string().trim().max(120).optional(),
-      limit: z.coerce.number().int().min(1).max(100).optional(),
+      limit: z.coerce.number().int().min(1).max(200).optional(),
     }),
   }),
   profileResource: z.object({

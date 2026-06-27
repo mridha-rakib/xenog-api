@@ -287,6 +287,14 @@ export class AuthService {
     return toAuthUser(user);
   }
 
+  public async deleteCurrentUser(userId: string): Promise<void> {
+    const user = await this.userRepository.deactivateAccountById(userId);
+
+    if (!user) {
+      throw new AppError("User not found", httpStatus.NOT_FOUND);
+    }
+  }
+
   public verifyAccessToken(token: string): AccessTokenPayload {
     try {
       const decoded = jwt.verify(token, env.JWT_ACCESS_SECRET) as AccessTokenPayload;

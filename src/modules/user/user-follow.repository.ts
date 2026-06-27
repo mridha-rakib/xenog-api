@@ -20,6 +20,17 @@ export class UserFollowRepository {
     return Boolean(relation);
   }
 
+  public async hasAnyFollowRelation(userId: string, targetUserId: string): Promise<boolean> {
+    const relation = await UserFollowModel.exists({
+      $or: [
+        { followerId: userId, followingId: targetUserId },
+        { followerId: targetUserId, followingId: userId },
+      ],
+    });
+
+    return Boolean(relation);
+  }
+
   public async findFollowingIds(followerId: string): Promise<string[]> {
     const followingIds = await UserFollowModel.distinct("followingId", { followerId });
 

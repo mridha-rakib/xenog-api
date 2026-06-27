@@ -27,13 +27,44 @@ export class UserController {
     });
   };
 
+  public listForAdmin = async (req: Request, res: Response): Promise<void> => {
+    const result = await this.userService.listForAdmin(req.query);
+
+    ApiResponse.success(res, {
+      message: "Managed users retrieved",
+      data: result.data,
+      meta: { ...result.meta, stats: result.stats },
+    });
+  };
+
+  public getForAdmin = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const user = await this.userService.getForAdmin(id);
+    ApiResponse.success(res, { message: "Managed user retrieved", data: user });
+  };
+
+  public updateForAdmin = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const user = await this.userService.updateForAdmin(id, req.body);
+    ApiResponse.success(res, { message: "Managed user updated", data: user });
+  };
+
+  public deleteForAdmin = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    await this.userService.deleteForAdmin(id);
+    ApiResponse.success(res, { message: "User account anonymized" });
+  };
+
   public getById = async (req: Request, res: Response): Promise<void> => {
     const { id } = req.params as { id: string };
-    const user = await this.userService.getById(id);
+    const user = await this.userService.getById(id, req.authUser as AuthUser | undefined);
 
     ApiResponse.success(res, {
       message: "User retrieved",
-      data: user,
+      data: {
+        ...user,
+        user,
+      },
     });
   };
 

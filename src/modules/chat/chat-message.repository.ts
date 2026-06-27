@@ -1,6 +1,6 @@
 import type { FilterQuery } from "mongoose";
 import { Types } from "mongoose";
-import type { ChatMessageType, IChatMessage } from "./chat.interface.js";
+import type { ChatMessageAttachment, ChatMessageType, IChatMessage } from "./chat.interface.js";
 import { ChatMessageModel } from "./chat-message.model.js";
 
 interface CreateChatMessageRecord {
@@ -8,7 +8,8 @@ interface CreateChatMessageRecord {
   senderId: string;
   recipientId: string;
   type?: ChatMessageType;
-  text: string;
+  text?: string;
+  attachment?: ChatMessageAttachment | null;
 }
 
 export class ChatMessageRepository {
@@ -18,7 +19,8 @@ export class ChatMessageRepository {
       senderId: payload.senderId,
       recipientId: payload.recipientId,
       type: payload.type ?? "text",
-      text: payload.text,
+      text: payload.text ?? "",
+      attachment: payload.attachment ?? null,
     });
   }
 
@@ -36,6 +38,22 @@ export class ChatMessageRepository {
     }
 
     return ChatMessageModel.find(filter).sort({ createdAt: -1, _id: -1 }).limit(limit);
+  }
+
+  public async findById(id: string): Promise<IChatMessage | null> {
+    return ChatMessageModel.findById(id);
+  }
+
+  public async updateOwnedText(id: string, senderId: string, text: string): Promise<IChatMessage | null> {
+    return ChatMessageModel.findOneAndUpdate(
+      { _id: id, senderId },
+      { $set: { text, editedAt: new Date() } },
+      { new: true },
+    );
+  }
+
+  public async deleteOwned(id: string, senderId: string): Promise<IChatMessage | null> {
+    return ChatMessageModel.findOneAndDelete({ _id: id, senderId });
   }
 
   public async findLatestByConversationIds(conversationIds: string[]): Promise<Map<string, IChatMessage>> {

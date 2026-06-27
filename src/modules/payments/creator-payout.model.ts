@@ -21,6 +21,12 @@ const creatorPayoutSchema = new Schema<ICreatorPayout>(
       required: true,
       min: 0,
     },
+    currency: {
+      type: String,
+      required: true,
+      lowercase: true,
+      default: "usd",
+    },
     payoutType: {
       type: String,
       enum: creatorPayoutTypes,
@@ -38,8 +44,8 @@ const creatorPayoutSchema = new Schema<ICreatorPayout>(
       required: true,
       index: true,
     },
-    moomentCreditsAwarded: {
-      type: Number,
+    processingStartedAt: {
+      type: Date,
       default: null,
     },
     stripeTransferId: {

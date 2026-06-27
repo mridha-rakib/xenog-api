@@ -183,6 +183,10 @@ const checkoutOrderSchema = new Schema<ICheckoutOrder>(
       maxlength: 500,
       default: null,
     },
+    reservedUntil: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -192,5 +196,6 @@ const checkoutOrderSchema = new Schema<ICheckoutOrder>(
 
 checkoutOrderSchema.index({ userId: 1, createdAt: -1 });
 checkoutOrderSchema.index({ stripePaymentIntentId: 1 }, { unique: true, sparse: true });
+checkoutOrderSchema.index({ paymentStatus: 1, reservedUntil: 1 });
 
 export const CheckoutOrderModel = model<ICheckoutOrder>("CheckoutOrder", checkoutOrderSchema);

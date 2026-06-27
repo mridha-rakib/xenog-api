@@ -99,6 +99,20 @@ export class AuthController {
     });
   };
 
+  public deleteMe = async (req: Request, res: Response): Promise<void> => {
+    const userId = req.authUser?.id;
+
+    if (!userId) {
+      throw new Error("Authenticated user missing from request");
+    }
+
+    await this.authService.deleteCurrentUser(userId);
+
+    ApiResponse.success(res, {
+      message: "Account deleted successfully",
+    });
+  };
+
   public logout = async (_req: Request, res: Response): Promise<void> => {
     ApiResponse.success(res, {
       message: "Signed out successfully",

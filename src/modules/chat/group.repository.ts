@@ -1,4 +1,5 @@
 import { Types } from "mongoose";
+import type { ChatMessageAttachment, ChatMessageType } from "./chat.interface.js";
 import type { IGroup, IGroupMessage } from "./group.interface.js";
 import { GroupMessageModel } from "./group-message.model.js";
 import { GroupModel } from "./group.model.js";
@@ -13,7 +14,9 @@ interface CreateGroupRecord {
 interface CreateGroupMessageRecord {
   groupId: string;
   senderId: string;
-  text: string;
+  type?: ChatMessageType;
+  text?: string;
+  attachment?: ChatMessageAttachment | null;
 }
 
 export class GroupRepository {
@@ -51,7 +54,7 @@ export class GroupRepository {
     return Boolean(exists);
   }
 
-  public async updateLastMessage(groupId: string, text: string, at: Date): Promise<void> {
+  public async updateLastMessage(groupId: string, text: string | null, at: Date | null): Promise<void> {
     await GroupModel.findByIdAndUpdate(groupId, {
       lastMessage: text,
       lastMessageAt: at,
@@ -62,7 +65,9 @@ export class GroupRepository {
     return GroupMessageModel.create({
       groupId: new Types.ObjectId(payload.groupId),
       senderId: new Types.ObjectId(payload.senderId),
-      text: payload.text,
+      type: payload.type ?? "text",
+      text: payload.text ?? "",
+      attachment: payload.attachment ?? null,
     });
   }
 
@@ -76,6 +81,34 @@ export class GroupRepository {
     return GroupMessageModel.find(filter)
       .sort({ createdAt: -1, _id: -1 })
       .limit(limit);
+  }
+
+  public async findMessageById(id: string): Promise<IGroupMessage | null> {
+    return GroupMessageModel.findById(id);
+  }
+
+  public async findLatestMessage(groupId: string): Promise<IGroupMessage | null> {
+    return GroupMessageModel.findOne({ groupId: new Types.ObjectId(groupId) })
+      .sort({ createdAt: -1, _id: -1 });
+  }
+
+  public async updateOwnedMessageText(
+    id: string,
+    senderId: string,
+    text: string,
+  ): Promise<IGroupMessage | null> {
+    return GroupMessageModel.findOneAndUpdate(
+      { _id: id, senderId: new Types.ObjectId(senderId) },
+      { $set: { text, editedAt: new Date() } },
+      { new: true },
+    );
+  }
+
+  public async deleteOwnedMessage(id: string, senderId: string): Promise<IGroupMessage | null> {
+    return GroupMessageModel.findOneAndDelete({
+      _id: id,
+      senderId: new Types.ObjectId(senderId),
+    });
   }
 
   public async getMemberIds(groupId: string): Promise<string[]> {

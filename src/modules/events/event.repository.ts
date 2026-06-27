@@ -1,9 +1,10 @@
-import type { FilterQuery, SortOrder, UpdateQuery } from "mongoose";
+import type { FilterQuery, SortOrder, Types, UpdateQuery } from "mongoose";
 import { EventModel } from "./event.model.js";
 import type {
   EventCategory,
   EventMapQuery,
   EventReward,
+  EventTicket,
   IEvent,
   NowModeQuery,
   PublishEventDto,
@@ -49,6 +50,33 @@ const isFiniteCoordinate = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
 
 export class EventRepository {
+  public async countStatusesByUserIds(
+    userIds: Types.ObjectId[],
+  ): Promise<Map<string, { total: number; completed: number; cancelled: number }>> {
+    if (userIds.length === 0) {
+      return new Map();
+    }
+
+    const rows = await EventModel.aggregate<{
+      _id: Types.ObjectId;
+      total: number;
+      completed: number;
+      cancelled: number;
+    }>([
+      { $match: { userId: { $in: userIds } } },
+      {
+        $group: {
+          _id: "$userId",
+          total: { $sum: 1 },
+          completed: { $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] } },
+          cancelled: { $sum: { $cond: [{ $eq: ["$status", "cancelled"] }, 1, 0] } },
+        },
+      },
+    ]);
+
+    return new Map(rows.map((row) => [row._id.toString(), row]));
+  }
+
   public async create(payload: CreateEventRecord): Promise<IEvent> {
     return EventModel.create({
       userId: payload.userId,
@@ -517,6 +545,118 @@ export class EventRepository {
       { _id: eventId, userId: hostUserId, "joinRequests.userId": requestUserId },
       { $set: { "joinRequests.$.status": status } },
       { new: true },
+    );
+  }
+
+  /**
+   * Atomically decrements availableCount by quantity only if availableCount >= quantity.
+   * Returns the updated event on success, null if insufficient capacity.
+   */
+  public async reserveTicketCapacity(eventId: string, ticketId: string, quantity: number): Promise<IEvent | null> {
+    return EventModel.findOneAndUpdate(
+      {
+        _id: eventId,
+        tickets: { $elemMatch: { id: ticketId, availableCount: { $gte: quantity } } },
+      },
+      { $inc: { "tickets.$.availableCount": -quantity } },
+      { new: true },
+    );
+  }
+
+  /**
+   * Atomically increments availableCount by quantity.
+   * Only operates if availableCount is not null (pre-migration tickets are skipped safely).
+   */
+  public async releaseTicketCapacity(eventId: string, ticketId: string, quantity: number): Promise<void> {
+    await EventModel.updateOne(
+      {
+        _id: eventId,
+        tickets: { $elemMatch: { id: ticketId, availableCount: { $ne: null } } },
+      },
+      { $inc: { "tickets.$.availableCount": quantity } },
+    );
+  }
+
+  /**
+   * Atomically updates capacity and adjusts availableCount by delta.
+   * For capacity decrease (delta < 0), requires availableCount >= |delta| to avoid going negative.
+   * Returns the updated event on success, null if the decrease would go below zero.
+   */
+  public async adjustTicketCapacityAndCount(
+    eventId: string,
+    ticketId: string,
+    newCapacity: number,
+    delta: number,
+  ): Promise<IEvent | null> {
+    if (delta < 0) {
+      return EventModel.findOneAndUpdate(
+        {
+          _id: eventId,
+          tickets: { $elemMatch: { id: ticketId, availableCount: { $gte: -delta } } },
+        },
+        { $set: { "tickets.$.capacity": newCapacity }, $inc: { "tickets.$.availableCount": delta } },
+        { new: true, runValidators: true },
+      );
+    }
+
+    return EventModel.findOneAndUpdate(
+      { _id: eventId, "tickets.id": ticketId },
+      { $set: { "tickets.$.capacity": newCapacity }, $inc: { "tickets.$.availableCount": delta } },
+      { new: true, runValidators: true },
+    );
+  }
+
+  /**
+   * Atomically pushes a new ticket onto the event's tickets array.
+   * Safer than a full array replace because it never overwrites existing tickets' availableCount.
+   */
+  public async addTicketToEvent(eventId: string, userId: string, ticket: EventTicket): Promise<IEvent | null> {
+    return EventModel.findOneAndUpdate(
+      { _id: eventId, userId },
+      { $push: { tickets: ticket } },
+      { new: true, runValidators: true },
+    );
+  }
+
+  /**
+   * Atomically removes a ticket from the event's tickets array by ticket id.
+   * Safer than a full array replace because it never overwrites other tickets' availableCount.
+   */
+  public async removeTicketFromEvent(eventId: string, userId: string, ticketId: string): Promise<IEvent | null> {
+    return EventModel.findOneAndUpdate(
+      { _id: eventId, userId },
+      { $pull: { tickets: { id: ticketId } } },
+      { new: true, runValidators: true },
+    );
+  }
+
+  /**
+   * Atomically updates specific non-capacity fields on a single ticket via positional $set.
+   * Never touches availableCount, so it is safe under concurrent reservations.
+   */
+  public async updateTicketFields(
+    eventId: string,
+    userId: string,
+    ticketId: string,
+    fields: Partial<Pick<EventTicket, "name" | "description" | "salesEndAt" | "type" | "price" | "capacity">>,
+  ): Promise<IEvent | null> {
+    const setPayload: Record<string, unknown> = {};
+
+    if (fields.name !== undefined) setPayload["tickets.$.name"] = fields.name;
+    if ("description" in fields) setPayload["tickets.$.description"] = fields.description ?? null;
+    if ("salesEndAt" in fields) setPayload["tickets.$.salesEndAt"] = fields.salesEndAt ?? null;
+    if (fields.type !== undefined) setPayload["tickets.$.type"] = fields.type;
+    if (fields.price !== undefined) setPayload["tickets.$.price"] = fields.price;
+    if (fields.capacity !== undefined) setPayload["tickets.$.capacity"] = fields.capacity;
+
+    if (Object.keys(setPayload).length === 0) {
+      return EventModel.findOne({ _id: eventId, userId, "tickets.id": ticketId });
+    }
+
+    return EventModel.findOneAndUpdate(
+      { _id: eventId, userId, "tickets.id": ticketId },
+      { $set: setPayload },
+      { new: true, runValidators: true },
     );
   }
 

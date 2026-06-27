@@ -104,6 +104,11 @@ const eventTicketSchema = new Schema<EventTicket>(
       max: 1_000_000,
       required: true,
     },
+    availableCount: {
+      type: Number,
+      min: 0,
+      default: null,
+    },
   },
   { _id: false },
 );

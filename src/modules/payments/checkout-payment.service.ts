@@ -1,8 +1,10 @@
-import { randomUUID } from "node:crypto";
 import httpStatus from "http-status";
 import Stripe from "stripe";
+import { Types } from "mongoose";
 import { env } from "../../config/env.js";
 import { AppError } from "../../core/errors/app-error.js";
+import { RedisClient } from "../../config/redis.js";
+import { logger } from "../../core/logger/logger.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { EventRepository } from "../events/event.repository.js";
 import type { EventReward, EventTicket, IEvent } from "../events/event.interface.js";
@@ -27,7 +29,6 @@ import type {
   TicketWalletStatus,
 } from "./checkout-payment.interface.js";
 import { CheckoutPaymentRepository } from "./checkout-payment.repository.js";
-import { MoomentCreditPaymentRepository } from "./mooment-credit-payment.repository.js";
 import { CreatorEarningRepository } from "./creator-earning.repository.js";
 import { TicketShareRepository } from "./ticket-share.repository.js";
 import { TicketUsageRepository } from "./ticket-usage.repository.js";
@@ -38,15 +39,11 @@ type StripeClient = InstanceType<typeof Stripe>;
 type StripePaymentIntent = Awaited<ReturnType<StripeClient["paymentIntents"]["retrieve"]>>;
 
 const BUYER_FEE_STRIPE = 0.10;
-const BUYER_FEE_CREDITS = 0.05;
 const CREATOR_PLATFORM_FEE = 0.05;
 
 const roundCurrency = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
 const toMinorAmount = (value: number): number => Math.round(roundCurrency(value) * 100);
-
-const getBuyerFeeRate = (paymentMethod: string): number =>
-  paymentMethod === "mooment_credits" ? BUYER_FEE_CREDITS : BUYER_FEE_STRIPE;
 
 export class CheckoutPaymentService {
   private stripe: StripeClient | null = null;
@@ -55,7 +52,6 @@ export class CheckoutPaymentService {
     private readonly repository = new CheckoutPaymentRepository(),
     private readonly eventRepository = new EventRepository(),
     private readonly productRepository = new ProductRepository(),
-    private readonly creditRepository = new MoomentCreditPaymentRepository(),
     private readonly earningRepository = new CreatorEarningRepository(),
     private readonly userRepository = new UserRepository(),
     private readonly userFollowRepository = new UserFollowRepository(),
@@ -525,55 +521,154 @@ export class CheckoutPaymentService {
       throw new AppError("Terms must be accepted before payment", httpStatus.BAD_REQUEST);
     }
 
-    if (payload.kind === "ticket") {
-      const existingCount = await this.repository.getPurchasedCountForTicket(
-        user.id,
+    const isTicket = payload.kind === "ticket";
+    const lockKey = isTicket
+      ? `checkout_lock:${user.id}:${payload.eventId}:${payload.ticketId}`
+      : null;
+    let lockAcquired = false;
+
+    if (lockKey) {
+      try {
+        const redis = RedisClient.getClient();
+
+        if (redis.status === "ready") {
+          // Atomic SET NX EX — returns 1 if key was newly set, 0 if it already existed
+          const acquired = await redis.setnx(lockKey, "1");
+          lockAcquired = acquired === 1;
+
+          if (lockAcquired) {
+            await redis.expire(lockKey, 60);
+          } else {
+            throw new AppError(
+              "A checkout is already in progress for this ticket. Please wait a moment and try again.",
+              httpStatus.CONFLICT,
+            );
+          }
+        }
+      } catch (error) {
+        if (error instanceof AppError) throw error;
+        logger.warn({ error, lockKey }, "Redis checkout lock unavailable — proceeding without lock");
+      }
+    }
+
+    try {
+      if (isTicket) {
+        // Use active count (paid + requires_payment + processing) to prevent per-user limit bypass
+        const activeCount = await this.repository.getActivePurchasedCountForTicket(
+          user.id,
+          payload.eventId,
+          payload.ticketId,
+        );
+        const remaining = Math.max(0, 2 - activeCount);
+
+        if (remaining === 0) {
+          throw new AppError(
+            "You have already purchased the maximum of 2 tickets of this type",
+            httpStatus.BAD_REQUEST,
+          );
+        }
+
+        if (activeCount + payload.quantity > 2) {
+          throw new AppError(
+            `You can only purchase ${remaining} more ticket${remaining === 1 ? "" : "s"} of this type`,
+            httpStatus.BAD_REQUEST,
+          );
+        }
+
+        // Idempotency: return existing non-expired Stripe pending order
+        const existingPending = await this.repository.findExistingPendingTicketOrder(
+          user.id,
+          payload.eventId,
+          payload.ticketId,
+        );
+
+        if (existingPending) {
+          return {
+            order: this.toOrderResponse(existingPending),
+            paymentIntentClientSecret: existingPending.stripeClientSecret ?? null,
+            publishableKey: env.STRIPE_PUBLISHABLE_KEY ?? "",
+            merchantDisplayName: env.APP_NAME,
+            merchantCountryCode: env.STRIPE_MERCHANT_COUNTRY,
+          };
+        }
+
+        // Idempotency: return existing paid free ticket order
+        const existingFree = await this.repository.findExistingPaidFreeOrder(
+          user.id,
+          payload.eventId,
+          payload.ticketId,
+        );
+
+        if (existingFree) {
+          return {
+            order: this.toOrderResponse(existingFree),
+            paymentIntentClientSecret: null,
+            publishableKey: null,
+            merchantDisplayName: env.APP_NAME,
+            merchantCountryCode: env.STRIPE_MERCHANT_COUNTRY,
+          };
+        }
+      }
+
+      const currency = env.STRIPE_CURRENCY.toLowerCase();
+      const lineItems = await this.resolveLineItems(user, payload);
+      const subtotalAmount = roundCurrency(lineItems.reduce((sum, item) => sum + item.totalAmount, 0));
+      const platformFeeAmount = roundCurrency(subtotalAmount * BUYER_FEE_STRIPE);
+      const totalAmount = roundCurrency(subtotalAmount + platformFeeAmount);
+      const amounts = { currency, subtotalAmount, platformFeeAmount, totalAmount };
+
+      if (!isTicket) {
+        if (totalAmount === 0) {
+          return this.createFreeOrder(user, payload, lineItems, amounts);
+        }
+
+        return this.createStripeOrder(user, payload, lineItems, amounts);
+      }
+
+      // Atomic ticket capacity reservation — single MongoDB round-trip, prevents oversell
+      const ticketLineItem = lineItems[0];
+      const reserveQty = ticketLineItem?.totalQuantity ?? payload.quantity;
+      const reserved = await this.eventRepository.reserveTicketCapacity(
         payload.eventId,
         payload.ticketId,
+        reserveQty,
       );
-      const remaining = Math.max(0, 2 - existingCount);
 
-      if (remaining === 0) {
+      if (!reserved) {
         throw new AppError(
-          "You have already purchased the maximum of 2 tickets of this type",
+          "Not enough tickets are available. Please try a different ticket or quantity.",
           httpStatus.BAD_REQUEST,
         );
       }
 
-      if (existingCount + payload.quantity > 2) {
-        throw new AppError(
-          `You can only purchase ${remaining} more ticket${remaining === 1 ? "" : "s"} of this type`,
-          httpStatus.BAD_REQUEST,
+      // Create the order; compensate on any failure
+      try {
+        if (totalAmount === 0) {
+          return await this.createFreeOrder(user, payload, lineItems, amounts);
+        }
+
+        return await this.createStripeOrder(user, payload, lineItems, amounts);
+      } catch (error) {
+        await this.eventRepository.releaseTicketCapacity(payload.eventId, payload.ticketId, reserveQty).catch(
+          (releaseError) => {
+            logger.error({ releaseError, eventId: payload.eventId, ticketId: payload.ticketId }, "Failed to release ticket capacity after order creation failure");
+          },
         );
+        throw error;
+      }
+    } finally {
+      if (lockKey && lockAcquired) {
+        try {
+          const redis = RedisClient.getClient();
+
+          if (redis.status === "ready") {
+            await redis.del(lockKey);
+          }
+        } catch {
+          // Non-critical: lock expires automatically after 60s
+        }
       }
     }
-
-    const currency = env.STRIPE_CURRENCY.toLowerCase();
-    const lineItems = await this.resolveLineItems(user, payload);
-    const subtotalAmount = roundCurrency(lineItems.reduce((sum, item) => sum + item.totalAmount, 0));
-    const feeRate = getBuyerFeeRate(payload.paymentMethod);
-    const platformFeeAmount = roundCurrency(subtotalAmount * feeRate);
-    const totalAmount = roundCurrency(subtotalAmount + platformFeeAmount);
-
-    if (totalAmount === 0) {
-      return this.createFreeOrder(user, payload, lineItems, { currency, subtotalAmount, platformFeeAmount, totalAmount });
-    }
-
-    if (payload.paymentMethod === "mooment_credits") {
-      return this.createMoomentCreditsOrder(user, payload, lineItems, {
-        currency,
-        subtotalAmount,
-        platformFeeAmount,
-        totalAmount,
-      });
-    }
-
-    return this.createStripeOrder(user, payload, lineItems, {
-      currency,
-      subtotalAmount,
-      platformFeeAmount,
-      totalAmount,
-    });
   }
 
   public async confirmOrder(user: AuthUser, orderId: string): Promise<CheckoutOrderResponse> {
@@ -583,7 +678,7 @@ export class CheckoutPaymentService {
       throw new AppError("Checkout order not found", httpStatus.NOT_FOUND);
     }
 
-    if (order.paymentMethod === "mooment_credits" || !order.stripePaymentIntentId) {
+    if (!order.stripePaymentIntentId) {
       return this.toOrderResponse(order);
     }
 
@@ -697,27 +792,38 @@ export class CheckoutPaymentService {
       throw new AppError("Paid checkout amount must be greater than zero", httpStatus.BAD_REQUEST);
     }
 
+    // Pre-generate the order ID so we can include it in the PI metadata at creation time
+    // and use it as the PI idempotency key — eliminates the extra stripe.paymentIntents.update() call
+    // and prevents duplicate PIs on double-tap / network retry.
+    const preOrderId = new Types.ObjectId();
     const stripe = this.getStripe();
 
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amountMinor,
-      currency,
-      automatic_payment_methods: {
-        enabled: true,
-        allow_redirects: "never",
+    const paymentIntent = await stripe.paymentIntents.create(
+      {
+        amount: amountMinor,
+        currency,
+        automatic_payment_methods: {
+          enabled: true,
+          allow_redirects: "never",
+        },
+        metadata: {
+          userId: user.id,
+          kind: payload.kind,
+          orderId: preOrderId.toString(),
+        },
+        description: this.buildPaymentDescription(payload.kind, lineItems),
       },
-      metadata: {
-        userId: user.id,
-        kind: payload.kind,
-      },
-      description: this.buildPaymentDescription(payload.kind, lineItems),
-    });
+      { idempotencyKey: `pi-${preOrderId.toString()}` },
+    );
 
     if (!paymentIntent.client_secret) {
       throw new AppError("Stripe did not return a payment client secret", httpStatus.SERVICE_UNAVAILABLE);
     }
 
+    const reservedUntil = new Date(Date.now() + 30 * 60 * 1000);
+
     const order = await this.repository.create({
+      _id: preOrderId,
       userId: user.id,
       kind: payload.kind,
       paymentMethod: payload.paymentMethod,
@@ -732,16 +838,9 @@ export class CheckoutPaymentService {
       lineItems,
       stripePaymentIntentId: paymentIntent.id,
       stripeClientSecret: paymentIntent.client_secret,
+      reservedUntil,
       anonymous: payload.kind === "ticket" ? Boolean((payload as { anonymous?: boolean }).anonymous) : false,
       termsAcceptedAt: new Date(),
-    });
-
-    await stripe.paymentIntents.update(paymentIntent.id, {
-      metadata: {
-        userId: user.id,
-        kind: payload.kind,
-        orderId: order._id.toString(),
-      },
     });
 
     return {
@@ -753,68 +852,9 @@ export class CheckoutPaymentService {
     };
   }
 
-  private async createMoomentCreditsOrder(
-    user: AuthUser,
-    payload: CreateCheckoutIntentDto,
-    lineItems: CheckoutOrderLineItem[],
-    amounts: { currency: string; subtotalAmount: number; platformFeeAmount: number; totalAmount: number },
-  ): Promise<CheckoutIntentResponse> {
-    const { currency, subtotalAmount, platformFeeAmount, totalAmount } = amounts;
-    const amountMinor = toMinorAmount(totalAmount);
-
-    if (amountMinor < 1) {
-      throw new AppError("Checkout amount must be greater than zero", httpStatus.BAD_REQUEST);
-    }
-
-    const deducted = await this.creditRepository.decrementWallet(user.id, totalAmount);
-
-    if (!deducted) {
-      throw new AppError("Insufficient Mooment Credits in your wallet", httpStatus.PAYMENT_REQUIRED);
-    }
-
-    const paymentRef = `mc-${randomUUID()}`;
-    const now = new Date();
-
-    const order = await this.repository.create({
-      userId: user.id,
-      kind: payload.kind,
-      paymentMethod: "mooment_credits",
-      paymentStatus: "paid",
-      payoutStatus: "held",
-      currency,
-      subtotalAmount,
-      platformFeeAmount,
-      taxAmount: 0,
-      totalAmount,
-      amountMinor,
-      lineItems,
-      stripePaymentIntentId: paymentRef,
-      stripeClientSecret: null,
-      anonymous: payload.kind === "ticket" ? Boolean((payload as { anonymous?: boolean }).anonymous) : false,
-      termsAcceptedAt: now,
-      paidAt: now,
-    });
-
-    await this.recordCreatorEarnings(order);
-    void this.dispatchTicketNotifications(order);
-
-    return {
-      order: this.toOrderResponse(order),
-      paymentIntentClientSecret: null,
-      publishableKey: null,
-      merchantDisplayName: env.APP_NAME,
-      merchantCountryCode: env.STRIPE_MERCHANT_COUNTRY,
-    };
-  }
-
   private async processRefund(order: ICheckoutOrder): Promise<ICheckoutOrder> {
-    if (order.paymentMethod === "mooment_credits") {
-      await this.creditRepository.incrementWallet(order.userId.toString(), order.totalAmount);
-    } else {
-      if (!order.stripePaymentIntentId) {
-        throw new AppError("Order has no payment reference for refund", httpStatus.INTERNAL_SERVER_ERROR);
-      }
-
+    if (order.totalAmount > 0 && order.stripePaymentIntentId) {
+      // Free ticket orders have totalAmount === 0 and no stripePaymentIntentId — skip Stripe refund
       await this.getStripe().refunds.create({
         payment_intent: order.stripePaymentIntentId,
       });
@@ -826,7 +866,71 @@ export class CheckoutPaymentService {
 
     await this.earningRepository.markRefundedByOrderId(order._id.toString());
 
+    if (order.kind === "ticket") {
+      await this.releaseCapacityForOrder(order);
+    }
+
     return updated ?? order;
+  }
+
+  public async cancelOrder(user: AuthUser, orderId: string): Promise<CheckoutOrderResponse> {
+    const order = await this.repository.findById(orderId);
+
+    if (!order || order.userId.toString() !== user.id) {
+      throw new AppError("Checkout order not found", httpStatus.NOT_FOUND);
+    }
+
+    if (order.paymentStatus !== "requires_payment") {
+      throw new AppError("Only pending payment orders can be cancelled", httpStatus.BAD_REQUEST);
+    }
+
+    const updated = await this.repository.updatePaymentStatusIf(
+      orderId,
+      ["requires_payment"],
+      { paymentStatus: "canceled", failedAt: new Date(), failureMessage: "Payment cancelled by user." },
+    );
+
+    if (updated && updated.kind === "ticket") {
+      await this.releaseCapacityForOrder(updated);
+    }
+
+    return this.toOrderResponse(updated ?? order);
+  }
+
+  public async expireStaleReservations(): Promise<void> {
+    const staleOrders = await this.repository.findStaleReservedOrders(50);
+
+    for (const order of staleOrders) {
+      try {
+        const updated = await this.repository.updatePaymentStatusIf(
+          order._id.toString(),
+          ["requires_payment"],
+          { paymentStatus: "canceled", failedAt: new Date(), failureMessage: "Reservation expired." },
+        );
+
+        if (updated && updated.kind === "ticket") {
+          await this.releaseCapacityForOrder(updated);
+        }
+      } catch (error) {
+        logger.error({ error, orderId: order._id.toString() }, "Failed to expire stale reservation");
+      }
+    }
+  }
+
+  private async releaseCapacityForOrder(order: ICheckoutOrder): Promise<void> {
+    const ticketItems = order.lineItems.filter(
+      (item) => item.itemType === "ticket" && item.eventId && item.itemId,
+    );
+
+    for (const item of ticketItems) {
+      const qty = item.totalQuantity ?? item.quantity;
+      await this.eventRepository.releaseTicketCapacity(item.eventId!, item.itemId!, qty).catch((error) => {
+        logger.error(
+          { error, eventId: item.eventId, ticketId: item.itemId, orderId: order._id.toString() },
+          "Failed to release ticket capacity",
+        );
+      });
+    }
   }
 
   private getStripe(): StripeClient {
@@ -881,11 +985,7 @@ export class CheckoutPaymentService {
       );
       const freeQuantity = this.calculateTicketRewardQuantity(payload.quantity, linkedReward);
       const totalQuantity = payload.quantity + freeQuantity;
-
-      if (ticket.capacity < totalQuantity) {
-        throw new AppError("Not enough tickets are available", httpStatus.BAD_REQUEST);
-      }
-
+      // Capacity enforcement is handled atomically by reserveTicketCapacity — no non-atomic check here.
       const unitAmount = ticket.type === "free" || ticket.price <= 0 ? 0 : roundCurrency(ticket.price);
 
       return [
@@ -1168,21 +1268,35 @@ export class CheckoutPaymentService {
     }
 
     if (paymentIntent.status === "canceled") {
-      const updatedOrder = await this.repository.updatePaymentStatus(order._id.toString(), {
-        paymentStatus: "canceled",
-        failedAt: new Date(),
-        failureMessage: "Payment was canceled.",
-      });
+      // Conditional update prevents double capacity release if webhook fires multiple times
+      const updatedOrder = await this.repository.updatePaymentStatusIf(
+        order._id.toString(),
+        ["requires_payment", "processing"],
+        { paymentStatus: "canceled", failedAt: new Date(), failureMessage: "Payment was canceled." },
+      );
+
+      if (updatedOrder && updatedOrder.kind === "ticket") {
+        await this.releaseCapacityForOrder(updatedOrder);
+      }
 
       return updatedOrder ?? order;
     }
 
     if (paymentIntent.status === "requires_payment_method") {
-      const updatedOrder = await this.repository.updatePaymentStatus(order._id.toString(), {
-        paymentStatus: "failed",
-        failedAt: new Date(),
-        failureMessage: paymentIntent.last_payment_error?.message ?? "Payment failed.",
-      });
+      // Conditional update prevents double capacity release if webhook fires multiple times
+      const updatedOrder = await this.repository.updatePaymentStatusIf(
+        order._id.toString(),
+        ["requires_payment", "processing"],
+        {
+          paymentStatus: "failed",
+          failedAt: new Date(),
+          failureMessage: paymentIntent.last_payment_error?.message ?? "Payment failed.",
+        },
+      );
+
+      if (updatedOrder && updatedOrder.kind === "ticket") {
+        await this.releaseCapacityForOrder(updatedOrder);
+      }
 
       return updatedOrder ?? order;
     }

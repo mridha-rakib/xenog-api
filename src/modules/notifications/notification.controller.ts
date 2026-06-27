@@ -16,10 +16,23 @@ export class NotificationController {
   };
 
   public markAllRead = async (req: Request, res: Response): Promise<void> => {
-    await this.service.markAllRead(req.authUser as AuthUser);
+    const unreadCount = await this.service.markAllRead(req.authUser as AuthUser);
 
     ApiResponse.success(res, {
       message: "Notifications marked as read",
+      data: { unreadCount },
+    });
+  };
+
+  public markRead = async (req: Request, res: Response): Promise<void> => {
+    const unreadCount = await this.service.markRead(
+      req.authUser as AuthUser,
+      req.params.notificationId as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Notification marked as read",
+      data: { unreadCount },
     });
   };
 

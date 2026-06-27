@@ -66,7 +66,7 @@ export interface EventTicket {
   availableCount: number | null;
 }
 
-export type EventTicketInput = Omit<EventTicket, "id"> & {
+export type EventTicketInput = Omit<EventTicket, "id" | "availableCount"> & {
   id?: string;
 };
 

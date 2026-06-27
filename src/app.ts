@@ -44,6 +44,7 @@ export const createApp = () => {
       limit: env.RATE_LIMIT_MAX,
       standardHeaders: "draft-7",
       legacyHeaders: false,
+      skip: (req) => req.path === `${env.API_PREFIX}/health` || req.path === "/",
     }),
   );
 

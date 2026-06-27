@@ -67,7 +67,7 @@ const envSchema = z.object({
   AI_ENGINE_MODE: z.string().default("rules"),
 
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
-  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
+  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(1000),
 });
 
 export const env = envSchema.parse(process.env);

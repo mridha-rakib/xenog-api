@@ -24,13 +24,13 @@ const storySchema = new Schema<IStory>(
     },
     storageKey: {
       type: String,
-      required: true,
+      default: null,
       trim: true,
       maxlength: 300,
     },
     contentType: {
       type: String,
-      required: true,
+      default: null,
       trim: true,
       maxlength: 100,
     },
@@ -45,6 +45,57 @@ const storySchema = new Schema<IStory>(
       trim: true,
       maxlength: 500,
       default: null,
+    },
+    textContent: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: null,
+    },
+    textBackground: {
+      type: {
+        type: String,
+        enum: ["color", "gradient"],
+      },
+      colors: {
+        type: [String],
+        default: undefined,
+      },
+    },
+    textOverlay: {
+      text: {
+        type: String,
+        trim: true,
+        maxlength: 160,
+      },
+      x: {
+        type: Number,
+        min: 0,
+        max: 1,
+      },
+      y: {
+        type: Number,
+        min: 0,
+        max: 1,
+      },
+      scale: {
+        type: Number,
+        min: 0.5,
+        max: 2,
+      },
+      color: {
+        type: String,
+        trim: true,
+        maxlength: 24,
+      },
+      fontWeight: {
+        type: String,
+        enum: ["normal", "600", "700", "bold"],
+      },
+      textAlign: {
+        type: String,
+        enum: ["left", "center", "right"],
+      },
     },
     audience: {
       type: String,

@@ -96,7 +96,7 @@ export class StorageService {
     };
   }
 
-  public async getObject(key: string, range?: string): Promise<StorageObject> {
+  public async getObject(key: string, range?: string, abortSignal?: AbortSignal): Promise<StorageObject> {
     const client = S3ClientManager.getClient();
     const response = await client.send(
       new GetObjectCommand({
@@ -104,10 +104,16 @@ export class StorageService {
         Key: key,
         Range: range,
       }),
+      { abortSignal },
     );
+    const body = response.Body as Readable | undefined;
+
+    if (!body || typeof body.pipe !== "function") {
+      throw new Error("S3 object body is not streamable");
+    }
 
     return {
-      body: response.Body as Readable,
+      body,
       contentLength: response.ContentLength,
       contentRange: response.ContentRange,
       contentType: response.ContentType,

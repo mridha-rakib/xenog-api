@@ -1,6 +1,6 @@
 import type { Types } from "mongoose";
 
-export const storyMediaTypes = ["video"] as const;
+export const storyMediaTypes = ["image", "video", "text"] as const;
 export type StoryMediaType = (typeof storyMediaTypes)[number];
 
 export const storyMediaSources = ["camera", "gallery", "upload"] as const;
@@ -14,10 +14,13 @@ export interface IStory {
   userId: Types.ObjectId;
   mediaType: StoryMediaType;
   mediaSource: StoryMediaSource;
-  storageKey: string;
-  contentType: string;
+  storageKey?: string | null;
+  contentType?: string | null;
   durationSeconds: number;
   caption?: string | null;
+  textContent?: string | null;
+  textBackground?: StoryTextBackground | null;
+  textOverlay?: StoryTextOverlay | null;
   audience: StoryAudienceType;
   expiresAt: Date;
   createdAt: Date;
@@ -25,11 +28,30 @@ export interface IStory {
 }
 
 export interface CreateStoryDto {
+  mediaType?: StoryMediaType;
   mediaSource?: StoryMediaSource;
-  storageKey: string;
-  contentType: string;
+  storageKey?: string | null;
+  contentType?: string | null;
   durationSeconds: number;
   caption?: string | null;
+  textContent?: string | null;
+  textBackground?: StoryTextBackground | null;
+  textOverlay?: StoryTextOverlay | null;
+}
+
+export interface StoryTextBackground {
+  type: "color" | "gradient";
+  colors: string[];
+}
+
+export interface StoryTextOverlay {
+  text: string;
+  x: number;
+  y: number;
+  scale: number;
+  color: string;
+  fontWeight?: "normal" | "600" | "700" | "bold";
+  textAlign?: "left" | "center" | "right";
 }
 
 export interface StoryAuthorResponse {
@@ -46,11 +68,14 @@ export interface StoryResponse {
   author?: StoryAuthorResponse | null;
   mediaType: StoryMediaType;
   mediaSource: StoryMediaSource;
-  storageKey: string;
+  storageKey?: string | null;
   mediaUrl?: string | null;
-  contentType: string;
+  contentType?: string | null;
   durationSeconds: number;
   caption?: string | null;
+  textContent?: string | null;
+  textBackground?: StoryTextBackground | null;
+  textOverlay?: StoryTextOverlay | null;
   audience: StoryAudienceType;
   expiresAt: Date;
   createdAt: Date;

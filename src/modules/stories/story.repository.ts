@@ -10,12 +10,15 @@ export class StoryRepository {
   public async create(payload: CreateStoryRecord): Promise<IStory> {
     return StoryModel.create({
       userId: payload.userId,
-      mediaType: "video",
+      mediaType: payload.mediaType ?? "video",
       mediaSource: payload.mediaSource ?? "upload",
-      storageKey: payload.storageKey,
-      contentType: payload.contentType,
+      storageKey: payload.storageKey ?? null,
+      contentType: payload.contentType ?? null,
       durationSeconds: payload.durationSeconds,
       caption: payload.caption ?? null,
+      textContent: payload.textContent ?? null,
+      textBackground: payload.textBackground ?? null,
+      textOverlay: payload.textOverlay ?? null,
       audience: "connections",
       expiresAt: payload.expiresAt,
     });

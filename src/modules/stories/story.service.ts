@@ -24,22 +24,40 @@ export class StoryService {
   ) {}
 
   public async createStory(payload: CreateStoryDto, user: AuthUser): Promise<StoryResponse> {
+    const mediaType = payload.mediaType ?? "video";
+
     if (payload.durationSeconds > MAX_STORY_DURATION_SECONDS) {
       throw new AppError("Stories can be up to 15 seconds long", httpStatus.BAD_REQUEST);
     }
 
-    if (!payload.contentType.toLowerCase().startsWith("video/")) {
-      throw new AppError("Stories must be video files", httpStatus.BAD_REQUEST);
+    if (mediaType === "video" && !payload.contentType?.toLowerCase().startsWith("video/")) {
+      throw new AppError("Video stories must be video files", httpStatus.BAD_REQUEST);
+    }
+
+    if (mediaType === "image" && !payload.contentType?.toLowerCase().startsWith("image/")) {
+      throw new AppError("Image stories must be image files", httpStatus.BAD_REQUEST);
+    }
+
+    if (mediaType !== "text" && !payload.storageKey) {
+      throw new AppError("Story storage key is required", httpStatus.BAD_REQUEST);
+    }
+
+    if (mediaType === "text" && !payload.textContent?.trim()) {
+      throw new AppError("Story text is required", httpStatus.BAD_REQUEST);
     }
 
     const expiresAt = new Date(Date.now() + STORY_TTL_HOURS * 60 * 60 * 1000);
     const story = await this.storyRepository.create({
       userId: user.id,
+      mediaType,
       mediaSource: payload.mediaSource ?? "upload",
-      storageKey: payload.storageKey,
-      contentType: payload.contentType,
+      storageKey: payload.storageKey?.trim() || null,
+      contentType: payload.contentType?.trim() || null,
       durationSeconds: payload.durationSeconds,
       caption: payload.caption?.trim() || null,
+      textContent: payload.textContent?.trim() || null,
+      textBackground: payload.textBackground ?? null,
+      textOverlay: payload.textOverlay?.text.trim() ? payload.textOverlay : null,
       expiresAt,
     });
 
@@ -66,7 +84,7 @@ export class StoryService {
   private async toResponse(story: IStory): Promise<StoryResponse> {
     const author = this.getAuthor(story);
     const [mediaUrl, avatarUrl] = await Promise.all([
-      this.createOptionalDownloadUrl(story.storageKey),
+      story.storageKey ? this.createOptionalDownloadUrl(story.storageKey) : Promise.resolve(null),
       author?.avatarKey ? this.createOptionalDownloadUrl(author.avatarKey) : Promise.resolve(null),
     ]);
 
@@ -76,11 +94,14 @@ export class StoryService {
       author: author ? { ...author, avatarUrl } : null,
       mediaType: story.mediaType,
       mediaSource: story.mediaSource,
-      storageKey: story.storageKey,
+      storageKey: story.storageKey ?? null,
       mediaUrl,
-      contentType: story.contentType,
+      contentType: story.contentType ?? null,
       durationSeconds: story.durationSeconds,
       caption: story.caption ?? null,
+      textContent: story.textContent ?? null,
+      textBackground: story.textBackground ?? null,
+      textOverlay: story.textOverlay ?? null,
       audience: story.audience,
       expiresAt: story.expiresAt,
       createdAt: story.createdAt,

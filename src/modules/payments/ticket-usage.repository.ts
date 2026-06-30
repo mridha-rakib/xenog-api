@@ -38,6 +38,13 @@ export class TicketUsageRepository {
     });
   }
 
+  public async findByEventIdAndHolderUserId(eventId: string, holderUserId: string): Promise<ITicketUsage | null> {
+    return TicketUsageModel.findOne({
+      eventId,
+      holderUserId,
+    }).sort({ usedAt: -1, _id: -1 });
+  }
+
   public async findByEventIdsAndOrderIds(eventIds: string[], orderIds: string[]): Promise<ITicketUsage[]> {
     if (eventIds.length === 0 || orderIds.length === 0) {
       return [];

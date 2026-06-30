@@ -9,3 +9,4 @@ pnpm-debug.log*
 *.log
 coverage
 uploads
+*firebase-adminsdk*.json

@@ -13,9 +13,11 @@ import { chatMessageAttachmentSchema, chatMessageBodySchema } from "../chat/chat
 import { ChatService } from "../chat/chat.service.js";
 import type { GroupMessageResponse } from "../chat/group.interface.js";
 import { GroupService } from "../chat/group.service.js";
+import { GroupRepository } from "../chat/group.repository.js";
 import { LiveRoomService } from "../live-rooms/live-room.service.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
 import { presenceService } from "./presence.service.js";
+import { sendPushNotifications } from "../notifications/fcm.service.js";
 
 type RealtimeClient = {
   socket: WebSocket;
@@ -112,6 +114,7 @@ export class RealtimeGateway {
     private readonly authService = new AuthService(),
     private readonly chatService = new ChatService(),
     private readonly groupService = new GroupService(),
+    private readonly groupRepository = new GroupRepository(),
     private readonly liveRoomService = new LiveRoomService(),
     private readonly userFollowRepository = new UserFollowRepository(),
   ) {}
@@ -293,6 +296,20 @@ export class RealtimeGateway {
 
     this.broadcastToUser(client.user.id, payload);
     this.broadcastToUser(recipientId, payload);
+
+    if (!this.isUserOnline(recipientId)) {
+      const notifBody = savedMessage.text?.trim() || "Sent an attachment";
+      void sendPushNotifications([recipientId], {
+        title: client.user.name,
+        body: notifBody,
+        data: {
+          type: "dm",
+          conversationPartnerId: client.user.id,
+          senderName: client.user.name,
+          conversationId: savedMessage.conversationId,
+        },
+      });
+    }
   }
 
   private async handleDirectMessageEdit(
@@ -413,7 +430,10 @@ export class RealtimeGateway {
       throw error;
     }
 
-    const memberIds = await this.groupService.getGroupMemberIds(message.groupId);
+    const [memberIds, group] = await Promise.all([
+      this.groupService.getGroupMemberIds(message.groupId),
+      this.groupRepository.findById(message.groupId),
+    ]);
 
     const payload = {
       type: "group:message",
@@ -433,6 +453,25 @@ export class RealtimeGateway {
 
     for (const memberId of memberIds) {
       this.broadcastToUser(memberId, payload);
+    }
+
+    const offlineMemberIds = memberIds.filter(
+      (memberId) => memberId !== client.user.id && !this.isUserOnline(memberId),
+    );
+
+    if (offlineMemberIds.length > 0) {
+      const groupName = group?.name ?? "Group";
+      const notifBody = savedMessage.text?.trim() || "Sent an attachment";
+      void sendPushNotifications(offlineMemberIds, {
+        title: groupName,
+        body: `${client.user.name}: ${notifBody}`,
+        data: {
+          type: "group",
+          groupId: message.groupId,
+          groupName: groupName,
+          senderName: client.user.name,
+        },
+      });
     }
   }
 

@@ -56,6 +56,7 @@ export class MomentRepository {
     return MomentModel.find({
       audience: "public",
       eventId,
+      isEventAnnouncement: { $ne: true },
     })
       .sort({ createdAt: -1 })
       .limit(limit);

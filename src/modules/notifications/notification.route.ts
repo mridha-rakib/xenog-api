@@ -12,5 +12,7 @@ router.get("/", catchAsync(controller.list));
 router.get("/unread-count", catchAsync(controller.countUnread));
 router.patch("/read-all", catchAsync(controller.markAllRead));
 router.patch("/:notificationId/read", catchAsync(controller.markRead));
+router.post("/fcm-token", catchAsync(controller.registerFcmToken));
+router.delete("/fcm-token", catchAsync(controller.removeFcmToken));
 
 export const notificationRoutes = router;

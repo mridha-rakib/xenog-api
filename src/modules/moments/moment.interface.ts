@@ -42,6 +42,11 @@ export interface IMomentShare {
   _id: Types.ObjectId;
   userId: Types.ObjectId;
   momentId: Types.ObjectId;
+  caption?: string | null;
+  taggedFriendIds?: Types.ObjectId[];
+  originalType?: "post" | "event";
+  originalId?: Types.ObjectId;
+  clientRequestId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -143,6 +148,16 @@ export interface MomentTimelineItemResponse {
   createdAt: Date;
   sharedAt?: Date | null;
   moment: MomentResponse;
+  repostCaption?: string | null;
+  taggedFriends?: MomentAuthorResponse[];
+  sharedBy?: MomentAuthorResponse | null;
+  originalItem?: { type: "post" | "event"; id: string };
+}
+
+export interface CreateMomentShareDto {
+  caption?: string | null;
+  taggedFriendIds?: string[];
+  clientRequestId?: string | null;
 }
 
 export interface MomentInteractionSummaryResponse {

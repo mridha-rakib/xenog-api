@@ -26,9 +26,14 @@ router.get(
   validate(momentValidation.hashtagMoments),
   catchAsync(controller.listHashtagMoments),
 );
+router.get(
+  "/shares/feed",
+  validate(momentValidation.feedShares),
+  catchAsync(controller.listFeedShares),
+);
 router.post(
   "/:id/share",
-  validate(momentValidation.momentIdParam),
+  validate(momentValidation.shareMoment),
   catchAsync(controller.shareMoment),
 );
 router.post(
@@ -69,5 +74,10 @@ router.get(
 router.get("/", validate(momentValidation.feedQuery), catchAsync(controller.listFeedMoments));
 router.get("/mine", catchAsync(controller.listMyMoments));
 router.get("/saved", catchAsync(controller.listSavedMoments));
+router.get(
+  "/:id",
+  validate(momentValidation.momentIdParam),
+  catchAsync(controller.getMoment),
+);
 
 export const momentRoutes = router;

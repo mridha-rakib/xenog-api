@@ -57,7 +57,7 @@ export class MomentController {
 
   public shareMoment = async (req: Request, res: Response): Promise<void> => {
     const { id } = req.params as { id: string };
-    const share = await this.momentService.shareMoment(id, req.authUser as AuthUser);
+    const share = await this.momentService.shareMoment(id, req.authUser as AuthUser, req.body);
 
     ApiResponse.success(res, {
       statusCode: httpStatus.CREATED,
@@ -66,6 +66,21 @@ export class MomentController {
         share,
       },
     });
+  };
+
+  public listFeedShares = async (req: Request, res: Response): Promise<void> => {
+    const shares = await this.momentService.listFeedShares(
+      req.authUser as AuthUser,
+      Number(req.query.limit ?? 50),
+    );
+    ApiResponse.success(res, { message: "Feed reposts retrieved", data: { shares } });
+  };
+
+  public getMoment = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const moment = await this.momentService.getMoment(id, req.authUser as AuthUser);
+
+    ApiResponse.success(res, { message: "Moment retrieved", data: { moment } });
   };
 
   public toggleMomentReaction = async (req: Request, res: Response): Promise<void> => {

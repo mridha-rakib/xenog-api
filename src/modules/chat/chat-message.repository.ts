@@ -10,10 +10,27 @@ interface CreateChatMessageRecord {
   type?: ChatMessageType;
   text?: string;
   attachment?: ChatMessageAttachment | null;
+  clientMessageId?: string | null;
 }
 
 export class ChatMessageRepository {
   public async create(payload: CreateChatMessageRecord): Promise<IChatMessage> {
+    if (payload.clientMessageId) {
+      const filter = { senderId: payload.senderId, clientMessageId: payload.clientMessageId };
+      try {
+        return await ChatMessageModel.findOneAndUpdate(
+          filter,
+          { $setOnInsert: { ...payload, type: payload.type ?? "text", text: payload.text ?? "", attachment: payload.attachment ?? null } },
+          { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
+        );
+      } catch (error) {
+        if ((error as { code?: number }).code !== 11000) throw error;
+        const existing = await ChatMessageModel.findOne(filter);
+        if (existing) return existing;
+        throw error;
+      }
+    }
+
     return ChatMessageModel.create({
       conversationId: payload.conversationId,
       senderId: payload.senderId,

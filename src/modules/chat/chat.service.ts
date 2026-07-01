@@ -8,6 +8,7 @@ import { UserFollowRepository } from "../user/user-follow.repository.js";
 import { UserRepository } from "../user/user.repository.js";
 import { presenceService } from "../realtime/presence.service.js";
 import { EventRepository } from "../events/event.repository.js";
+import { MomentRepository } from "../moments/moment.repository.js";
 import { ChatDeletionRepository } from "./chat-deletion.repository.js";
 import { ChatMessageRepository } from "./chat-message.repository.js";
 import type {
@@ -31,6 +32,7 @@ export class ChatService {
     private readonly chatMessageRepository = new ChatMessageRepository(),
     private readonly chatDeletionRepository = new ChatDeletionRepository(),
     private readonly eventRepository = new EventRepository(),
+    private readonly momentRepository = new MomentRepository(),
   ) {}
 
   public async listDirectMessages(
@@ -63,7 +65,7 @@ export class ChatService {
 
     const blockedSet = new Set(blockedIds);
 
-    const visible = friends.filter((f) => {
+    const visible = query.includeHidden ? friends : friends.filter((f) => {
       const conversationId =
         conversationIdsByFriendId.get(f._id.toString()) ??
         this.getConversationId(user.id, f._id.toString());
@@ -137,6 +139,7 @@ export class ChatService {
       text,
       type,
       attachment,
+      clientMessageId: payload.clientMessageId ?? null,
     });
 
     return this.toDirectMessageResponse(message);
@@ -275,6 +278,10 @@ export class ChatService {
       return this.normalizeEventAttachment(userId, attachment.eventId);
     }
 
+    if (attachment.type === "post") {
+      return this.normalizePostAttachment(attachment.postId);
+    }
+
     return this.normalizeFileAttachment(userId, attachment);
   }
 
@@ -286,13 +293,30 @@ export class ChatService {
     }
 
     if (attachment.type === "image" || attachment.type === "video" || attachment.type === "audio") {
-      const download = await this.storageService.createDownloadUrl(attachment.key);
-      return { ...attachment, url: download.url };
+      try {
+        const download = await this.storageService.createDownloadUrl(attachment.key);
+        return { ...attachment, url: download.url };
+      } catch {
+        return attachment;
+      }
     }
 
     if (attachment.type === "event" && attachment.coverImageKey) {
-      const download = await this.storageService.createDownloadUrl(attachment.coverImageKey);
-      return { ...attachment, coverImageUrl: download.url };
+      try {
+        const download = await this.storageService.createDownloadUrl(attachment.coverImageKey);
+        return { ...attachment, coverImageUrl: download.url };
+      } catch {
+        return attachment;
+      }
+    }
+
+    if (attachment.type === "post" && attachment.imageKey) {
+      try {
+        const download = await this.storageService.createDownloadUrl(attachment.imageKey);
+        return { ...attachment, imageUrl: attachment.imageUrl ?? download.url };
+      } catch {
+        return attachment;
+      }
     }
 
     return attachment;
@@ -311,12 +335,17 @@ export class ChatService {
       return `Event: ${attachment.title ?? "Shared event"}`;
     }
 
+    if (type === "post" && attachment?.type === "post") {
+      return `Post: ${attachment.preview ?? "Shared post"}`;
+    }
+
     const labels: Record<Exclude<ChatMessageType, "text">, string> = {
       image: "Photo",
       video: "Video",
       audio: "Audio",
       location: "Location",
       event: "Event",
+      post: "Post",
     };
 
     return text || labels[type];
@@ -394,6 +423,26 @@ export class ChatService {
       coverImageKey: event.bannerImageKey ?? null,
       locationName: event.location?.venue ?? event.location?.searchLabel ?? null,
       address: event.location?.address ?? null,
+    };
+  }
+
+  private async normalizePostAttachment(postId: string): Promise<ChatMessageAttachment> {
+    const moment = await this.momentRepository.findById(postId);
+
+    if (!moment || moment.isEventAnnouncement || moment.audience !== "public") {
+      throw new AppError("Post not found or cannot be shared.", httpStatus.NOT_FOUND);
+    }
+
+    const author = await this.userRepository.findById(moment.userId.toString());
+    const image = moment.mediaItems.find((item) => item.type === "image");
+
+    return {
+      type: "post",
+      postId: moment._id.toString(),
+      preview: moment.caption?.trim().slice(0, 240) || "Shared post",
+      imageKey: image?.storageKey ?? null,
+      imageUrl: image?.url ?? null,
+      authorName: author?.name ?? null,
     };
   }
 

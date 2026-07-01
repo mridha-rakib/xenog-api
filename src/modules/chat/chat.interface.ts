@@ -1,6 +1,6 @@
 import type { Types } from "mongoose";
 
-export const chatMessageTypes = ["text", "image", "video", "audio", "location", "event"] as const;
+export const chatMessageTypes = ["text", "image", "video", "audio", "location", "event", "post"] as const;
 
 export type ChatMessageType = (typeof chatMessageTypes)[number];
 
@@ -39,11 +39,21 @@ export interface ChatEventAttachment {
   address?: string | null;
 }
 
-export type ChatMessageAttachment = ChatFileAttachment | ChatLocationAttachment | ChatEventAttachment;
+export interface ChatPostAttachment {
+  type: "post";
+  postId: string;
+  preview?: string | null;
+  imageKey?: string | null;
+  imageUrl?: string | null;
+  authorName?: string | null;
+}
+
+export type ChatMessageAttachment = ChatFileAttachment | ChatLocationAttachment | ChatEventAttachment | ChatPostAttachment;
 
 export interface ListDirectMessagesQuery {
   limit?: number;
   search?: string;
+  includeHidden?: boolean;
 }
 
 export interface ListDirectMessageHistoryQuery {
@@ -55,6 +65,7 @@ export interface CreateDirectMessageDto {
   text?: string;
   type?: ChatMessageType;
   attachment?: ChatMessageAttachment;
+  clientMessageId?: string;
 }
 
 export interface IChatMessage {
@@ -65,6 +76,7 @@ export interface IChatMessage {
   type: ChatMessageType;
   text: string;
   attachment?: ChatMessageAttachment | null;
+  clientMessageId?: string | null;
   readAt?: Date | null;
   editedAt?: Date | null;
   createdAt: Date;

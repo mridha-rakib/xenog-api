@@ -76,6 +76,9 @@ const mediaItem = z
   });
 
 export const momentValidation = {
+  feedShares: z.object({
+    query: z.object({ limit: z.coerce.number().int().min(1).max(100).default(50) }).strict(),
+  }),
   feedQuery: z.object({
     query: z.object({
       hashtags: z
@@ -100,6 +103,14 @@ export const momentValidation = {
     params: z.object({
       id: objectId,
     }),
+  }),
+  shareMoment: z.object({
+    params: z.object({ id: objectId }),
+    body: z.object({
+      caption: optionalText("Repost caption", 2000),
+      taggedFriendIds: z.array(objectId).max(20).default([]).transform((ids) => [...new Set(ids)]),
+      clientRequestId: z.string().trim().min(8).max(100).regex(/^[a-zA-Z0-9._:-]+$/).optional().nullable(),
+    }).strict(),
   }),
   commentReaction: z.object({
     params: z.object({

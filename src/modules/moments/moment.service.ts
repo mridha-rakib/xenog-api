@@ -11,6 +11,7 @@ import { MomentRepository } from "./moment.repository.js";
 import type {
   CreateMomentCommentDto,
   CreateMomentDto,
+  CreateMomentShareDto,
   IMomentComment,
   IMoment,
   IMomentShare,
@@ -204,14 +205,14 @@ export class MomentService {
     );
   }
 
-  public async shareMoment(momentId: string, user: AuthUser): Promise<MomentTimelineItemResponse> {
+  public async shareMoment(
+    momentId: string,
+    user: AuthUser,
+    payload: CreateMomentShareDto = {},
+  ): Promise<MomentTimelineItemResponse> {
     const moment = await this.momentRepository.findById(momentId);
 
     if (!moment) {
-      throw new AppError("Moment not found", httpStatus.NOT_FOUND);
-    }
-
-    if (moment.isEventAnnouncement) {
       throw new AppError("Moment not found", httpStatus.NOT_FOUND);
     }
 
@@ -223,23 +224,91 @@ export class MomentService {
       throw new AppError("Only public posts can be shared", httpStatus.BAD_REQUEST);
     }
 
-    const share = await this.momentShareRepository.share(user.id, momentId);
+    if (moment.isEventAnnouncement) {
+      const event = moment.eventId ? await this.eventRepository.findById(moment.eventId.toString()) : null;
+      if (!event || event.status !== "published" || event.privacy !== "public") {
+        throw new AppError("Only public events can be reposted", httpStatus.BAD_REQUEST);
+      }
+    }
+
+    const taggedFriendIds = [...new Set(payload.taggedFriendIds ?? [])];
+    if (taggedFriendIds.length > 0) {
+      const mutualFriendIds = new Set(await this.userFollowRepository.findMutualFriendIds(user.id));
+      const blockedIds = new Set(await this.userBlockRepository.findBlockedIds(user.id));
+      if (taggedFriendIds.some((id) => !mutualFriendIds.has(id) || blockedIds.has(id))) {
+        throw new AppError("You can only tag friends in a repost", httpStatus.BAD_REQUEST);
+      }
+    }
+
+    const originalType = moment.isEventAnnouncement ? "event" as const : "post" as const;
+    const originalId = originalType === "event" ? moment.eventId?.toString() : momentId;
+    if (!originalId) {
+      throw new AppError("The original item is unavailable", httpStatus.NOT_FOUND);
+    }
+
+    const share = await this.momentShareRepository.share(user.id, momentId, {
+      caption: payload.caption?.trim() || null,
+      taggedFriendIds,
+      originalType,
+      originalId,
+      clientRequestId: payload.clientRequestId ?? null,
+    });
 
     const interactionContext = await this.buildInteractionContext([moment], user);
 
-    return {
-      id: share._id.toString(),
-      type: "share",
-      createdAt: share.createdAt,
-      sharedAt: share.createdAt,
-      moment: await this.toResponse(
-        moment,
-        undefined,
-        user,
-        await this.getViewerFollowingIdSet(user),
-        interactionContext,
-      ),
-    };
+    const viewerFollowingIds = await this.getViewerFollowingIdSet(user);
+    return this.toShareResponse(share, moment, user, viewerFollowingIds, interactionContext);
+  }
+
+  public async listFeedShares(user: AuthUser, limit = 50): Promise<MomentTimelineItemResponse[]> {
+    const [shares, blockedIds] = await Promise.all([
+      this.momentShareRepository.findRecent(limit),
+      this.userBlockRepository.findBlockedIds(user.id),
+    ]);
+    const blocked = new Set(blockedIds);
+    const moments = await this.momentRepository.findByIds(shares.map((share) => share.momentId.toString()));
+    const momentById = new Map(moments.map((moment) => [moment._id.toString(), moment]));
+    const candidates = shares
+      .map((share) => ({ share, moment: momentById.get(share.momentId.toString()) }))
+      .filter((entry): entry is { share: IMomentShare; moment: IMoment } => Boolean(
+        entry.moment
+        && entry.moment.audience === "public"
+        && !blocked.has(entry.share.userId.toString())
+        && !blocked.has(entry.moment.userId.toString()),
+      ));
+    const visibility = await Promise.all(candidates.map(async (entry) => {
+      if (!entry.moment.isEventAnnouncement) return true;
+      const event = entry.moment.eventId
+        ? await this.eventRepository.findById(entry.moment.eventId.toString())
+        : null;
+      return Boolean(event && event.status === "published" && event.privacy === "public");
+    }));
+    const visible = candidates.filter((_entry, index) => visibility[index]);
+    const visibleMoments = visible.map((entry) => entry.moment);
+    const [viewerFollowingIds, interactionContext] = await Promise.all([
+      this.getViewerFollowingIdSet(user),
+      this.buildInteractionContext(visibleMoments, user),
+    ]);
+
+    return Promise.all(visible.map(({ share, moment }) => (
+      this.toShareResponse(share, moment, user, viewerFollowingIds, interactionContext)
+    )));
+  }
+
+  public async getMoment(momentId: string, user: AuthUser): Promise<MomentResponse> {
+    const moment = await this.momentRepository.findById(momentId);
+
+    if (!moment || moment.isEventAnnouncement || (moment.audience !== "public" && moment.userId.toString() !== user.id)) {
+      throw new AppError("Moment not found", httpStatus.NOT_FOUND);
+    }
+
+    const [author, viewerFollowingIds, interactionContext] = await Promise.all([
+      this.userRepository.findById(moment.userId.toString()),
+      this.getViewerFollowingIdSet(user),
+      this.buildInteractionContext([moment], user),
+    ]);
+
+    return this.toResponse(moment, author, user, viewerFollowingIds, interactionContext);
   }
 
   public async toggleMomentReaction(momentId: string, user: AuthUser): Promise<MomentInteractionSummaryResponse> {
@@ -374,11 +443,9 @@ export class MomentService {
       throw new AppError("User not found", httpStatus.NOT_FOUND);
     }
 
-    const [authoredMoments, shares, authoredCount, shareCount] = await Promise.all([
+    const [authoredMoments, shares] = await Promise.all([
       this.momentRepository.findByUserIdForProfile(targetUserId, includePrivate),
       this.momentShareRepository.findByUserId(targetUserId),
-      this.momentRepository.countByUserId(targetUserId, includePrivate),
-      this.momentShareRepository.countByUserId(targetUserId),
     ]);
     const sharedMomentIds = shares.map((share) => share.momentId.toString());
     const sharedMoments = await this.momentRepository.findByIds(sharedMomentIds);
@@ -409,13 +476,13 @@ export class MomentService {
           return { share, moment };
         })
         .filter((item): item is { share: IMomentShare; moment: IMoment } => Boolean(item))
-        .map(async ({ share, moment }) => ({
-          id: share._id.toString(),
-          type: "share" as const,
-          createdAt: share.createdAt,
-          sharedAt: share.createdAt,
-          moment: await this.toResponse(moment, undefined, viewer, viewerFollowingIds, interactionContext),
-        })),
+        .map(({ share, moment }) => this.toShareResponse(
+          share,
+          moment,
+          viewer,
+          viewerFollowingIds,
+          interactionContext,
+        )),
     );
 
     return {
@@ -423,8 +490,42 @@ export class MomentService {
         (firstItem, secondItem) => secondItem.createdAt.getTime() - firstItem.createdAt.getTime(),
       ),
       stats: {
-        posts: authoredCount + shareCount,
+        posts: authoredItems.length + sharedItems.length,
       },
+    };
+  }
+
+  private async toShareResponse(
+    share: IMomentShare,
+    moment: IMoment,
+    viewer?: AuthUser,
+    viewerFollowingIds = new Set<string>(),
+    interactionContext?: MomentInteractionContext,
+  ): Promise<MomentTimelineItemResponse> {
+    const taggedIds = (share.taggedFriendIds ?? []).map((id) => id.toString());
+    const userIds = [...new Set([share.userId.toString(), ...taggedIds])];
+    const users = await this.userRepository.findByIds(userIds);
+    const userById = new Map(users.map((entry) => [entry._id.toString(), entry]));
+    const originalType = moment.isEventAnnouncement ? "event" : (share.originalType ?? "post");
+    const originalId = share.originalId?.toString()
+      ?? (originalType === "event" ? moment.eventId?.toString() : moment._id.toString());
+
+    return {
+      id: share._id.toString(),
+      type: "share",
+      createdAt: share.createdAt,
+      sharedAt: share.createdAt,
+      repostCaption: share.caption ?? null,
+      taggedFriends: (await Promise.all(taggedIds.map((id) => (
+        this.toAuthorResponse(userById.get(id) ?? null, viewer, viewerFollowingIds)
+      )))).filter((entry): entry is MomentAuthorResponse => Boolean(entry)),
+      sharedBy: await this.toAuthorResponse(
+        userById.get(share.userId.toString()) ?? null,
+        viewer,
+        viewerFollowingIds,
+      ),
+      originalItem: originalId ? { type: originalType, id: originalId } : undefined,
+      moment: await this.toResponse(moment, undefined, viewer, viewerFollowingIds, interactionContext),
     };
   }
 

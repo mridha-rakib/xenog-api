@@ -38,6 +38,11 @@ const chatMessageSchema = new Schema<IChatMessage>(
       type: Schema.Types.Mixed,
       default: null,
     },
+    clientMessageId: {
+      type: String,
+      trim: true,
+      default: null,
+    },
     readAt: {
       type: Date,
       default: null,
@@ -56,5 +61,9 @@ const chatMessageSchema = new Schema<IChatMessage>(
 
 chatMessageSchema.index({ conversationId: 1, createdAt: -1, _id: -1 });
 chatMessageSchema.index({ recipientId: 1, readAt: 1, createdAt: -1 });
+chatMessageSchema.index(
+  { senderId: 1, clientMessageId: 1 },
+  { unique: true, partialFilterExpression: { clientMessageId: { $type: "string" } } },
+);
 
 export const ChatMessageModel = model<IChatMessage>("ChatMessage", chatMessageSchema);

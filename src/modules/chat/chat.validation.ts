@@ -29,6 +29,10 @@ export const chatMessageAttachmentSchema = z.discriminatedUnion("type", [
     type: z.literal("event"),
     eventId: objectId,
   }).strict(),
+  z.object({
+    type: z.literal("post"),
+    postId: objectId,
+  }).strict(),
 ]);
 
 export const chatMessageBodySchema = z
@@ -36,6 +40,7 @@ export const chatMessageBodySchema = z
     type: z.enum(chatMessageTypes).optional(),
     text: z.string().trim().max(2000).optional(),
     attachment: chatMessageAttachmentSchema.optional(),
+    clientMessageId: z.string().trim().min(8).max(100).regex(/^[a-zA-Z0-9._:-]+$/).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -72,6 +77,7 @@ export const chatValidation = {
     query: z.object({
       limit: z.coerce.number().int().min(1).max(500).optional(),
       search: z.string().trim().max(120).optional(),
+      includeHidden: z.enum(["true", "false"]).transform((value) => value === "true").optional(),
     }),
   }),
   listDirectMessageHistory: z.object({

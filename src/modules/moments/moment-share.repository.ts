@@ -5,14 +5,24 @@ import { Types } from "mongoose";
 const toObjectIds = (ids: string[]) => ids.map((id) => new Types.ObjectId(id));
 
 export class MomentShareRepository {
-  public async share(userId: string, momentId: string): Promise<IMomentShare> {
+  public async share(userId: string, momentId: string, payload: {
+    caption?: string | null;
+    taggedFriendIds?: string[];
+    originalType: "post" | "event";
+    originalId: string;
+    clientRequestId?: string | null;
+  }): Promise<IMomentShare> {
     const share = await MomentShareModel.findOneAndUpdate(
       { userId, momentId },
-      { $setOnInsert: { userId, momentId } },
-      { new: true, upsert: true, runValidators: true },
+      { $setOnInsert: { userId, momentId, ...payload } },
+      { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
     );
 
     return share;
+  }
+
+  public async findRecent(limit = 50): Promise<IMomentShare[]> {
+    return MomentShareModel.find().sort({ createdAt: -1 }).limit(limit);
   }
 
   public async findByUserId(userId: string): Promise<IMomentShare[]> {

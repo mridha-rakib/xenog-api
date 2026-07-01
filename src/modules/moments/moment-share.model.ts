@@ -15,6 +15,11 @@ const momentShareSchema = new Schema<IMomentShare>(
       required: true,
       index: true,
     },
+    caption: { type: String, trim: true, maxlength: 2000, default: null },
+    taggedFriendIds: [{ type: Schema.Types.ObjectId, ref: "User" }],
+    originalType: { type: String, enum: ["post", "event"], default: "post" },
+    originalId: { type: Schema.Types.ObjectId, required: false },
+    clientRequestId: { type: String, trim: true, maxlength: 100, default: null },
   },
   {
     timestamps: true,

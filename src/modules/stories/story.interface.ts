@@ -27,6 +27,36 @@ export interface IStory {
   updatedAt: Date;
 }
 
+export interface IStoryReaction {
+  _id: Types.ObjectId;
+  userId: Types.ObjectId;
+  storyId: Types.ObjectId;
+  type: "like";
+  expiresAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface IStoryView {
+  _id: Types.ObjectId;
+  userId: Types.ObjectId;
+  storyId: Types.ObjectId;
+  expiresAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface IStoryComment {
+  _id: Types.ObjectId;
+  userId: Types.ObjectId;
+  storyId: Types.ObjectId;
+  parentCommentId?: Types.ObjectId | null;
+  text: string;
+  expiresAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface CreateStoryDto {
   mediaType?: StoryMediaType;
   mediaSource?: StoryMediaSource;
@@ -77,7 +107,26 @@ export interface StoryResponse {
   textBackground?: StoryTextBackground | null;
   textOverlay?: StoryTextOverlay | null;
   audience: StoryAudienceType;
+  viewsCount: number;
+  reactionsCount: number;
+  commentsCount: number;
+  isReacted: boolean;
+  isOwner: boolean;
+  expiresInSeconds: number;
   expiresAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface StoryCommentResponse {
+  id: string;
+  storyId: string;
+  parentCommentId?: string | null;
+  author?: StoryAuthorResponse | null;
+  text: string;
+  likesCount: number;
+  isLiked: boolean;
+  replies: StoryCommentResponse[];
   createdAt: Date;
   updatedAt: Date;
 }

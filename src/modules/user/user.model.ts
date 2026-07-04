@@ -157,6 +157,14 @@ const userSchema = new Schema<IUser>(
       type: Date,
       select: false,
     },
+    passwordResetCodeHash: {
+      type: String,
+      select: false,
+    },
+    passwordResetExpiresAt: {
+      type: Date,
+      select: false,
+    },
   },
   {
     timestamps: true,
@@ -174,6 +182,8 @@ const userSchema = new Schema<IUser>(
         delete record.passwordHash;
         delete record.emailVerificationCodeHash;
         delete record.emailVerificationExpiresAt;
+        delete record.passwordResetCodeHash;
+        delete record.passwordResetExpiresAt;
 
         return record;
       },

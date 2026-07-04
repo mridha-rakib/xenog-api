@@ -617,12 +617,15 @@ export class EventService {
     const hostById = await this.getHostById(events);
     const interactionMoments = await Promise.all(events.map((event) => this.ensureEventInteractionMoment(event)));
     const momentIds = interactionMoments.map((moment) => moment._id.toString());
-    const [likeCounts, commentCounts, shareCounts, likedMomentIds] = await Promise.all([
+    const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds] = await Promise.all([
       this.momentReactionRepository.countByMomentIds(momentIds),
       this.momentCommentRepository.countByMomentIds(momentIds),
       this.momentShareRepository.countByMomentIds(momentIds),
       user
         ? this.momentReactionRepository.findLikedMomentIds(user.id, momentIds)
+        : Promise.resolve(new Set<string>()),
+      user
+        ? this.momentSaveRepository.findSavedMomentIds(user.id, momentIds)
         : Promise.resolve(new Set<string>()),
     ]);
 
@@ -637,6 +640,7 @@ export class EventService {
         commentsCount: commentCounts.get(interactionMomentId) ?? 0,
         sharesCount: shareCounts.get(interactionMomentId) ?? 0,
         isLiked: likedMomentIds.has(interactionMomentId),
+        isSaved: savedMomentIds.has(interactionMomentId),
       };
     });
   }

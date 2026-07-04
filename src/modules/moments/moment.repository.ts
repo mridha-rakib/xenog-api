@@ -4,6 +4,8 @@ import type { CreateMomentDto, IMoment, MomentFeedQuery } from "./moment.interfa
 interface CreateMomentRecord extends CreateMomentDto {
   userId: string;
   hashtags: string[];
+  sourceStoryId?: string | null;
+  sourceClientRequestId?: string | null;
 }
 
 export class MomentRepository {
@@ -19,8 +21,34 @@ export class MomentRepository {
       eventId: payload.eventId ?? null,
       isEventAnnouncement: false,
       eventCode: payload.eventCode ?? null,
+      sourceStoryId: payload.sourceStoryId ?? null,
+      sourceClientRequestId: payload.sourceClientRequestId ?? null,
       mediaItems: payload.mediaItems ?? [],
     });
+  }
+
+  public async createStoryShare(payload: CreateMomentRecord & { sourceStoryId: string }): Promise<IMoment> {
+    return MomentModel.findOneAndUpdate(
+      { userId: payload.userId, sourceStoryId: payload.sourceStoryId },
+      {
+        $setOnInsert: {
+          userId: payload.userId,
+          mode: payload.mode,
+          caption: payload.caption ?? null,
+          hashtags: payload.hashtags,
+          audience: payload.audience,
+          taggedPeople: payload.taggedPeople ?? [],
+          eventTitle: payload.eventTitle ?? null,
+          eventId: payload.eventId ?? null,
+          isEventAnnouncement: false,
+          eventCode: payload.eventCode ?? null,
+          sourceStoryId: payload.sourceStoryId,
+          sourceClientRequestId: payload.sourceClientRequestId ?? null,
+          mediaItems: payload.mediaItems ?? [],
+        },
+      },
+      { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
+    );
   }
 
   public async ensureEventAnnouncement(payload: {

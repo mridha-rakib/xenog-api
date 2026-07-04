@@ -18,5 +18,13 @@ router.post(
 
 router.get("/", catchAsync(controller.listFeedStories));
 router.get("/mine", catchAsync(controller.listMyStories));
+router.get("/discover", catchAsync(controller.listDiscoverStories));
+router.get("/friends", catchAsync(controller.listFriendStories));
+router.post("/:id/view", validate(storyValidation.storyId), catchAsync(controller.recordView));
+router.post("/:id/reaction", validate(storyValidation.storyId), catchAsync(controller.toggleReaction));
+router.get("/:id/comments", validate(storyValidation.storyId), catchAsync(controller.listComments));
+router.post("/:id/comments", validate(storyValidation.createComment), catchAsync(controller.createComment));
+router.post("/:id/share", validate(storyValidation.shareStory), catchAsync(controller.shareToFeed));
+router.delete("/:id", validate(storyValidation.storyId), catchAsync(controller.deleteStory));
 
 export const storyRoutes = router;

@@ -40,4 +40,43 @@ export class StoryController {
       },
     });
   };
+
+  public listDiscoverStories = async (req: Request, res: Response) => {
+    const stories = await this.storyService.listDiscoverStories(req.authUser as AuthUser);
+    ApiResponse.success(res, { message: "Stories retrieved", data: { stories } });
+  };
+  public listFriendStories = async (req: Request, res: Response) => {
+    const stories = await this.storyService.listFriendStories(req.authUser as AuthUser);
+    ApiResponse.success(res, { message: "Stories retrieved", data: { stories } });
+  };
+  public recordView = async (req: Request, res: Response) => {
+    const { id } = req.params as { id: string };
+    const interaction = await this.storyService.recordView(id, req.authUser as AuthUser);
+    ApiResponse.success(res, { message: "Story view recorded", data: { interaction } });
+  };
+  public toggleReaction = async (req: Request, res: Response) => {
+    const { id } = req.params as { id: string };
+    const interaction = await this.storyService.toggleReaction(id, req.authUser as AuthUser);
+    ApiResponse.success(res, { message: "Story reaction updated", data: { interaction } });
+  };
+  public deleteStory = async (req: Request, res: Response) => {
+    const { id } = req.params as { id: string };
+    await this.storyService.deleteStory(id, req.authUser as AuthUser);
+    ApiResponse.success(res, { message: "Story deleted" });
+  };
+  public listComments = async (req: Request, res: Response) => {
+    const { id } = req.params as { id: string };
+    const comments = await this.storyService.listComments(id, req.authUser as AuthUser);
+    ApiResponse.success(res, { message: "Comments retrieved", data: { comments } });
+  };
+  public createComment = async (req: Request, res: Response) => {
+    const { id } = req.params as { id: string };
+    const result = await this.storyService.createComment(id, req.authUser as AuthUser, req.body);
+    ApiResponse.success(res, { statusCode: httpStatus.CREATED, message: "Comment created", data: result });
+  };
+  public shareToFeed = async (req: Request, res: Response) => {
+    const { id } = req.params as { id: string };
+    const share = await this.storyService.shareToFeed(id, req.authUser as AuthUser, req.body);
+    ApiResponse.success(res, { statusCode: httpStatus.CREATED, message: "Story shared to feed", data: { share } });
+  };
 }

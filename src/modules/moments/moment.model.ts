@@ -113,6 +113,19 @@ const momentSchema = new Schema<IMoment>(
       maxlength: 200,
       default: null,
     },
+    sourceStoryId: {
+      type: Schema.Types.ObjectId,
+      ref: "Story",
+      default: null,
+      index: true,
+      sparse: true,
+    },
+    sourceClientRequestId: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+      default: null,
+    },
     mediaItems: {
       type: [momentMediaItemSchema],
       default: [],
@@ -133,5 +146,9 @@ momentSchema.index(
 );
 // Supports isEventAnnouncement filter on profile and post-count queries
 momentSchema.index({ userId: 1, isEventAnnouncement: 1, createdAt: -1 });
+momentSchema.index(
+  { userId: 1, sourceStoryId: 1 },
+  { unique: true, partialFilterExpression: { sourceStoryId: { $type: "objectId" } } },
+);
 
 export const MomentModel = model<IMoment>("Moment", momentSchema);

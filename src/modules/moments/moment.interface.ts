@@ -33,6 +33,8 @@ export interface IMoment {
   eventId?: Types.ObjectId | null;
   isEventAnnouncement?: boolean;
   eventCode?: string | null;
+  sourceStoryId?: Types.ObjectId | null;
+  sourceClientRequestId?: string | null;
   mediaItems: MomentMediaItem[];
   createdAt: Date;
   updatedAt: Date;

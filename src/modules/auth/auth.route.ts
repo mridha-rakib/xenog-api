@@ -19,6 +19,17 @@ router.post(
   validate(authValidation.resendVerification),
   catchAsync(controller.resendVerificationCode),
 );
+router.post(
+  "/forgot-password",
+  validate(authValidation.requestPasswordReset),
+  catchAsync(controller.requestPasswordReset),
+);
+router.post(
+  "/validate-reset-code",
+  validate(authValidation.validatePasswordResetCode),
+  catchAsync(controller.validatePasswordResetCode),
+);
+router.post("/reset-password", validate(authValidation.resetPassword), catchAsync(controller.resetPassword));
 router.get("/me", authenticate, catchAsync(controller.me));
 router.patch("/me", authenticate, validate(authValidation.updateProfile), catchAsync(controller.updateMe));
 router.delete("/me", authenticate, catchAsync(controller.deleteMe));

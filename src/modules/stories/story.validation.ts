@@ -13,6 +13,22 @@ const optionalText = (label: string, maxLength: number) =>
     .transform((value) => value || null);
 
 export const storyValidation = {
+  storyId: z.object({ params: z.object({ id: z.string().regex(/^[a-f\d]{24}$/i, "Invalid story id") }) }),
+  createComment: z.object({
+    params: z.object({ id: z.string().regex(/^[a-f\d]{24}$/i, "Invalid story id") }),
+    body: z.object({
+      text: z.string().trim().min(1).max(2000),
+      parentCommentId: z.string().regex(/^[a-f\d]{24}$/i).optional().nullable(),
+    }).strict(),
+  }),
+  shareStory: z.object({
+    params: z.object({ id: z.string().regex(/^[a-f\d]{24}$/i, "Invalid story id") }),
+    body: z.object({
+      caption: optionalText("Repost caption", 2000),
+      taggedFriendIds: z.array(z.string().regex(/^[a-f\d]{24}$/i, "Invalid tagged friend id")).max(20).optional(),
+      clientRequestId: optionalText("Client request id", 120),
+    }).strict(),
+  }),
   createStory: z.object({
     body: z
       .object({

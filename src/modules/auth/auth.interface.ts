@@ -29,6 +29,21 @@ export interface ResendVerificationDto {
   email: string;
 }
 
+export interface RequestPasswordResetDto {
+  email: string;
+}
+
+export interface ValidatePasswordResetCodeDto {
+  email: string;
+  code: string;
+}
+
+export interface ResetPasswordDto {
+  email: string;
+  code: string;
+  newPassword: string;
+}
+
 export interface AuthUser {
   id: string;
   name: string;
@@ -74,6 +89,10 @@ export interface AuthSession {
 export interface RegistrationResult {
   email: string;
   verificationRequired: boolean;
+}
+
+export interface PasswordResetRequestResult {
+  email: string;
 }
 
 export interface UpdateProfileDto {

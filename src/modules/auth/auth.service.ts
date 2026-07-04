@@ -12,11 +12,15 @@ import type {
   AuthUser,
   ChangePasswordDto,
   LoginDto,
+  PasswordResetRequestResult,
   RefreshTokenDto,
   RegisterDto,
   RegistrationResult,
+  RequestPasswordResetDto,
+  ResetPasswordDto,
   ResendVerificationDto,
   UpdateProfileDto,
+  ValidatePasswordResetCodeDto,
   VerifyEmailDto,
 } from "./auth.interface.js";
 
@@ -66,6 +70,7 @@ const toAuthUser = (user: IUser): AuthUser => ({
 });
 
 const VERIFICATION_CODE_TTL_MS = 10 * 60 * 1000;
+const PASSWORD_RESET_CODE_TTL_MS = 10 * 60 * 1000;
 
 export class AuthService {
   public constructor(
@@ -232,6 +237,63 @@ export class AuthService {
     return this.issueVerificationCode(user);
   }
 
+  public async requestPasswordReset(payload: RequestPasswordResetDto): Promise<PasswordResetRequestResult> {
+    const normalizedEmail = payload.email.trim().toLowerCase();
+    const user = await this.userRepository.findByEmailWithPasswordReset(normalizedEmail);
+
+    if (!user?.passwordHash || !user.isActive) {
+      return {
+        email: normalizedEmail,
+      };
+    }
+
+    const resetCode = this.generatePasswordResetCode();
+    const passwordResetCodeHash = await bcrypt.hash(resetCode, 12);
+    const updatedUser = await this.userRepository.updatePasswordResetById(user._id.toString(), {
+      passwordResetCodeHash,
+      passwordResetExpiresAt: new Date(Date.now() + PASSWORD_RESET_CODE_TTL_MS),
+    });
+
+    if (!updatedUser) {
+      return {
+        email: normalizedEmail,
+      };
+    }
+
+    await this.emailService.sendPasswordResetCode({
+      to: updatedUser.email,
+      name: updatedUser.name,
+      code: resetCode,
+    });
+
+    return {
+      email: updatedUser.email,
+    };
+  }
+
+  public async validatePasswordResetCode(payload: ValidatePasswordResetCodeDto): Promise<void> {
+    await this.getValidPasswordResetUser(payload.email, payload.code);
+  }
+
+  public async resetPassword(payload: ResetPasswordDto): Promise<void> {
+    const user = await this.getValidPasswordResetUser(payload.email, payload.code);
+
+    if (!user.passwordResetCodeHash) {
+      throw new AppError("Invalid or expired reset code", httpStatus.BAD_REQUEST);
+    }
+
+    const passwordHash = await bcrypt.hash(payload.newPassword, 12);
+    const updatedUser = await this.userRepository.updatePasswordWithResetById(
+      user._id.toString(),
+      passwordHash,
+      user.passwordResetCodeHash,
+    );
+
+    if (!updatedUser) {
+      throw new AppError("Invalid or expired reset code", httpStatus.BAD_REQUEST);
+    }
+  }
+
   public async getCurrentUser(userId: string): Promise<AuthUser> {
     const user = await this.userRepository.findById(userId);
 
@@ -390,6 +452,31 @@ export class AuthService {
 
   private generateVerificationCode(): string {
     return randomInt(1000, 10000).toString();
+  }
+
+  private generatePasswordResetCode(): string {
+    return randomInt(1000, 10000).toString();
+  }
+
+  private async getValidPasswordResetUser(email: string, code: string): Promise<IUser> {
+    const user = await this.userRepository.findByEmailWithPasswordReset(email);
+
+    if (!user?.passwordHash || !user.passwordResetCodeHash || !user.passwordResetExpiresAt || !user.isActive) {
+      throw new AppError("Invalid or expired reset code", httpStatus.BAD_REQUEST);
+    }
+
+    if (user.passwordResetExpiresAt.getTime() < Date.now()) {
+      await this.userRepository.clearPasswordResetById(user._id.toString());
+      throw new AppError("Invalid or expired reset code", httpStatus.BAD_REQUEST);
+    }
+
+    const codeMatches = await bcrypt.compare(code, user.passwordResetCodeHash);
+
+    if (!codeMatches) {
+      throw new AppError("Invalid or expired reset code", httpStatus.BAD_REQUEST);
+    }
+
+    return user;
   }
 
   private async issueVerificationCode(user: IUser): Promise<RegistrationResult> {

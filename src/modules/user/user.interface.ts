@@ -36,6 +36,8 @@ export interface IUser {
   deletedAt?: Date | null;
   emailVerificationCodeHash?: string;
   emailVerificationExpiresAt?: Date;
+  passwordResetCodeHash?: string;
+  passwordResetExpiresAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }

@@ -204,6 +204,7 @@ export interface EventResponse {
   commentsCount?: number;
   sharesCount?: number;
   isLiked?: boolean;
+  isSaved?: boolean;
   status: EventStatus;
   name?: string | null;
   description?: string | null;

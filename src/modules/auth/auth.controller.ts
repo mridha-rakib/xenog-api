@@ -73,6 +73,31 @@ export class AuthController {
     });
   };
 
+  public requestPasswordReset = async (req: Request, res: Response): Promise<void> => {
+    const result = await this.authService.requestPasswordReset(req.body);
+
+    ApiResponse.success(res, {
+      message: "If an account exists for this email, a password reset code has been sent.",
+      data: result,
+    });
+  };
+
+  public validatePasswordResetCode = async (req: Request, res: Response): Promise<void> => {
+    await this.authService.validatePasswordResetCode(req.body);
+
+    ApiResponse.success(res, {
+      message: "Reset code verified",
+    });
+  };
+
+  public resetPassword = async (req: Request, res: Response): Promise<void> => {
+    await this.authService.resetPassword(req.body);
+
+    ApiResponse.success(res, {
+      message: "Password reset successfully",
+    });
+  };
+
   public me = async (req: Request, res: Response): Promise<void> => {
     ApiResponse.success(res, {
       message: "Current user retrieved",

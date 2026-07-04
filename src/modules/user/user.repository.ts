@@ -7,6 +7,8 @@ type UserCreateRecord = Omit<CreateUserDto, "password"> & {
   emailVerified?: boolean;
   emailVerificationCodeHash?: string;
   emailVerificationExpiresAt?: Date;
+  passwordResetCodeHash?: string;
+  passwordResetExpiresAt?: Date;
 };
 
 export class UserRepository {
@@ -52,6 +54,12 @@ export class UserRepository {
     );
   }
 
+  public async findByEmailWithPasswordReset(email: string): Promise<IUser | null> {
+    return UserModel.findOne({ email: email.toLowerCase() }).select(
+      "+passwordHash +passwordResetCodeHash +passwordResetExpiresAt",
+    );
+  }
+
   public async findByUsername(username: string): Promise<IUser | null> {
     return UserModel.findOne({ username: username.toLowerCase() });
   }
@@ -88,6 +96,53 @@ export class UserRepository {
         $unset: {
           emailVerificationCodeHash: "",
           emailVerificationExpiresAt: "",
+        },
+      },
+      { new: true, runValidators: true },
+    );
+  }
+
+  public async updatePasswordResetById(
+    id: string,
+    reset: {
+      passwordResetCodeHash: string;
+      passwordResetExpiresAt: Date;
+    },
+  ): Promise<IUser | null> {
+    return UserModel.findByIdAndUpdate(id, reset, { new: true, runValidators: true });
+  }
+
+  public async clearPasswordResetById(id: string): Promise<IUser | null> {
+    return UserModel.findByIdAndUpdate(
+      id,
+      {
+        $unset: {
+          passwordResetCodeHash: "",
+          passwordResetExpiresAt: "",
+        },
+      },
+      { new: true, runValidators: true },
+    );
+  }
+
+  public async updatePasswordWithResetById(
+    id: string,
+    passwordHash: string,
+    currentPasswordResetCodeHash: string,
+  ): Promise<IUser | null> {
+    return UserModel.findOneAndUpdate(
+      {
+        _id: id,
+        passwordResetCodeHash: currentPasswordResetCodeHash,
+      },
+      {
+        $set: {
+          passwordHash,
+          passwordChangedAt: new Date(),
+        },
+        $unset: {
+          passwordResetCodeHash: "",
+          passwordResetExpiresAt: "",
         },
       },
       { new: true, runValidators: true },
@@ -209,6 +264,8 @@ export class UserRepository {
           passwordHash: "",
           emailVerificationCodeHash: "",
           emailVerificationExpiresAt: "",
+          passwordResetCodeHash: "",
+          passwordResetExpiresAt: "",
         },
       },
       { new: true, runValidators: true },

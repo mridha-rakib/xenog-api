@@ -32,6 +32,19 @@ const changePasswordBody = z.object({
   newPassword: z.string().min(8).max(128),
 });
 
+const requestPasswordResetBody = z.object({
+  email: z.string().trim().email(),
+});
+
+const validatePasswordResetCodeBody = z.object({
+  email: z.string().trim().email(),
+  code: z.string().trim().regex(/^\d{4}$/, "Reset code must be 4 digits"),
+});
+
+const resetPasswordBody = validatePasswordResetCodeBody.extend({
+  newPassword: z.string().min(8).max(128),
+});
+
 const nullableString = (max: number) => z.string().trim().max(max).nullable().optional();
 const currentLocation = z
   .object({
@@ -88,6 +101,15 @@ export const authValidation = {
     body: z.object({
       email: z.string().trim().email(),
     }),
+  }),
+  requestPasswordReset: z.object({
+    body: requestPasswordResetBody,
+  }),
+  validatePasswordResetCode: z.object({
+    body: validatePasswordResetCodeBody,
+  }),
+  resetPassword: z.object({
+    body: resetPasswordBody,
   }),
   updateProfile: z.object({
     body: updateProfileBody,

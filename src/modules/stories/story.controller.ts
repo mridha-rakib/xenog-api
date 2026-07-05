@@ -41,6 +41,12 @@ export class StoryController {
     });
   };
 
+  public listUserStories = async (req: Request, res: Response) => {
+    const { userId } = req.params as { userId: string };
+    const stories = await this.storyService.listUserStories(userId, req.authUser as AuthUser);
+    ApiResponse.success(res, { message: "Stories retrieved", data: { stories } });
+  };
+
   public listDiscoverStories = async (req: Request, res: Response) => {
     const stories = await this.storyService.listDiscoverStories(req.authUser as AuthUser);
     ApiResponse.success(res, { message: "Stories retrieved", data: { stories } });
@@ -48,6 +54,18 @@ export class StoryController {
   public listFriendStories = async (req: Request, res: Response) => {
     const stories = await this.storyService.listFriendStories(req.authUser as AuthUser);
     ApiResponse.success(res, { message: "Stories retrieved", data: { stories } });
+  };
+
+  public getStoryDetails = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const story = await this.storyService.getStoryDetails(id, req.authUser as AuthUser);
+
+    ApiResponse.success(res, {
+      message: "Story retrieved",
+      data: {
+        story,
+      },
+    });
   };
   public recordView = async (req: Request, res: Response) => {
     const { id } = req.params as { id: string };

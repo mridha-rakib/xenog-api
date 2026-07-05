@@ -83,6 +83,11 @@ export class StoryService {
     return Promise.all(stories.map((story) => this.toResponse(story, user)));
   }
 
+  public async listUserStories(userId: string, viewer: AuthUser): Promise<StoryResponse[]> {
+    const stories = await this.storyRepository.findActiveByUserId(userId);
+    return Promise.all(stories.map((story) => this.toResponse(story, viewer)));
+  }
+
   public async listDiscoverStories(user: AuthUser): Promise<StoryResponse[]> {
     const stories = await this.storyRepository.findAllActive();
     return Promise.all(stories.map((story) => this.toResponse(story, user)));
@@ -92,6 +97,11 @@ export class StoryService {
     const friendIds = await this.userFollowRepository.findMutualFriendIds(user.id);
     const stories = await this.storyRepository.findActiveByViewerNetwork(friendIds);
     return Promise.all(stories.map((story) => this.toResponse(story, user)));
+  }
+
+  public async getStoryDetails(id: string, user: AuthUser): Promise<StoryResponse> {
+    const story = await this.getActiveStory(id);
+    return this.toResponse(story, user);
   }
 
   public async recordView(id: string, user: AuthUser) {

@@ -14,6 +14,7 @@ const optionalText = (label: string, maxLength: number) =>
 
 export const storyValidation = {
   storyId: z.object({ params: z.object({ id: z.string().regex(/^[a-f\d]{24}$/i, "Invalid story id") }) }),
+  userId: z.object({ params: z.object({ userId: z.string().regex(/^[a-f\d]{24}$/i, "Invalid user id") }) }),
   createComment: z.object({
     params: z.object({ id: z.string().regex(/^[a-f\d]{24}$/i, "Invalid story id") }),
     body: z.object({

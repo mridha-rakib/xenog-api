@@ -1,3 +1,7 @@
+import dns from "node:dns";
+
+dns.setServers(["8.8.8.8", "1.1.1.1"]);
+
 import { createServer } from "node:http";
 import { env } from "./config/env.js";
 import { Database } from "./config/database.js";

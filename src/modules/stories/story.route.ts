@@ -20,6 +20,8 @@ router.get("/", catchAsync(controller.listFeedStories));
 router.get("/mine", catchAsync(controller.listMyStories));
 router.get("/discover", catchAsync(controller.listDiscoverStories));
 router.get("/friends", catchAsync(controller.listFriendStories));
+router.get("/user/:userId", validate(storyValidation.userId), catchAsync(controller.listUserStories));
+router.get("/:id", validate(storyValidation.storyId), catchAsync(controller.getStoryDetails));
 router.post("/:id/view", validate(storyValidation.storyId), catchAsync(controller.recordView));
 router.post("/:id/reaction", validate(storyValidation.storyId), catchAsync(controller.toggleReaction));
 router.get("/:id/comments", validate(storyValidation.storyId), catchAsync(controller.listComments));

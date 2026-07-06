@@ -11,11 +11,60 @@ interface CreateEarningRecord {
   platformFeeAmount: number;
   netAmount: number;
   status: CreatorEarningStatus;
+  eligibleAt?: Date | null;
 }
 
 export class CreatorEarningRepository {
   public async create(payload: CreateEarningRecord): Promise<ICreatorEarning> {
     return CreatorEarningModel.create(payload);
+  }
+
+  public async splitEligibleEarningForAmount(
+    earning: ICreatorEarning,
+    amount: number,
+  ): Promise<ICreatorEarning> {
+    const sourceNet = earning.netAmount;
+
+    if (amount <= 0 || amount >= sourceNet) {
+      throw new Error("Split amount must be greater than zero and less than earning amount");
+    }
+
+    const ratio = amount / sourceNet;
+    const splitGross = Math.round(earning.grossAmount * ratio * 100) / 100;
+    const splitPlatformFee = Math.round(earning.platformFeeAmount * ratio * 100) / 100;
+    const splitNet = Math.round(amount * 100) / 100;
+    const remainingGross = Math.round((earning.grossAmount - splitGross) * 100) / 100;
+    const remainingPlatformFee = Math.round((earning.platformFeeAmount - splitPlatformFee) * 100) / 100;
+    const remainingNet = Math.round((earning.netAmount - splitNet) * 100) / 100;
+
+    const updatedSource = await CreatorEarningModel.findOneAndUpdate(
+      { _id: earning._id, status: "eligible", netAmount: sourceNet },
+      {
+        $set: {
+          grossAmount: remainingGross,
+          platformFeeAmount: remainingPlatformFee,
+          netAmount: remainingNet,
+        },
+      },
+      { runValidators: true },
+    );
+
+    if (!updatedSource) {
+      throw new Error("Eligible earning is no longer available for withdrawal");
+    }
+
+    return CreatorEarningModel.create({
+      creatorUserId: earning.creatorUserId,
+      orderId: earning.orderId,
+      eventId: earning.eventId ?? null,
+      itemType: earning.itemType,
+      grossAmount: splitGross,
+      platformFeePercent: earning.platformFeePercent,
+      platformFeeAmount: splitPlatformFee,
+      netAmount: splitNet,
+      status: "eligible",
+      eligibleAt: earning.eligibleAt ?? null,
+    });
   }
 
   public async findByCreatorUserId(creatorUserId: string): Promise<ICreatorEarning[]> {

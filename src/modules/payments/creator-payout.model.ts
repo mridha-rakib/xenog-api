@@ -8,7 +8,6 @@ const creatorPayoutSchema = new Schema<ICreatorPayout>(
       type: Schema.Types.ObjectId,
       ref: "User",
       required: true,
-      index: true,
     },
     earningIds: {
       type: [Schema.Types.ObjectId],
@@ -72,5 +71,16 @@ const creatorPayoutSchema = new Schema<ICreatorPayout>(
 
 creatorPayoutSchema.index({ creatorUserId: 1, createdAt: -1 });
 creatorPayoutSchema.index({ status: 1, scheduledDate: 1 });
+creatorPayoutSchema.index(
+  { creatorUserId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { status: { $in: ["pending", "processing"] } },
+  },
+);
 
 export const CreatorPayoutModel = model<ICreatorPayout>("CreatorPayout", creatorPayoutSchema);
+
+export const ensureCreatorPayoutIndexes = async (): Promise<void> => {
+  await CreatorPayoutModel.syncIndexes();
+};

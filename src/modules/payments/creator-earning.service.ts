@@ -105,35 +105,47 @@ export class CreatorEarningService {
     let selected: ICreatorEarning[];
 
     if (dto.amount !== undefined) {
-      if (dto.amount <= 0) {
+      const requestedAmount = round2(dto.amount);
+
+      if (requestedAmount <= 0) {
         throw new AppError("Withdrawal amount must be greater than zero", httpStatus.BAD_REQUEST);
       }
-      if (dto.amount > eligibleTotal) {
+      if (requestedAmount > eligibleTotal) {
         throw new AppError(
-          `Requested amount $${dto.amount.toFixed(2)} exceeds available balance of $${eligibleTotal.toFixed(2)}`,
+          `Requested amount $${requestedAmount.toFixed(2)} exceeds available balance of $${eligibleTotal.toFixed(2)}`,
           httpStatus.BAD_REQUEST,
           { code: "INSUFFICIENT_BALANCE" },
         );
       }
 
-      // Greedy selection: smallest earnings first for best fit
+      // Greedy selection: smallest earnings first. Split the final earning if needed
+      // so manual withdrawals can request an exact dollar amount.
       const sorted = [...eligible].sort((a, b) => a.netAmount - b.netAmount);
       selected = [];
-      let running = 0;
+      let remaining = requestedAmount;
 
       for (const earning of sorted) {
-        const next = round2(running + earning.netAmount);
-        if (next <= dto.amount) {
+        if (remaining <= 0) break;
+
+        if (earning.netAmount <= remaining) {
           selected.push(earning);
-          running = next;
+          remaining = round2(remaining - earning.netAmount);
+          continue;
+        }
+
+        if (remaining > 0) {
+          const splitEarning = await this.earningRepository.splitEligibleEarningForAmount(earning, remaining);
+          selected.push(splitEarning);
+          remaining = 0;
+          break;
         }
       }
 
-      if (selected.length === 0) {
+      if (selected.length === 0 || remaining > 0) {
         throw new AppError(
-          "Cannot match the requested amount to available earnings. Try withdrawing the full available balance.",
+          "Unable to reserve the requested withdrawal amount. Please refresh and try again.",
           httpStatus.BAD_REQUEST,
-          { code: "AMOUNT_NOT_SPLITTABLE" },
+          { code: "WITHDRAWAL_RESERVATION_FAILED" },
         );
       }
     } else {
@@ -149,15 +161,29 @@ export class CreatorEarningService {
     const earningIds = selected.map((e) => e._id.toString());
 
     // 6. Create payout record in "pending" state — scheduler processes Stripe transfer asynchronously
-    const payout = await this.payoutRepository.create({
-      creatorUserId: user.id,
-      earningIds,
-      totalAmount,
-      currency,
-      payoutType,
-      status: "pending",
-      scheduledDate: new Date(),
-    });
+    let payout: ICreatorPayout;
+
+    try {
+      payout = await this.payoutRepository.create({
+        creatorUserId: user.id,
+        earningIds,
+        totalAmount,
+        currency,
+        payoutType,
+        status: "pending",
+        scheduledDate: new Date(),
+      });
+    } catch (error) {
+      if ((error as { code?: number }).code === 11000) {
+        throw new AppError(
+          "A withdrawal is already in progress. Please wait for it to complete before requesting another.",
+          httpStatus.CONFLICT,
+          { code: "WITHDRAWAL_IN_PROGRESS" },
+        );
+      }
+
+      throw error;
+    }
 
     // 7. Reserve earnings immediately so they can't be double-withdrawn
     await this.earningRepository.markWithdrawn(earningIds, payout._id.toString());

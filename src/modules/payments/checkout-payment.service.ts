@@ -86,7 +86,7 @@ export class CheckoutPaymentService {
       const sold = sales[ticket.id] ?? 0;
       stats[ticket.id] = {
         sold,
-        available: Math.max(0, ticket.capacity - sold),
+        available: Math.max(0, ticket.availableCount ?? ticket.capacity - sold),
         capacity: ticket.capacity,
       };
     }

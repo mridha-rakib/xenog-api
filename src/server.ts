@@ -13,12 +13,14 @@ import { realtimeGateway } from "./modules/realtime/realtime.gateway.js";
 import { startEventScheduler } from "./modules/events/event.scheduler.js";
 import { startPaymentScheduler } from "./modules/payments/payment.scheduler.js";
 import { startCreatorPayoutScheduler } from "./modules/payments/creator-payout.scheduler.js";
+import { ensureCheckoutOrderIndexes } from "./modules/payments/checkout-payment.model.js";
 import { ensureTicketShareIndexes } from "./modules/payments/ticket-share.model.js";
 import { ensureTicketUsageIndexes } from "./modules/payments/ticket-usage.model.js";
 import { createApp } from "./app.js";
 
 const startServer = async (): Promise<void> => {
   await Database.connect();
+  await ensureCheckoutOrderIndexes();
   await ensureTicketShareIndexes();
   await ensureTicketUsageIndexes();
   await seedAdminUser();

@@ -243,6 +243,22 @@ export interface EventMapQuery {
   limit?: number;
 }
 
+export type AdminMapEventStatus = "upcoming" | "live" | "active";
+
+export interface AdminMapEventResponse {
+  id: string;
+  title: string;
+  status: AdminMapEventStatus;
+  scheduledAt?: Date | null;
+  endAt?: Date | null;
+  latitude: number;
+  longitude: number;
+  locationName: string;
+  category?: EventCategory | null;
+  bannerImageUrl?: string | null;
+  hostName?: string | null;
+}
+
 export interface EventFeedQuery {
   category?: EventCategory;
   latitude?: number;

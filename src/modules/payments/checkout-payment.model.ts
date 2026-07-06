@@ -1,5 +1,5 @@
 import { Schema, model } from "mongoose";
-import type { CheckoutOrderLineItem, ICheckoutOrder } from "./checkout-payment.interface.js";
+import type { CheckoutOrderLineItem, CheckoutOrderTicketPass, ICheckoutOrder } from "./checkout-payment.interface.js";
 import {
   checkoutOrderKinds,
   checkoutPaymentMethods,
@@ -70,6 +70,16 @@ const checkoutOrderLineItemSchema = new Schema<CheckoutOrderLineItem>(
       required: true,
       min: 0,
     },
+  },
+  { _id: false },
+);
+
+const checkoutOrderTicketPassSchema = new Schema<CheckoutOrderTicketPass>(
+  {
+    eventId: { type: String, required: true, trim: true },
+    ticketId: { type: String, required: true, trim: true, maxlength: 80 },
+    ticketIndex: { type: Number, required: true, min: 1 },
+    checkInCode: { type: String, required: true, trim: true, uppercase: true },
   },
   { _id: false },
 );
@@ -150,6 +160,41 @@ const checkoutOrderSchema = new Schema<ICheckoutOrder>(
         message: "Checkout order must include at least one line item",
       },
     },
+    ticketPasses: {
+      type: [checkoutOrderTicketPassSchema],
+      required: true,
+      default: [],
+      validate: {
+        validator: function validateTicketPasses(
+          this: ICheckoutOrder,
+          ticketPasses: CheckoutOrderTicketPass[],
+        ): boolean {
+          if (this.kind !== "ticket") {
+            return ticketPasses.length === 0;
+          }
+
+          const expectedPassKeys = this.lineItems
+            .filter((item) => item.itemType === "ticket" && item.eventId && item.itemId)
+            .flatMap((item) => Array.from(
+              { length: item.totalQuantity ?? item.quantity },
+              (_, index) => `${item.eventId}:${item.itemId}:${index + 1}`,
+            ));
+          const actualPassKeys = ticketPasses.map(
+            (pass) => `${pass.eventId}:${pass.ticketId}:${pass.ticketIndex}`,
+          );
+          const codes = ticketPasses.map((pass) => pass.checkInCode);
+
+          return (
+            expectedPassKeys.length === actualPassKeys.length
+            && new Set(actualPassKeys).size === actualPassKeys.length
+            && new Set(codes).size === codes.length
+            && expectedPassKeys.every((key) => actualPassKeys.includes(key))
+            && codes.every((code) => /^MOM-\d{2}-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(code))
+          );
+        },
+        message: "Ticket passes must map one-to-one to the order ticket quantity",
+      },
+    },
     stripePaymentIntentId: {
       type: String,
       trim: true,
@@ -195,7 +240,18 @@ const checkoutOrderSchema = new Schema<ICheckoutOrder>(
 );
 
 checkoutOrderSchema.index({ userId: 1, createdAt: -1 });
-checkoutOrderSchema.index({ stripePaymentIntentId: 1 }, { unique: true, sparse: true });
+checkoutOrderSchema.index(
+  { stripePaymentIntentId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { stripePaymentIntentId: { $type: "string" } },
+  },
+);
 checkoutOrderSchema.index({ paymentStatus: 1, reservedUntil: 1 });
+checkoutOrderSchema.index({ "ticketPasses.checkInCode": 1 }, { unique: true, sparse: true });
 
 export const CheckoutOrderModel = model<ICheckoutOrder>("CheckoutOrder", checkoutOrderSchema);
+
+export const ensureCheckoutOrderIndexes = async (): Promise<void> => {
+  await CheckoutOrderModel.syncIndexes();
+};

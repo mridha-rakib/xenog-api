@@ -45,6 +45,10 @@ export class TicketUsageRepository {
     }).sort({ usedAt: -1, _id: -1 });
   }
 
+  public async existsByOrderId(orderId: string): Promise<boolean> {
+    return Boolean(await TicketUsageModel.exists({ orderId }));
+  }
+
   public async findByEventIdsAndOrderIds(eventIds: string[], orderIds: string[]): Promise<ITicketUsage[]> {
     if (eventIds.length === 0 || orderIds.length === 0) {
       return [];

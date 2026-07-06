@@ -27,6 +27,7 @@ import { CreatorEarningRepository } from "../payments/creator-earning.repository
 import { TicketShareRepository } from "../payments/ticket-share.repository.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
 import type {
+  AdminMapEventResponse,
   CreateEventRewardDto,
   EventFeedQuery,
   EventHostResponse,
@@ -196,6 +197,15 @@ export class EventService {
   }
 
   public async deleteEvent(user: AuthUser, eventId: string): Promise<EventResponse> {
+    const existingEvent = await this.getEventForOwner(user, eventId);
+
+    if (existingEvent.status !== "draft") {
+      throw new AppError(
+        "Published events cannot be deleted. Cancel the event instead.",
+        httpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
     const event = await this.eventRepository.deleteByIdForUser(eventId, user.id);
 
     if (!event) {
@@ -309,6 +319,15 @@ export class EventService {
 
     if (!exists) {
       throw new AppError("Event ticket not found.", httpStatus.NOT_FOUND);
+    }
+
+    const ticketSales = await this.checkoutPaymentRepository.getEventTicketSales(eventId);
+
+    if ((ticketSales[ticketId] ?? 0) > 0) {
+      throw new AppError(
+        "Tickets with completed purchases cannot be deleted.",
+        httpStatus.CONFLICT,
+      );
     }
 
     const updatedEvent = await this.eventRepository.removeTicketFromEvent(eventId, user.id, ticketId);
@@ -859,6 +878,50 @@ export class EventService {
     const hostById = await this.getHostById(events);
 
     return events.map((event) => this.toResponse(event, hostById.get(event.userId.toString()) ?? null));
+  }
+
+  public async listAdminMapEvents(): Promise<AdminMapEventResponse[]> {
+    const now = new Date();
+    const activeSince = new Date(now.getTime() - ACTIVE_EVENT_WINDOW_MS);
+    const events = await this.eventRepository.findAdminMapEvents(now, activeSince);
+    const hostById = await this.getHostById(events);
+
+    const items = await Promise.all(events.map(async (event): Promise<AdminMapEventResponse | null> => {
+      const latitude = event.location?.latitude;
+      const longitude = event.location?.longitude;
+
+      if (
+        typeof latitude !== "number" || !Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
+        typeof longitude !== "number" || !Number.isFinite(longitude) || longitude < -180 || longitude > 180
+      ) {
+        return null;
+      }
+
+      const bannerImageUrl = event.bannerImageKey
+        ? await this.storageService.createDownloadUrl(event.bannerImageKey).then(({ url }) => url).catch(() => null)
+        : null;
+      const isUpcoming = Boolean(event.scheduledAt && event.scheduledAt.getTime() > now.getTime());
+
+      return {
+        id: event._id.toString(),
+        title: event.name?.trim() || "Untitled Event",
+        status: event.status === "live" ? "live" : isUpcoming ? "upcoming" : "active",
+        scheduledAt: event.scheduledAt ?? null,
+        endAt: event.endAt ?? null,
+        latitude,
+        longitude,
+        locationName:
+          event.location?.venue?.trim() ||
+          event.location?.searchLabel?.trim() ||
+          event.location?.address?.trim() ||
+          "Location not specified",
+        category: event.categories?.[0] ?? event.category ?? null,
+        bannerImageUrl,
+        hostName: hostById.get(event.userId.toString())?.name ?? null,
+      };
+    }));
+
+    return items.filter((item): item is AdminMapEventResponse => item !== null);
   }
 
   public async listNowModeEvents(query: NowModeQuery): Promise<NowModeEventResponse[]> {

@@ -32,11 +32,13 @@ import { CheckoutPaymentRepository } from "./checkout-payment.repository.js";
 import { CreatorEarningRepository } from "./creator-earning.repository.js";
 import { TicketShareRepository } from "./ticket-share.repository.js";
 import { TicketUsageRepository } from "./ticket-usage.repository.js";
+import { createCheckoutTicketPasses, generateTicketCheckInCode } from "./ticket-check-in-code.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
 import { realtimeGateway } from "../realtime/realtime.gateway.js";
 
 type StripeClient = InstanceType<typeof Stripe>;
 type StripePaymentIntent = Awaited<ReturnType<StripeClient["paymentIntents"]["retrieve"]>>;
+type CheckoutOrderCreatePayload = Parameters<CheckoutPaymentRepository["create"]>[0];
 
 const BUYER_FEE_STRIPE = 0.10;
 const CREATOR_PLATFORM_FEE = 0.05;
@@ -98,6 +100,11 @@ export class CheckoutPaymentService {
       this.ticketShareRepository.findActiveByOwnerId(user.id),
       this.ticketShareRepository.findActiveByRecipientId(user.id),
     ]);
+    const sharedOrderIds = [...new Set(receivedShares.map((share) => share.orderId.toString()))];
+    const sharedOrders = await this.repository.findByIds(sharedOrderIds);
+    const orderById = new Map(
+      [...orders, ...sharedOrders].map((order) => [order._id.toString(), order]),
+    );
     const eventIds = [
       ...new Set(
         [
@@ -171,9 +178,16 @@ export class CheckoutPaymentService {
           const activeShare = shareByTicketPass.get(ticketPassKey) ?? null;
           const shareFriend = activeShare ? userById.get(activeShare.recipientUserId.toString()) ?? null : null;
           const usage = usageByTicketPass.get(ticketPassKey) ?? null;
-          ticketPass.currentShare = activeShare ? this.toTicketShareResponse(activeShare, shareFriend) : null;
+          ticketPass.currentShare = activeShare
+            ? this.toTicketShareResponse(activeShare, "", shareFriend)
+            : null;
+          if (activeShare) {
+            ticketPass.ticketNo = "";
+            ticketPass.qrCode = "";
+          }
           this.applyUsageToTicketPass(ticketPass, usage);
         }
+        walletItem.ticketNo = walletItem.ticketPasses.find((pass) => !pass.currentShare)?.ticketNo ?? "";
         walletItem.currentShare = walletItem.ticketPasses.find((pass) => pass.currentShare)?.currentShare ?? null;
         walletItem.walletStatus = this.getWalletStatus(order, event, walletItem.ticketPasses);
         const existingItem = walletItemByTicket.get(itemKey);
@@ -196,8 +210,9 @@ export class CheckoutPaymentService {
     const sharedItems = receivedShares
       .map((share) => {
         const event = eventById.get(share.eventId);
+        const order = orderById.get(share.orderId.toString());
 
-        if (!event) {
+        if (!event || !order) {
           return null;
         }
 
@@ -213,7 +228,7 @@ export class CheckoutPaymentService {
           this.getTicketPassKey(share.eventId, share.ticketId, share.orderId.toString(), share.ticketIndex ?? 1),
         ) ?? null;
 
-        return this.toSharedTicketWalletItem(share, event, ticket, host, owner, usage);
+        return this.toSharedTicketWalletItem(share, order, event, ticket, host, owner, usage);
       })
       .filter((item): item is TicketWalletItem => Boolean(item));
 
@@ -329,6 +344,12 @@ export class CheckoutPaymentService {
       throw new AppError("You must keep at least 1 ticket and can only share up to n - 1 tickets", httpStatus.BAD_REQUEST);
     }
 
+    await this.rotateTicketPassCheckInCode(
+      order,
+      payload.eventId,
+      payload.ticketId,
+      payload.ticketIndex,
+    );
     const share = await this.ticketShareRepository.create({
       ownerUserId: user.id,
       recipientUserId: payload.friendId,
@@ -340,7 +361,11 @@ export class CheckoutPaymentService {
 
     void this.dispatchTicketShareNotification(user, payload.friendId, event.name ?? null, ticket.name);
 
-    return this.toTicketShareResponse(share, friend);
+    return this.toTicketShareResponse(
+      share,
+      "",
+      friend,
+    );
   }
 
   private async dispatchTicketShareNotification(
@@ -400,6 +425,18 @@ export class CheckoutPaymentService {
       throw new AppError("Used shared tickets cannot be cancelled", httpStatus.CONFLICT);
     }
 
+    const order = await this.repository.findById(activeShare.orderId.toString());
+
+    if (!order) {
+      throw new AppError("Ticket order not found", httpStatus.NOT_FOUND);
+    }
+
+    const rotatedOrder = await this.rotateTicketPassCheckInCode(
+      order,
+      activeShare.eventId,
+      activeShare.ticketId,
+      activeShare.ticketIndex ?? 1,
+    );
     const share = await this.ticketShareRepository.cancelByIdForOwner(shareId, user.id);
 
     if (!share) {
@@ -408,107 +445,167 @@ export class CheckoutPaymentService {
 
     const friend = await this.userRepository.findById(share.recipientUserId.toString());
 
-    return this.toTicketShareResponse(share, friend);
+    return this.toTicketShareResponse(
+      share,
+      this.getStoredCheckInCode(rotatedOrder, share.eventId, share.ticketId, share.ticketIndex ?? 1),
+      friend,
+    );
   }
 
   public async scanTicket(user: AuthUser, payload: ScanTicketDto): Promise<ScanTicketResponse> {
-    const qrPayload = this.parseTicketQrCode(payload.qrCode);
-    const [event, order, share] = await Promise.all([
-      this.eventRepository.findById(qrPayload.eventId),
-      this.repository.findById(qrPayload.orderId),
-      qrPayload.shareId ? this.ticketShareRepository.findActiveById(qrPayload.shareId) : Promise.resolve(null),
-    ]);
+    const checkInCode = payload.checkInCode.trim().toUpperCase();
+
+    if (!/^MOM-\d{2}-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(checkInCode)) {
+      throw new AppError("Invalid ticket", httpStatus.BAD_REQUEST, { code: "INVALID_TICKET" });
+    }
+
+    const order = await this.repository.findByCheckInCode(checkInCode);
+    const ticketPass = order?.ticketPasses.find((pass) => pass.checkInCode === checkInCode);
+
+    if (!order || !ticketPass || order.kind !== "ticket") {
+      throw new AppError("Invalid ticket", httpStatus.NOT_FOUND, { code: "INVALID_TICKET" });
+    }
+
+    if (payload.eventId && payload.eventId !== ticketPass.eventId) {
+      throw new AppError("Invalid ticket", httpStatus.BAD_REQUEST, { code: "WRONG_EVENT" });
+    }
+
+    const event = await this.eventRepository.findById(ticketPass.eventId);
 
     if (!event) {
-      throw new AppError("Event not found", httpStatus.NOT_FOUND);
+      throw new AppError("Invalid ticket", httpStatus.NOT_FOUND, { code: "INVALID_TICKET" });
     }
 
     if (event.userId.toString() !== user.id) {
-      throw new AppError("Only the event host can scan this ticket", httpStatus.FORBIDDEN);
+      throw new AppError(
+        "You are not authorized to check in tickets for this event",
+        httpStatus.FORBIDDEN,
+        { code: "UNAUTHORIZED_TICKET_HOST" },
+      );
     }
 
-    if (!order || order.kind !== "ticket" || order.paymentStatus !== "paid") {
-      throw new AppError("Ticket order not found", httpStatus.NOT_FOUND);
+    if (event.status === "cancelled" || order.paymentStatus === "refunded" || order.paymentStatus === "canceled") {
+      throw new AppError(
+        "This ticket has been cancelled or refunded",
+        httpStatus.CONFLICT,
+        { code: "TICKET_CANCELLED_OR_REFUNDED" },
+      );
     }
 
-    const ticket = event.tickets.find((item) => item.id === qrPayload.ticketId);
+    if (order.paymentStatus !== "paid") {
+      throw new AppError("Invalid ticket", httpStatus.BAD_REQUEST, { code: "INVALID_TICKET" });
+    }
+
+    const ticket = event.tickets.find((item) => item.id === ticketPass.ticketId);
 
     if (!ticket) {
-      throw new AppError("Event ticket not found", httpStatus.NOT_FOUND);
+      throw new AppError("Invalid ticket", httpStatus.NOT_FOUND, { code: "INVALID_TICKET" });
     }
 
     const lineItem = order.lineItems.find(
-      (item) => item.itemType === "ticket" && item.eventId === qrPayload.eventId && item.itemId === qrPayload.ticketId,
+      (item) => item.itemType === "ticket" && item.eventId === ticketPass.eventId && item.itemId === ticketPass.ticketId,
     );
 
     if (!lineItem) {
-      throw new AppError("Ticket pass not found for this order", httpStatus.NOT_FOUND);
+      throw new AppError("Invalid ticket", httpStatus.NOT_FOUND, { code: "INVALID_TICKET" });
     }
 
     const orderTicketCount = this.getEffectiveTicketQuantities(event, lineItem).totalQuantity;
 
-    if (qrPayload.ticketIndex > orderTicketCount) {
-      throw new AppError("Ticket pass not found for this order", httpStatus.NOT_FOUND);
+    if (ticketPass.ticketIndex > orderTicketCount) {
+      throw new AppError("Invalid ticket", httpStatus.NOT_FOUND, { code: "INVALID_TICKET" });
     }
 
     const existingUsage = await this.ticketUsageRepository.findByTicketPass(
-      qrPayload.eventId,
-      qrPayload.ticketId,
-      qrPayload.orderId,
-      qrPayload.ticketIndex,
+      ticketPass.eventId,
+      ticketPass.ticketId,
+      order._id.toString(),
+      ticketPass.ticketIndex,
     );
 
     if (existingUsage) {
-      throw new AppError("This ticket has already been used", httpStatus.CONFLICT);
+      throw new AppError(
+        "This ticket has already been checked in",
+        httpStatus.CONFLICT,
+        { code: "TICKET_ALREADY_CHECKED_IN" },
+      );
     }
 
-    const activeShare = share ?? (await this.ticketShareRepository.findActiveByTicketPass(
-      qrPayload.eventId,
-      qrPayload.ticketId,
-      qrPayload.orderId,
-      qrPayload.ticketIndex,
-    ));
+    const [currentOrder, currentEvent] = await Promise.all([
+      this.repository.findByCheckInCode(checkInCode),
+      this.eventRepository.findById(ticketPass.eventId),
+    ]);
 
-    if (qrPayload.shareId) {
-      if (
-        !activeShare ||
-        activeShare._id.toString() !== qrPayload.shareId ||
-        activeShare.eventId !== qrPayload.eventId ||
-        activeShare.ticketId !== qrPayload.ticketId ||
-        activeShare.orderId.toString() !== qrPayload.orderId ||
-        (activeShare.ticketIndex ?? 1) !== qrPayload.ticketIndex
-      ) {
-        throw new AppError("This shared ticket is no longer valid", httpStatus.CONFLICT);
+    if (
+      currentEvent?.status === "cancelled"
+      || currentOrder?.paymentStatus === "refunded"
+      || currentOrder?.paymentStatus === "canceled"
+    ) {
+      throw new AppError(
+        "This ticket has been cancelled or refunded",
+        httpStatus.CONFLICT,
+        { code: "TICKET_CANCELLED_OR_REFUNDED" },
+      );
+    }
+
+    if (currentEvent && currentEvent.userId.toString() !== user.id) {
+      throw new AppError(
+        "You are not authorized to check in tickets for this event",
+        httpStatus.FORBIDDEN,
+        { code: "UNAUTHORIZED_TICKET_HOST" },
+      );
+    }
+
+    if (
+      !currentOrder
+      || currentOrder._id.toString() !== order._id.toString()
+      || currentOrder.paymentStatus !== "paid"
+      || !currentEvent
+    ) {
+      throw new AppError("Invalid ticket", httpStatus.CONFLICT, { code: "TICKET_STATE_CHANGED" });
+    }
+
+    const activeShare = await this.ticketShareRepository.findActiveByTicketPass(
+      ticketPass.eventId,
+      ticketPass.ticketId,
+      currentOrder._id.toString(),
+      ticketPass.ticketIndex,
+    );
+
+    const holderUserId = activeShare ? activeShare.recipientUserId.toString() : currentOrder.userId.toString();
+    let usage: ITicketUsage;
+
+    try {
+      usage = await this.ticketUsageRepository.create({
+        ownerUserId: currentOrder.userId.toString(),
+        holderUserId,
+        usedByUserId: user.id,
+        shareId: activeShare?._id.toString() ?? null,
+        orderId: currentOrder._id.toString(),
+        eventId: ticketPass.eventId,
+        ticketId: ticketPass.ticketId,
+        ticketIndex: ticketPass.ticketIndex,
+        source: activeShare ? "shared" : "owned",
+      });
+    } catch (error) {
+      if ((error as { code?: number }).code === 11000) {
+        throw new AppError(
+          "This ticket has already been checked in",
+          httpStatus.CONFLICT,
+          { code: "TICKET_ALREADY_CHECKED_IN" },
+        );
       }
-    } else if (activeShare) {
-      throw new AppError("This ticket is currently shared. Use the shared QR instead.", httpStatus.CONFLICT);
+
+      throw error;
     }
 
-    const holderUserId = activeShare ? activeShare.recipientUserId.toString() : order.userId.toString();
     const holder = await this.userRepository.findById(holderUserId);
 
-    const usage = await this.ticketUsageRepository.create({
-      ownerUserId: order.userId.toString(),
-      holderUserId,
-      usedByUserId: user.id,
-      shareId: activeShare?._id.toString() ?? null,
-      orderId: qrPayload.orderId,
-      eventId: qrPayload.eventId,
-      ticketId: qrPayload.ticketId,
-      ticketIndex: qrPayload.ticketIndex,
-      source: activeShare ? "shared" : "owned",
-    });
-
     return {
-      eventId: event._id.toString(),
       eventName: event.name ?? "Event",
-      ticketId: ticket.id,
       ticketName: ticket.name,
-      orderId: order._id.toString(),
-      ticketIndex: qrPayload.ticketIndex,
-      ticketNo: activeShare
-        ? `MOM-SHARE-${activeShare._id.toString().slice(-4).toUpperCase()}-${String(qrPayload.ticketIndex).padStart(2, "0")}`
-        : this.toTicketPassNo(order, qrPayload.ticketIndex),
+      ticketIndex: ticketPass.ticketIndex,
+      ticketNo: checkInCode,
       source: activeShare ? "shared" : "owned",
       holderUserId,
       holderName: holder?.name ?? "Attendee",
@@ -703,6 +800,10 @@ export class CheckoutPaymentService {
       throw new AppError("Only paid orders can be refunded", httpStatus.BAD_REQUEST);
     }
 
+    if (await this.ticketUsageRepository.existsByOrderId(order._id.toString())) {
+      throw new AppError("Checked-in tickets cannot be refunded", httpStatus.CONFLICT);
+    }
+
     const refunded = await this.processRefund(order);
 
     return this.toOrderResponse(refunded);
@@ -748,7 +849,7 @@ export class CheckoutPaymentService {
     const { currency, subtotalAmount, platformFeeAmount, totalAmount } = amounts;
     const now = new Date();
 
-    const order = await this.repository.create({
+    const order = await this.createOrderWithUniqueCheckInCodes({
       userId: user.id,
       kind: payload.kind,
       paymentMethod: payload.paymentMethod,
@@ -766,7 +867,7 @@ export class CheckoutPaymentService {
       anonymous: payload.kind === "ticket" ? Boolean((payload as { anonymous?: boolean }).anonymous) : false,
       termsAcceptedAt: now,
       paidAt: now,
-    });
+    }, now);
 
     void this.dispatchTicketNotifications(order);
 
@@ -822,26 +923,38 @@ export class CheckoutPaymentService {
 
     const reservedUntil = new Date(Date.now() + 30 * 60 * 1000);
 
-    const order = await this.repository.create({
-      _id: preOrderId,
-      userId: user.id,
-      kind: payload.kind,
-      paymentMethod: payload.paymentMethod,
-      paymentStatus: "requires_payment",
-      payoutStatus: "not_ready",
-      currency,
-      subtotalAmount,
-      platformFeeAmount,
-      taxAmount: 0,
-      totalAmount,
-      amountMinor,
-      lineItems,
-      stripePaymentIntentId: paymentIntent.id,
-      stripeClientSecret: paymentIntent.client_secret,
-      reservedUntil,
-      anonymous: payload.kind === "ticket" ? Boolean((payload as { anonymous?: boolean }).anonymous) : false,
-      termsAcceptedAt: new Date(),
-    });
+    let order: ICheckoutOrder;
+
+    try {
+      order = await this.createOrderWithUniqueCheckInCodes({
+        _id: preOrderId,
+        userId: user.id,
+        kind: payload.kind,
+        paymentMethod: payload.paymentMethod,
+        paymentStatus: "requires_payment",
+        payoutStatus: "not_ready",
+        currency,
+        subtotalAmount,
+        platformFeeAmount,
+        taxAmount: 0,
+        totalAmount,
+        amountMinor,
+        lineItems,
+        stripePaymentIntentId: paymentIntent.id,
+        stripeClientSecret: paymentIntent.client_secret,
+        reservedUntil,
+        anonymous: payload.kind === "ticket" ? Boolean((payload as { anonymous?: boolean }).anonymous) : false,
+        termsAcceptedAt: new Date(),
+      });
+    } catch (error) {
+      await stripe.paymentIntents.cancel(paymentIntent.id).catch((cancelError) => {
+        logger.error(
+          { cancelError, paymentIntentId: paymentIntent.id },
+          "Failed to cancel PaymentIntent after checkout order persistence failure",
+        );
+      });
+      throw error;
+    }
 
     return {
       order: this.toOrderResponse(order),
@@ -850,6 +963,71 @@ export class CheckoutPaymentService {
       merchantDisplayName: env.APP_NAME,
       merchantCountryCode: env.STRIPE_MERCHANT_COUNTRY,
     };
+  }
+
+  private async createOrderWithUniqueCheckInCodes(
+    payload: Omit<CheckoutOrderCreatePayload, "ticketPasses">,
+    createdAt = new Date(),
+  ): Promise<ICheckoutOrder> {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        return await this.repository.create({
+          ...payload,
+          ticketPasses: createCheckoutTicketPasses(payload.lineItems, createdAt),
+        });
+      } catch (error) {
+        const duplicateError = error as { code?: number; keyPattern?: Record<string, unknown>; message?: string };
+        const isCheckInCodeCollision = duplicateError.code === 11000 && (
+          Boolean(duplicateError.keyPattern?.["ticketPasses.checkInCode"])
+          || duplicateError.message?.includes("ticketPasses.checkInCode")
+        );
+
+        if (!isCheckInCodeCollision) {
+          throw error;
+        }
+      }
+    }
+
+    throw new AppError("Unable to generate unique ticket codes", httpStatus.SERVICE_UNAVAILABLE);
+  }
+
+  private async rotateTicketPassCheckInCode(
+    order: ICheckoutOrder,
+    eventId: string,
+    ticketId: string,
+    ticketIndex: number,
+  ): Promise<ICheckoutOrder> {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const checkInCode = generateTicketCheckInCode(order.createdAt);
+
+      try {
+        const updatedOrder = await this.repository.rotateTicketPassCheckInCode(
+          order._id.toString(),
+          eventId,
+          ticketId,
+          ticketIndex,
+          checkInCode,
+        );
+
+        if (!updatedOrder) {
+          throw new AppError("Ticket pass not found", httpStatus.NOT_FOUND);
+        }
+
+        return updatedOrder;
+      } catch (error) {
+        const duplicateError = error as { code?: number; keyPattern?: Record<string, unknown>; message?: string };
+        const isCheckInCodeCollision = duplicateError.code === 11000 && (
+          Boolean(duplicateError.keyPattern?.["ticketPasses.checkInCode"])
+          || duplicateError.message?.includes("ticketPasses.checkInCode")
+        );
+
+        if (!isCheckInCodeCollision) {
+          throw error;
+        }
+      }
+    }
+
+    throw new AppError("Unable to generate a unique ticket code", httpStatus.SERVICE_UNAVAILABLE);
   }
 
   private async processRefund(order: ICheckoutOrder): Promise<ICheckoutOrder> {
@@ -1342,6 +1520,7 @@ export class CheckoutPaymentService {
         unitAmount: item.unitAmount,
         totalAmount: item.totalAmount,
       })),
+      ticketPasses: order.ticketPasses,
       stripePaymentIntentId: order.stripePaymentIntentId ?? null,
       createdAt: order.createdAt,
       updatedAt: order.updatedAt,
@@ -1360,68 +1539,25 @@ export class CheckoutPaymentService {
     return "active";
   }
 
-  private toTicketNo(order: ICheckoutOrder): string {
-    return `MOM-${order.createdAt.getFullYear()}-${order._id.toString().slice(-4).toUpperCase()}`;
-  }
-
-  private toTicketPassNo(order: ICheckoutOrder, ticketIndex: number): string {
-    return `${this.toTicketNo(order)}-${String(ticketIndex).padStart(2, "0")}`;
-  }
-
-  private toTicketQrCode(eventId: string, ticketId: string, orderId: string, ticketIndex: number, shareId?: string): string {
-    return JSON.stringify({
-      type: "event-ticket",
-      eventId,
-      ticketId,
-      orderId,
-      ticketIndex,
-      shareId: shareId ?? undefined,
-    });
-  }
-
-  private parseTicketQrCode(qrCode: string): {
-    eventId: string;
-    ticketId: string;
-    orderId: string;
-    ticketIndex: number;
-    shareId?: string;
-  } {
-    let parsed: unknown;
-
-    try {
-      parsed = JSON.parse(qrCode);
-    } catch {
-      throw new AppError("Invalid ticket QR code", httpStatus.BAD_REQUEST);
-    }
-
-    if (
-      !parsed ||
-      typeof parsed !== "object" ||
-      (parsed as { type?: unknown }).type !== "event-ticket" ||
-      typeof (parsed as { eventId?: unknown }).eventId !== "string" ||
-      typeof (parsed as { ticketId?: unknown }).ticketId !== "string" ||
-      typeof (parsed as { orderId?: unknown }).orderId !== "string" ||
-      !Number.isInteger((parsed as { ticketIndex?: unknown }).ticketIndex) ||
-      (parsed as { ticketIndex: number }).ticketIndex < 1
-    ) {
-      throw new AppError("Invalid ticket QR code", httpStatus.BAD_REQUEST);
-    }
-
-    const shareId = typeof (parsed as { shareId?: unknown }).shareId === "string"
-      ? (parsed as { shareId: string }).shareId
-      : undefined;
-
-    return {
-      eventId: (parsed as { eventId: string }).eventId,
-      ticketId: (parsed as { ticketId: string }).ticketId,
-      orderId: (parsed as { orderId: string }).orderId,
-      ticketIndex: (parsed as { ticketIndex: number }).ticketIndex,
-      shareId,
-    };
-  }
-
   private getTicketPassKey(eventId: string, ticketId: string, orderId: string, ticketIndex: number): string {
     return `${eventId}:${ticketId}:${orderId}:${ticketIndex}`;
+  }
+
+  private getStoredCheckInCode(
+    order: ICheckoutOrder,
+    eventId: string,
+    ticketId: string,
+    ticketIndex: number,
+  ): string {
+    const ticketPass = order.ticketPasses.find((pass) => (
+      pass.eventId === eventId && pass.ticketId === ticketId && pass.ticketIndex === ticketIndex
+    ));
+
+    if (!ticketPass) {
+      throw new AppError("Ticket pass code is missing", httpStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    return ticketPass.checkInCode;
   }
 
   private buildTicketPasses(order: ICheckoutOrder, lineItem: CheckoutOrderLineItem, event: IEvent): TicketWalletPass[] {
@@ -1432,12 +1568,19 @@ export class CheckoutPaymentService {
 
     return Array.from({ length: totalQuantity }, (_, index) => {
       const ticketIndex = index + 1;
+      const storedPass = order.ticketPasses.find((pass) => (
+        pass.eventId === eventId && pass.ticketId === ticketId && pass.ticketIndex === ticketIndex
+      ));
+
+      if (!storedPass) {
+        throw new AppError("Ticket pass code is missing", httpStatus.INTERNAL_SERVER_ERROR);
+      }
 
       return {
         orderId,
-        ticketNo: this.toTicketPassNo(order, ticketIndex),
+        ticketNo: storedPass.checkInCode,
         ticketIndex,
-        qrCode: this.toTicketQrCode(eventId, ticketId, orderId, ticketIndex),
+        qrCode: storedPass.checkInCode,
         status: "active",
         usedAt: null,
         currentShare: null,
@@ -1463,7 +1606,7 @@ export class CheckoutPaymentService {
       id: `${order._id.toString()}-${lineItem.itemId}`,
       source: "owned",
       orderId: order._id.toString(),
-      ticketNo: this.toTicketNo(order),
+      ticketNo: ticketPasses[0]?.ticketNo ?? "",
       ticketId: lineItem.itemId ?? "",
       ticketName: lineItem.name,
       quantity: totalQuantity,
@@ -1506,6 +1649,7 @@ export class CheckoutPaymentService {
 
   private toSharedTicketWalletItem(
     share: ITicketShare,
+    order: ICheckoutOrder,
     event: IEvent,
     ticket: EventTicket,
     host: IUser | null,
@@ -1515,14 +1659,13 @@ export class CheckoutPaymentService {
     const unitAmount = roundCurrency(ticket.type === "free" ? 0 : ticket.price);
     const ticketIndex = share.ticketIndex ?? 1;
     const orderId = share.orderId.toString();
-    const qrCode = this.toTicketQrCode(share.eventId, share.ticketId, orderId, ticketIndex, share._id.toString());
-    const ticketNo = `MOM-SHARE-${share._id.toString().slice(-4).toUpperCase()}-${String(ticketIndex).padStart(2, "0")}`;
+    const checkInCode = this.getStoredCheckInCode(order, share.eventId, share.ticketId, ticketIndex);
     const ticketPasses: TicketWalletPass[] = [
       {
         orderId,
-        ticketNo,
+        ticketNo: checkInCode,
         ticketIndex,
-        qrCode,
+        qrCode: checkInCode,
         status: usage ? "used" : "active",
         usedAt: usage?.usedAt ?? null,
         currentShare: null,
@@ -1533,7 +1676,7 @@ export class CheckoutPaymentService {
       id: `share-${share._id.toString()}`,
       source: "shared",
       orderId,
-      ticketNo,
+      ticketNo: checkInCode,
       ticketId: share.ticketId,
       ticketName: ticket.name,
       quantity: 1,
@@ -1543,14 +1686,8 @@ export class CheckoutPaymentService {
       unitAmount,
       totalAmount: unitAmount,
       currency: env.STRIPE_CURRENCY.toLowerCase(),
-      paymentStatus: "paid",
-      walletStatus: this.getWalletStatus(
-        {
-          paymentStatus: "paid",
-        } as ICheckoutOrder,
-        event,
-        ticketPasses,
-      ),
+      paymentStatus: order.paymentStatus,
+      walletStatus: this.getWalletStatus(order, event, ticketPasses),
       purchasedAt: share.sharedAt,
       ticketPasses,
       currentShare: null,
@@ -1575,7 +1712,7 @@ export class CheckoutPaymentService {
     };
   }
 
-  private toTicketShareResponse(share: ITicketShare, friend?: IUser | null): TicketShareResponse {
+  private toTicketShareResponse(share: ITicketShare, checkInCode: string, friend?: IUser | null): TicketShareResponse {
     return {
       id: share._id.toString(),
       ownerUserId: share.ownerUserId.toString(),
@@ -1584,13 +1721,7 @@ export class CheckoutPaymentService {
       eventId: share.eventId,
       ticketId: share.ticketId,
       ticketIndex: share.ticketIndex ?? 1,
-      qrCode: this.toTicketQrCode(
-        share.eventId,
-        share.ticketId,
-        share.orderId.toString(),
-        share.ticketIndex ?? 1,
-        share._id.toString(),
-      ),
+      qrCode: checkInCode,
       status: share.status,
       sharedAt: share.sharedAt,
       cancelledAt: share.cancelledAt ?? null,

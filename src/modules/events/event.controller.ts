@@ -437,6 +437,15 @@ export class EventController {
     });
   };
 
+  public listAdminMapEvents = async (_req: Request, res: Response): Promise<void> => {
+    const events = await this.eventService.listAdminMapEvents();
+
+    ApiResponse.success(res, {
+      message: "Admin map events retrieved",
+      data: { events },
+    });
+  };
+
   public listNowModeEvents = async (req: Request, res: Response): Promise<void> => {
     const events = await this.eventService.listNowModeEvents(req.query as unknown as NowModeQuery);
 

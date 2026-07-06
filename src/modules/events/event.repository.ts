@@ -355,6 +355,19 @@ export class EventRepository {
       .limit(query.limit ?? 100);
   }
 
+  public async findAdminMapEvents(now: Date, activeSince: Date): Promise<IEvent[]> {
+    return EventModel.find({
+      status: { $in: ["published", "live"] },
+      $or: [
+        { endAt: { $gt: now } },
+        { endAt: null, scheduledAt: { $gte: activeSince } },
+        { endAt: { $exists: false }, scheduledAt: { $gte: activeSince } },
+      ],
+      "location.latitude": { $type: "number", $gte: -90, $lte: 90 },
+      "location.longitude": { $type: "number", $gte: -180, $lte: 180 },
+    }).sort({ scheduledAt: 1, publishedAt: -1, _id: -1 });
+  }
+
   public async findNowModeEvents(query: NowModeQuery & { activeSince: Date; upcomingUntil: Date }): Promise<IEvent[]> {
     const eventQuery: FilterQuery<IEvent> = {
       status: { $in: ["published", "live"] },

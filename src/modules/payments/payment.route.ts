@@ -1,5 +1,7 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { catchAsync } from "../../core/http/catch-async.js";
+import { ApiResponse } from "../../core/http/api-response.js";
 import { authenticate } from "../../core/middlewares/auth.middleware.js";
 import { validate } from "../../core/middlewares/validate.middleware.js";
 import { CheckoutPaymentController } from "./checkout-payment.controller.js";
@@ -16,6 +18,21 @@ const stripeConnectController = new StripeConnectController();
 const checkoutPaymentController = new CheckoutPaymentController();
 const creatorEarningController = new CreatorEarningController();
 const payoutSettingsController = new PayoutSettingsController();
+const ticketScanRateLimit = rateLimit({
+  windowMs: 60_000,
+  limit: 120,
+  keyGenerator: (req) => req.authUser?.id ?? "unauthenticated",
+  skipSuccessfulRequests: true,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    ApiResponse.error(res, {
+      statusCode: 429,
+      message: "Too many invalid ticket attempts. Please try again shortly.",
+      details: { code: "TICKET_SCAN_RATE_LIMITED" },
+    });
+  },
+});
 
 router.get("/stripe-connect/return", catchAsync(stripeConnectController.returnToApp));
 router.get("/stripe-connect/refresh", catchAsync(stripeConnectController.refreshOnboarding));
@@ -62,6 +79,7 @@ router.post(
 );
 router.post(
   "/ticket-scans",
+  ticketScanRateLimit,
   validate(checkoutPaymentValidation.scanTicket),
   catchAsync(checkoutPaymentController.scanTicket),
 );

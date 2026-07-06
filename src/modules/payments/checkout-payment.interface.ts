@@ -34,6 +34,13 @@ export interface CheckoutOrderLineItem {
   totalAmount: number;
 }
 
+export interface CheckoutOrderTicketPass {
+  eventId: string;
+  ticketId: string;
+  ticketIndex: number;
+  checkInCode: string;
+}
+
 export interface ICheckoutOrder {
   _id: Types.ObjectId;
   userId: Types.ObjectId;
@@ -48,6 +55,7 @@ export interface ICheckoutOrder {
   totalAmount: number;
   amountMinor: number;
   lineItems: CheckoutOrderLineItem[];
+  ticketPasses: CheckoutOrderTicketPass[];
   stripePaymentIntentId?: string | null;
   stripeClientSecret?: string | null;
   reservedUntil?: Date | null;
@@ -108,6 +116,7 @@ export interface CheckoutOrderResponse {
   taxAmount: number;
   totalAmount: number;
   lineItems: Array<Omit<CheckoutOrderLineItem, "sellerUserId"> & { sellerUserId?: string | null }>;
+  ticketPasses: CheckoutOrderTicketPass[];
   stripePaymentIntentId?: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -237,15 +246,13 @@ export interface ShareTicketDto {
 }
 
 export interface ScanTicketDto {
-  qrCode: string;
+  checkInCode: string;
+  eventId?: string;
 }
 
 export interface ScanTicketResponse {
-  eventId: string;
   eventName: string;
-  ticketId: string;
   ticketName: string;
-  orderId: string;
   ticketIndex: number;
   ticketNo: string;
   source: TicketWalletSource;

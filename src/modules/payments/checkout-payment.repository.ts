@@ -32,6 +32,34 @@ export class CheckoutPaymentRepository {
     return CheckoutOrderModel.findById(id);
   }
 
+  public async findByCheckInCode(checkInCode: string): Promise<ICheckoutOrder | null> {
+    return CheckoutOrderModel.findOne({ "ticketPasses.checkInCode": checkInCode })
+      .hint({ "ticketPasses.checkInCode": 1 });
+  }
+
+  public async rotateTicketPassCheckInCode(
+    orderId: string,
+    eventId: string,
+    ticketId: string,
+    ticketIndex: number,
+    checkInCode: string,
+  ): Promise<ICheckoutOrder | null> {
+    return CheckoutOrderModel.findOneAndUpdate(
+      {
+        _id: orderId,
+        kind: "ticket",
+        paymentStatus: "paid",
+        ticketPasses: { $elemMatch: { eventId, ticketId, ticketIndex } },
+      },
+      { $set: { "ticketPasses.$.checkInCode": checkInCode } },
+      { new: true },
+    );
+  }
+
+  public async findByIds(ids: string[]): Promise<ICheckoutOrder[]> {
+    return ids.length > 0 ? CheckoutOrderModel.find({ _id: { $in: ids } }) : [];
+  }
+
   public async findByPaymentIntentId(paymentIntentId: string): Promise<ICheckoutOrder | null> {
     return CheckoutOrderModel.findOne({ stripePaymentIntentId: paymentIntentId });
   }

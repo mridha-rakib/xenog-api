@@ -90,7 +90,12 @@ export const checkoutPaymentValidation = {
   scanTicket: z.object({
     body: z
       .object({
-        qrCode: z.string().trim().min(1, "QR code is required").max(5000, "QR code is too large"),
+        checkInCode: z
+          .string()
+          .trim()
+          .toUpperCase()
+          .max(64, "Invalid ticket"),
+        eventId: objectId.optional(),
       })
       .strict(),
   }),

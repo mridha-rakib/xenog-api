@@ -67,6 +67,7 @@ ticketShareSchema.index(
   { unique: true, partialFilterExpression: { status: "active" } },
 );
 ticketShareSchema.index({ recipientUserId: 1, status: 1, sharedAt: -1 });
+ticketShareSchema.index({ eventId: 1, ticketId: 1, orderId: 1, ticketIndex: 1, status: 1 });
 
 export const TicketShareModel = model<ITicketShare>("TicketShare", ticketShareSchema);
 

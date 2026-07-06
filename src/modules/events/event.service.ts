@@ -25,7 +25,15 @@ import { CheckoutPaymentRepository } from "../payments/checkout-payment.reposito
 import { CheckoutPaymentService } from "../payments/checkout-payment.service.js";
 import { CreatorEarningRepository } from "../payments/creator-earning.repository.js";
 import { TicketShareRepository } from "../payments/ticket-share.repository.js";
+import { TicketUsageRepository } from "../payments/ticket-usage.repository.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
+import { EventHostReviewRepository } from "./event-host-review.repository.js";
+import type {
+  EventHostReviewEligibilityResponse,
+  EventHostReviewResponse,
+  IEventHostReview,
+  SubmitEventHostReviewDto,
+} from "./event-host-review.interface.js";
 import type {
   AdminMapEventResponse,
   CreateEventRewardDto,
@@ -108,6 +116,8 @@ export class EventService {
     private readonly momentCommentReactionRepository = new MomentCommentReactionRepository(),
     private readonly momentShareRepository = new MomentShareRepository(),
     private readonly momentSaveRepository = new MomentSaveRepository(),
+    private readonly ticketUsageRepository = new TicketUsageRepository(),
+    private readonly eventHostReviewRepository = new EventHostReviewRepository(),
   ) {}
 
   public async saveDraft(user: AuthUser, payload: SaveEventDraftDto, eventId?: string): Promise<EventResponse> {
@@ -1001,6 +1011,8 @@ export class EventService {
       myJoinRequestStatus = (joinRequest?.status as EventJoinRequestStatus) ?? null;
     }
 
+    const hostReviewEligibility = await this.getHostReviewEligibility(event, user);
+
     return {
       ...this.toResponse(event, host, { avatarUrl, followersCount, eventsCount, isFollowing }, myJoinRequestStatus),
       interactionMomentId,
@@ -1009,7 +1021,66 @@ export class EventService {
       sharesCount: shareCounts.get(interactionMomentId) ?? 0,
       isLiked: likedMomentIds.has(interactionMomentId),
       isMember: !isOwner && event.memberUserIds.some((id) => id.toString() === user.id),
+      hostReviewEligibility,
     };
+  }
+
+  public async submitHostReview(
+    user: AuthUser,
+    eventId: string,
+    payload: SubmitEventHostReviewDto,
+  ): Promise<EventHostReviewResponse> {
+    const event = await this.eventRepository.findById(eventId);
+
+    if (!event) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    if (event.status !== "completed") {
+      throw new AppError("You can review the host after the event is completed.", httpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    if (event.userId.toString() === user.id) {
+      throw new AppError("You cannot review your own event.", httpStatus.FORBIDDEN);
+    }
+
+    const attendance = await this.ticketUsageRepository.findByEventIdAndHolderUserId(event._id.toString(), user.id);
+
+    if (!attendance) {
+      throw new AppError("Only checked-in attendees can review this host.", httpStatus.FORBIDDEN);
+    }
+
+    const existingReview = await this.eventHostReviewRepository.findByEventIdAndReviewerUserId(
+      event._id.toString(),
+      user.id,
+    );
+
+    if (existingReview) {
+      throw new AppError("You have already reviewed this host for this event.", httpStatus.CONFLICT);
+    }
+
+    let review: IEventHostReview;
+
+    try {
+      review = await this.eventHostReviewRepository.create({
+        eventId: event._id.toString(),
+        hostUserId: event.userId.toString(),
+        reviewerUserId: user.id,
+        ticketUsageId: attendance._id.toString(),
+        liked: payload.liked,
+        text: payload.text ?? null,
+      });
+    } catch (error) {
+      if ((error as { code?: number }).code === 11000) {
+        throw new AppError("You have already reviewed this host for this event.", httpStatus.CONFLICT);
+      }
+
+      throw error;
+    }
+
+    const reviewer = await this.userRepository.findById(user.id);
+
+    return this.toHostReviewResponse(review, reviewer, event);
   }
 
   public async listEventMembers(user: AuthUser, eventId: string): Promise<EventMemberResponse[]> {
@@ -1716,6 +1787,58 @@ export class EventService {
     await this.invalidateProfileEventsCache(event.userId.toString());
 
     return this.toResponse(event);
+  }
+
+  private async getHostReviewEligibility(
+    event: IEvent,
+    user: AuthUser,
+  ): Promise<EventHostReviewEligibilityResponse> {
+    if (event.status !== "completed" || event.userId.toString() === user.id) {
+      return { canReview: false, hasReviewed: false };
+    }
+
+    const existingReview = await this.eventHostReviewRepository.findByEventIdAndReviewerUserId(
+      event._id.toString(),
+      user.id,
+    );
+
+    if (existingReview) {
+      return { canReview: false, hasReviewed: true };
+    }
+
+    const attendance = await this.ticketUsageRepository.findByEventIdAndHolderUserId(event._id.toString(), user.id);
+
+    return { canReview: Boolean(attendance), hasReviewed: false };
+  }
+
+  private async toHostReviewResponse(
+    review: IEventHostReview,
+    reviewer: IUser | null,
+    event: IEvent,
+  ): Promise<EventHostReviewResponse> {
+    const avatarUrl = reviewer?.avatarKey
+      ? await this.storageService.createDownloadUrl(reviewer.avatarKey).then((download) => download.url).catch(() => null)
+      : null;
+
+    return {
+      id: review._id.toString(),
+      author: reviewer
+        ? {
+            id: reviewer._id.toString(),
+            name: reviewer.name,
+            username: reviewer.username,
+            avatarKey: reviewer.avatarKey ?? null,
+            avatarUrl,
+          }
+        : null,
+      text: review.text ?? "",
+      liked: review.rating === "like",
+      event: {
+        id: event._id.toString(),
+        name: event.name ?? null,
+      },
+      createdAt: review.createdAt,
+    };
   }
 
   private toResponse(

@@ -226,6 +226,20 @@ const updateEventReward = z
     message: "At least one reward field is required",
   });
 
+const submitHostReview = z.object({
+  liked: z.boolean({
+    invalid_type_error: "Review selection is required",
+    required_error: "Review selection is required",
+  }),
+  text: z
+    .string({ invalid_type_error: "Review text must be a string" })
+    .trim()
+    .max(1000, "Review cannot exceed 1000 characters")
+    .optional()
+    .nullable()
+    .transform((value) => (value === undefined ? undefined : value || null)),
+}).strict();
+
 const draftBodyBase = z
   .object({
     name: optionalText("Event name", 160),
@@ -455,6 +469,12 @@ export const eventValidation = {
       id: objectId,
       rewardId: ticketId,
     }),
+  }),
+  submitHostReview: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+    body: submitHostReview,
   }),
   getEventRewardClaims: z.object({
     params: z.object({

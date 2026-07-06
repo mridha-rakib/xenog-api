@@ -190,6 +190,10 @@ export interface UserReviewResponse {
   } | null;
   text: string;
   liked: boolean;
+  event?: {
+    id: string;
+    name?: string | null;
+  } | null;
   createdAt: Date;
 }
 

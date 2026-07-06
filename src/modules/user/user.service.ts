@@ -29,6 +29,7 @@ import { UserBlockRepository } from "./user-block.repository.js";
 import { UserRepository } from "./user.repository.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
 import { realtimeGateway } from "../realtime/realtime.gateway.js";
+import { EventHostReviewRepository } from "../events/event-host-review.repository.js";
 
 interface ListUsersQuery {
   page?: number;
@@ -59,6 +60,7 @@ export class UserService {
     private readonly storageService = new StorageService(),
     private readonly notificationRepository = new NotificationRepository(),
     private readonly eventRepository = new EventRepository(),
+    private readonly eventHostReviewRepository = new EventHostReviewRepository(),
   ) {}
 
   public async create(payload: CreateUserDto): Promise<IUser> {
@@ -210,13 +212,14 @@ export class UserService {
   public async getProfileStats(targetUserId: string): Promise<UserProfileStatsResponse> {
     await this.assertFollowTarget(targetUserId);
 
-    const [followers, following] = await Promise.all([
+    const [followers, following, reviews] = await Promise.all([
       this.userFollowRepository.countFollowers(targetUserId),
       this.userFollowRepository.countFollowing(targetUserId),
+      this.eventHostReviewRepository.countByHostUserId(targetUserId),
     ]);
 
     return {
-      reviews: 0,
+      reviews,
       followers,
       following,
     };
@@ -254,10 +257,50 @@ export class UserService {
 
   public async listReviews(targetUserId: string): Promise<{ reviews: UserReviewResponse[]; count: number }> {
     await this.assertFollowTarget(targetUserId);
+    const reviews = await this.eventHostReviewRepository.findByHostUserId(targetUserId);
+    const reviewerIds = [...new Set(reviews.map((review) => review.reviewerUserId.toString()))];
+    const eventIds = [...new Set(reviews.map((review) => review.eventId.toString()))];
+    const [reviewers, events] = await Promise.all([
+      this.userRepository.findByIds(reviewerIds),
+      this.eventRepository.findManyByIds(eventIds),
+    ]);
+    const reviewerById = new Map(reviewers.map((reviewer) => [reviewer._id.toString(), reviewer]));
+    const eventById = new Map(events.map((event) => [event._id.toString(), event]));
+    const data = await Promise.all(
+      reviews.map(async (review) => {
+        const reviewer = reviewerById.get(review.reviewerUserId.toString()) ?? null;
+        const event = eventById.get(review.eventId.toString()) ?? null;
+        const avatarUrl = reviewer?.avatarKey
+          ? await this.storageService.createDownloadUrl(reviewer.avatarKey).then((download) => download.url).catch(() => null)
+          : null;
+
+        return {
+          id: review._id.toString(),
+          author: reviewer
+            ? {
+                id: reviewer._id.toString(),
+                name: reviewer.name,
+                username: reviewer.username,
+                avatarKey: reviewer.avatarKey ?? null,
+                avatarUrl,
+              }
+            : null,
+          text: review.text ?? "",
+          liked: review.rating === "like",
+          event: event
+            ? {
+                id: event._id.toString(),
+                name: event.name ?? null,
+              }
+            : null,
+          createdAt: review.createdAt,
+        };
+      }),
+    );
 
     return {
-      reviews: [],
-      count: 0,
+      reviews: data,
+      count: data.length,
     };
   }
 

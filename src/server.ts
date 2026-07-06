@@ -16,6 +16,7 @@ import { startCreatorPayoutScheduler } from "./modules/payments/creator-payout.s
 import { ensureCheckoutOrderIndexes } from "./modules/payments/checkout-payment.model.js";
 import { ensureTicketShareIndexes } from "./modules/payments/ticket-share.model.js";
 import { ensureTicketUsageIndexes } from "./modules/payments/ticket-usage.model.js";
+import { ensureEventHostReviewIndexes } from "./modules/events/event-host-review.model.js";
 import { createApp } from "./app.js";
 
 const startServer = async (): Promise<void> => {
@@ -23,6 +24,7 @@ const startServer = async (): Promise<void> => {
   await ensureCheckoutOrderIndexes();
   await ensureTicketShareIndexes();
   await ensureTicketUsageIndexes();
+  await ensureEventHostReviewIndexes();
   await seedAdminUser();
   startEventScheduler();
   startPaymentScheduler();

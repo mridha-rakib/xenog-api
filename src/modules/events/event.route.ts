@@ -16,6 +16,7 @@ router.use((req, res, next) => {
   if (req.method === "GET") return next();
   if (req.method === "POST" && /\/rewards\/[^/]+\/claim$/.test(req.path)) return next();
   if (req.method === "POST" && /\/join-requests$/.test(req.path)) return next();
+  if (req.method === "POST" && /\/host-reviews$/.test(req.path)) return next();
   requireBusinessAccount(req, res, next);
 });
 
@@ -73,6 +74,7 @@ router.patch(
 );
 router.delete("/:id/rewards/:rewardId", validate(eventValidation.eventRewardParams), catchAsync(controller.deleteEventReward));
 router.post("/:id/save", validate(eventValidation.eventParams), catchAsync(controller.saveEvent));
+router.post("/:id/host-reviews", validate(eventValidation.submitHostReview), catchAsync(controller.submitHostReview));
 router.post("/:id/start", validate(eventValidation.eventParams), catchAsync(controller.startEvent));
 router.post("/:id/complete", validate(eventValidation.eventParams), catchAsync(controller.completeEvent));
 router.post("/:id/cancel", validate(eventValidation.eventParams), catchAsync(controller.cancelEvent));

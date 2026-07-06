@@ -13,6 +13,7 @@ import type {
   UpdateEventRewardDto,
   UpdateEventTicketDto,
 } from "./event.interface.js";
+import type { SubmitEventHostReviewDto as SubmitHostReviewDto } from "./event-host-review.interface.js";
 import { EventService } from "./event.service.js";
 
 export class EventController {
@@ -464,6 +465,22 @@ export class EventController {
       message: "Event retrieved",
       data: {
         event,
+      },
+    });
+  };
+
+  public submitHostReview = async (req: Request, res: Response): Promise<void> => {
+    const review = await this.eventService.submitHostReview(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.body as SubmitHostReviewDto,
+    );
+
+    ApiResponse.success(res, {
+      statusCode: httpStatus.CREATED,
+      message: "Review submitted",
+      data: {
+        review,
       },
     });
   };

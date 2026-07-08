@@ -1,6 +1,7 @@
 import type { AuthUser } from "../auth/auth.interface.js";
 import httpStatus from "http-status";
 import { AppError } from "../../core/errors/app-error.js";
+import { createPaginationMeta, getPaginationOptions } from "../../core/utils/pagination.js";
 import { StorageService } from "../storage/storage.service.js";
 import type { IUser } from "../user/user.interface.js";
 import { UserRepository } from "../user/user.repository.js";
@@ -22,6 +23,7 @@ import type {
   MomentMediaItem,
   MomentResponse,
   MomentFeedQuery,
+  ProfileTimelineQuery,
   MomentSaveSummaryResponse,
   MomentTimelineItemResponse,
 } from "./moment.interface.js";
@@ -435,6 +437,25 @@ export class MomentService {
   public async getProfileTimeline(targetUserId: string, viewer?: AuthUser): Promise<{
     items: MomentTimelineItemResponse[];
     stats: { posts: number };
+    pagination?: ReturnType<typeof createPaginationMeta>;
+  }>;
+  public async getProfileTimeline(
+    targetUserId: string,
+    viewer: AuthUser | undefined,
+    query: ProfileTimelineQuery,
+  ): Promise<{
+    items: MomentTimelineItemResponse[];
+    stats: { posts: number };
+    pagination: ReturnType<typeof createPaginationMeta>;
+  }>;
+  public async getProfileTimeline(
+    targetUserId: string,
+    viewer?: AuthUser,
+    query: ProfileTimelineQuery = {},
+  ): Promise<{
+    items: MomentTimelineItemResponse[];
+    stats: { posts: number };
+    pagination?: ReturnType<typeof createPaginationMeta>;
   }> {
     const includePrivate = Boolean(viewer?.id && viewer.id === targetUserId);
     const targetUser = await this.userRepository.findById(targetUserId);
@@ -443,9 +464,14 @@ export class MomentService {
       throw new AppError("User not found", httpStatus.NOT_FOUND);
     }
 
-    const [authoredMoments, shares] = await Promise.all([
-      this.momentRepository.findByUserIdForProfile(targetUserId, includePrivate),
-      this.momentShareRepository.findByUserId(targetUserId),
+    const shouldPaginate = query.page !== undefined || query.limit !== undefined;
+    const { page, limit, skip } = getPaginationOptions({ page: query.page, limit: query.limit ?? 10 });
+    const candidateLimit = shouldPaginate ? skip + limit : undefined;
+    const [authoredMoments, shares, authoredCount, shareCount] = await Promise.all([
+      this.momentRepository.findByUserIdForProfile(targetUserId, includePrivate, { limit: candidateLimit }),
+      this.momentShareRepository.findByUserId(targetUserId, { limit: candidateLimit }),
+      this.momentRepository.countByUserId(targetUserId, includePrivate),
+      this.momentShareRepository.countByUserId(targetUserId),
     ]);
     const sharedMomentIds = shares.map((share) => share.momentId.toString());
     const sharedMoments = await this.momentRepository.findByIds(sharedMomentIds);
@@ -485,13 +511,18 @@ export class MomentService {
         )),
     );
 
-    return {
-      items: [...authoredItems, ...sharedItems].sort(
+    const sortedItems = [...authoredItems, ...sharedItems].sort(
         (firstItem, secondItem) => secondItem.createdAt.getTime() - firstItem.createdAt.getTime(),
-      ),
+      );
+    const pageItems = shouldPaginate ? sortedItems.slice(skip, skip + limit) : sortedItems;
+    const total = authoredCount + shareCount;
+
+    return {
+      items: pageItems,
       stats: {
-        posts: authoredItems.length + sharedItems.length,
+        posts: total,
       },
+      ...(shouldPaginate ? { pagination: createPaginationMeta(page, limit, total) } : {}),
     };
   }
 

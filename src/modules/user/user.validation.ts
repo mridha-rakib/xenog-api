@@ -93,6 +93,16 @@ export const userValidation = {
     query: z.object({
       search: z.string().trim().max(120).optional(),
       limit: z.coerce.number().int().min(1).max(200).optional(),
+      page: z.coerce.number().int().positive().optional(),
+    }),
+  }),
+  profileReviews: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(200).optional(),
+      page: z.coerce.number().int().positive().optional(),
     }),
   }),
   profileResource: z.object({

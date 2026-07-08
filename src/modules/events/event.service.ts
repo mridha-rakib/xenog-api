@@ -3,6 +3,7 @@ import httpStatus from "http-status";
 import { RedisClient } from "../../config/redis.js";
 import { AppError } from "../../core/errors/app-error.js";
 import { logger } from "../../core/logger/logger.js";
+import { createPaginationMeta, getPaginationOptions } from "../../core/utils/pagination.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { StorageService } from "../storage/storage.service.js";
 import { UserRepository } from "../user/user.repository.js";
@@ -46,6 +47,7 @@ import type {
   EventRewardInput,
   JoinRequestResponse,
   ProfileEventGroupsResponse,
+  ProfileEventsQuery,
   CreateEventTicketDto,
   EventResponse,
   EventTicket,
@@ -890,9 +892,10 @@ export class EventService {
   public async listProfileEventsForUser(
     user: AuthUser,
     userId: string,
+    query: ProfileEventsQuery = {},
   ): Promise<ProfileEventGroupsResponse> {
     const isOwner = user.id.toLowerCase() === userId.toLowerCase();
-    return this.listProfileEventsByUserId(userId, isOwner);
+    return this.listProfileEventsByUserId(userId, isOwner, query);
   }
 
   public async listUserEventsForAdmin(userId: string): Promise<ProfileEventGroupsResponse> {
@@ -902,7 +905,25 @@ export class EventService {
   public async listProfileEventsByUserId(
     userId: string,
     includePrivateEvents = true,
+    query: ProfileEventsQuery = {},
   ): Promise<ProfileEventGroupsResponse> {
+    if (query.filter) {
+      const filter = query.filter;
+      const { page, limit, skip } = getPaginationOptions({ page: query.page, limit: query.limit ?? 10 });
+      const [events, total, host] = await Promise.all([
+        this.eventRepository.findProfileEventsByUserId(userId, includePrivateEvents, filter, skip, limit),
+        this.eventRepository.countProfileEventsByUserId(userId, includePrivateEvents, filter),
+        this.userRepository.findById(userId),
+      ]);
+      const responseEvents = await Promise.all(events.map((event) => this.toResponse(event, host)));
+
+      return {
+        active: filter === "past" ? [] : responseEvents,
+        past: filter === "past" ? responseEvents : [],
+        pagination: createPaginationMeta(page, limit, total),
+      };
+    }
+
     const cacheKey = this.getProfileEventsCacheKey(userId, includePrivateEvents);
     const cachedEvents = await this.getCachedProfileEvents(cacheKey);
 

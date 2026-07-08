@@ -236,6 +236,20 @@ export interface EventResponse {
 export interface ProfileEventGroupsResponse {
   active: EventResponse[];
   past: EventResponse[];
+  pagination?: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+}
+
+export type ProfileEventFilter = "active" | "past" | "all";
+
+export interface ProfileEventsQuery {
+  filter?: ProfileEventFilter;
+  page?: number;
+  limit?: number;
 }
 
 export interface EventMapQuery {

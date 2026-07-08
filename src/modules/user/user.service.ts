@@ -42,6 +42,7 @@ interface ListUsersQuery {
 interface ListProfileUsersQuery {
   search?: string;
   limit?: number;
+  page?: number;
 }
 
 interface AdminListUsersQuery {
@@ -229,35 +230,64 @@ export class UserService {
     targetUserId: string,
     viewer: AuthUser,
     query: ListProfileUsersQuery,
-  ): Promise<ProfileFollowUserResponse[]> {
+  ): Promise<{
+    users: ProfileFollowUserResponse[];
+    pagination: ReturnType<typeof createPaginationMeta>;
+  }> {
     await this.assertFollowTarget(targetUserId);
 
-    const limit = query.limit ?? 100;
-    const followerIds = await this.userFollowRepository.findFollowerIds(targetUserId, limit);
+    const { page, limit, skip } = getPaginationOptions({ page: query.page, limit: query.limit ?? 100 });
+    const [followerIds, total] = await Promise.all([
+      this.userFollowRepository.findFollowerIds(targetUserId, limit, skip),
+      this.userFollowRepository.countFollowers(targetUserId),
+    ]);
     const users = await this.userRepository.findActiveUsersByIds(followerIds, query.search, limit);
     const viewerFollowingIds = new Set(await this.userFollowRepository.findFollowingIds(viewer.id));
 
-    return Promise.all(users.map((profileUser) => this.toProfileFollowUserResponse(profileUser, viewerFollowingIds)));
+    return {
+      users: await Promise.all(users.map((profileUser) => this.toProfileFollowUserResponse(profileUser, viewerFollowingIds))),
+      pagination: createPaginationMeta(page, limit, total),
+    };
   }
 
   public async listFollowing(
     targetUserId: string,
     viewer: AuthUser,
     query: ListProfileUsersQuery,
-  ): Promise<ProfileFollowUserResponse[]> {
+  ): Promise<{
+    users: ProfileFollowUserResponse[];
+    pagination: ReturnType<typeof createPaginationMeta>;
+  }> {
     await this.assertFollowTarget(targetUserId);
 
-    const limit = query.limit ?? 100;
-    const followingIds = await this.userFollowRepository.findFollowingIdsForList(targetUserId, limit);
+    const { page, limit, skip } = getPaginationOptions({ page: query.page, limit: query.limit ?? 100 });
+    const [followingIds, total] = await Promise.all([
+      this.userFollowRepository.findFollowingIdsForList(targetUserId, limit, skip),
+      this.userFollowRepository.countFollowing(targetUserId),
+    ]);
     const users = await this.userRepository.findActiveUsersByIds(followingIds, query.search, limit);
     const viewerFollowingIds = new Set(await this.userFollowRepository.findFollowingIds(viewer.id));
 
-    return Promise.all(users.map((profileUser) => this.toProfileFollowUserResponse(profileUser, viewerFollowingIds)));
+    return {
+      users: await Promise.all(users.map((profileUser) => this.toProfileFollowUserResponse(profileUser, viewerFollowingIds))),
+      pagination: createPaginationMeta(page, limit, total),
+    };
   }
 
-  public async listReviews(targetUserId: string): Promise<{ reviews: UserReviewResponse[]; count: number }> {
+  public async listReviews(
+    targetUserId: string,
+    query: { page?: number; limit?: number } = {},
+  ): Promise<{
+    reviews: UserReviewResponse[];
+    count: number;
+    pagination: ReturnType<typeof createPaginationMeta>;
+  }> {
     await this.assertFollowTarget(targetUserId);
-    const reviews = await this.eventHostReviewRepository.findByHostUserId(targetUserId);
+    const { page, limit, skip } = getPaginationOptions({ page: query.page, limit: query.limit ?? 100 });
+    const [reviews, total] = await Promise.all([
+      this.eventHostReviewRepository.findByHostUserId(targetUserId, limit, skip),
+      this.eventHostReviewRepository.countByHostUserId(targetUserId),
+    ]);
     const reviewerIds = [...new Set(reviews.map((review) => review.reviewerUserId.toString()))];
     const eventIds = [...new Set(reviews.map((review) => review.eventId.toString()))];
     const [reviewers, events] = await Promise.all([
@@ -300,7 +330,8 @@ export class UserService {
 
     return {
       reviews: data,
-      count: data.length,
+      count: total,
+      pagination: createPaginationMeta(page, limit, total),
     };
   }
 

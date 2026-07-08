@@ -339,11 +339,18 @@ const feedQuery = z
     path: ["longitude"],
   });
 
+const profileEventsQuery = z.object({
+  filter: z.enum(["active", "past", "all"]).optional(),
+  page: queryNumber(z.number().int().positive()),
+  limit: queryNumber(z.number().int().min(1).max(100)),
+});
+
 export const eventValidation = {
   profileEvents: z.object({
     params: z.object({
       userId: objectId,
     }),
+    query: profileEventsQuery,
   }),
   eventParams: z.object({
     params: z.object({

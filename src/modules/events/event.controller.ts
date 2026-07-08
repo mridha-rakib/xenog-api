@@ -417,6 +417,7 @@ export class EventController {
     const events = await this.eventService.listProfileEventsForUser(
       req.authUser as AuthUser,
       req.params.userId as string,
+      req.query as { filter?: "active" | "past" | "all"; page?: number; limit?: number },
     );
 
     ApiResponse.success(res, {

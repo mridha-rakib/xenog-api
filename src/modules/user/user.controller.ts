@@ -106,43 +106,49 @@ export class UserController {
 
   public listFollowers = async (req: Request, res: Response): Promise<void> => {
     const { id } = req.params as { id: string };
-    const users = await this.userService.listFollowers(
+    const result = await this.userService.listFollowers(
       id,
       req.authUser as AuthUser,
-      req.query as { search?: string; limit?: number },
+      req.query as { search?: string; limit?: number; page?: number },
     );
 
     ApiResponse.success(res, {
       message: "Followers retrieved",
       data: {
-        users,
+        users: result.users,
       },
+      meta: { pagination: result.pagination },
     });
   };
 
   public listFollowing = async (req: Request, res: Response): Promise<void> => {
     const { id } = req.params as { id: string };
-    const users = await this.userService.listFollowing(
+    const result = await this.userService.listFollowing(
       id,
       req.authUser as AuthUser,
-      req.query as { search?: string; limit?: number },
+      req.query as { search?: string; limit?: number; page?: number },
     );
 
     ApiResponse.success(res, {
       message: "Following retrieved",
       data: {
-        users,
+        users: result.users,
       },
+      meta: { pagination: result.pagination },
     });
   };
 
   public listReviews = async (req: Request, res: Response): Promise<void> => {
     const { id } = req.params as { id: string };
-    const reviews = await this.userService.listReviews(id);
+    const result = await this.userService.listReviews(id, req.query as { limit?: number; page?: number });
 
     ApiResponse.success(res, {
       message: "Reviews retrieved",
-      data: reviews,
+      data: {
+        reviews: result.reviews,
+        count: result.count,
+      },
+      meta: { pagination: result.pagination },
     });
   };
 

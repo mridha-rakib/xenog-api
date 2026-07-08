@@ -147,11 +147,16 @@ export class MomentController {
 
   public getProfileTimeline = async (req: Request, res: Response): Promise<void> => {
     const { userId } = req.params as { userId: string };
-    const timeline = await this.momentService.getProfileTimeline(userId, req.authUser as AuthUser | undefined);
+    const timeline = await this.momentService.getProfileTimeline(
+      userId,
+      req.authUser as AuthUser | undefined,
+      req.query as { page?: number; limit?: number },
+    );
 
     ApiResponse.success(res, {
       message: "Profile timeline retrieved",
       data: timeline,
+      meta: timeline.pagination ? { pagination: timeline.pagination } : undefined,
     });
   };
 

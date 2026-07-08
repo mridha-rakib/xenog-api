@@ -25,8 +25,11 @@ export class MomentShareRepository {
     return MomentShareModel.find().sort({ createdAt: -1 }).limit(limit);
   }
 
-  public async findByUserId(userId: string): Promise<IMomentShare[]> {
-    return MomentShareModel.find({ userId }).sort({ createdAt: -1 });
+  public async findByUserId(userId: string, options: { limit?: number; skip?: number } = {}): Promise<IMomentShare[]> {
+    return MomentShareModel.find({ userId })
+      .sort({ createdAt: -1, _id: -1 })
+      .skip(options.skip ?? 0)
+      .limit(options.limit ?? 0);
   }
 
   public async countByUserId(userId: string): Promise<number> {

@@ -31,9 +31,10 @@ export class EventHostReviewRepository {
     });
   }
 
-  public async findByHostUserId(hostUserId: string, limit = 100): Promise<IEventHostReview[]> {
+  public async findByHostUserId(hostUserId: string, limit = 100, skip = 0): Promise<IEventHostReview[]> {
     return EventHostReviewModel.find({ hostUserId })
       .sort({ createdAt: -1, _id: -1 })
+      .skip(skip)
       .limit(limit);
   }
 

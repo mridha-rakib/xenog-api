@@ -127,6 +127,10 @@ export const momentValidation = {
     params: z.object({
       userId: objectId,
     }),
+    query: z.object({
+      page: z.coerce.number().int().positive().optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+    }),
   }),
   createComment: z.object({
     params: z.object({

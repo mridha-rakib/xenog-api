@@ -156,6 +156,11 @@ export interface MomentTimelineItemResponse {
   originalItem?: { type: "post" | "event"; id: string };
 }
 
+export interface ProfileTimelineQuery {
+  page?: number;
+  limit?: number;
+}
+
 export interface CreateMomentShareDto {
   caption?: string | null;
   taggedFriendIds?: string[];

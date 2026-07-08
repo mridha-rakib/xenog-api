@@ -3,6 +3,7 @@ import { EventModel } from "./event.model.js";
 import type {
   EventCategory,
   EventMapQuery,
+  ProfileEventFilter,
   EventReward,
   EventTicket,
   IEvent,
@@ -405,6 +406,77 @@ export class EventRepository {
     ]);
 
     return { active, past };
+  }
+
+  public async findProfileEventsByUserId(
+    userId: string,
+    includePrivateEvents: boolean,
+    filter: ProfileEventFilter,
+    skip: number,
+    limit: number,
+  ): Promise<IEvent[]> {
+    return EventModel.find(this.getPublishedProfileEventsQuery(userId, includePrivateEvents, filter))
+      .sort(this.getProfileEventsSort(filter))
+      .skip(skip)
+      .limit(limit);
+  }
+
+  public async countProfileEventsByUserId(
+    userId: string,
+    includePrivateEvents: boolean,
+    filter: ProfileEventFilter,
+  ): Promise<number> {
+    return EventModel.countDocuments(this.getPublishedProfileEventsQuery(userId, includePrivateEvents, filter));
+  }
+
+  private getPublishedProfileEventsQuery(
+    userId: string,
+    includePrivateEvents: boolean,
+    filter: ProfileEventFilter,
+  ): FilterQuery<IEvent> {
+    const baseQuery: FilterQuery<IEvent> = {
+      userId,
+      ...(includePrivateEvents ? {} : { privacy: { $in: ["public", "locked"] } }),
+    };
+
+    if (filter === "active") {
+      const now = new Date();
+      return {
+        ...baseQuery,
+        status: { $in: ["published", "live"] },
+        $or: [
+          { scheduledAt: { $gt: now } },
+          { scheduledAt: { $lte: now }, endAt: { $gte: now } },
+        ],
+      };
+    }
+
+    if (filter === "past") {
+      const now = new Date();
+      return {
+        ...baseQuery,
+        $or: [
+          { status: { $in: ["completed", "cancelled"] } },
+          {
+            status: { $in: ["published", "live"] },
+            endAt: { $lt: now },
+          },
+        ],
+      };
+    }
+
+    return {
+      ...baseQuery,
+      status: { $ne: "draft" },
+    };
+  }
+
+  private getProfileEventsSort(filter: ProfileEventFilter): Record<string, SortOrder> {
+    if (filter === "active") {
+      return { scheduledAt: 1, publishedAt: -1, _id: -1 };
+    }
+
+    return { scheduledAt: -1, publishedAt: -1, _id: -1 };
   }
 
   public async findMapEvents(query: EventMapQuery & { activeSince: Date }): Promise<IEvent[]> {

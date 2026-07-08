@@ -102,12 +102,19 @@ export class MomentRepository {
     return MomentModel.find({ userId, isEventAnnouncement: { $ne: true } }).sort({ createdAt: -1 });
   }
 
-  public async findByUserIdForProfile(userId: string, includePrivate: boolean): Promise<IMoment[]> {
+  public async findByUserIdForProfile(
+    userId: string,
+    includePrivate: boolean,
+    options: { limit?: number; skip?: number } = {},
+  ): Promise<IMoment[]> {
     return MomentModel.find({
       userId,
       isEventAnnouncement: { $ne: true },
       ...(includePrivate ? {} : { audience: "public" }),
-    }).sort({ createdAt: -1 });
+    })
+      .sort({ createdAt: -1, _id: -1 })
+      .skip(options.skip ?? 0)
+      .limit(options.limit ?? 0);
   }
 
   public async findById(id: string): Promise<IMoment | null> {

@@ -71,7 +71,7 @@ router.get(
 router.get(
   "/:id/reviews",
   authenticate,
-  validate(userValidation.profileResource),
+  validate(userValidation.profileReviews),
   catchAsync(controller.listReviews),
 );
 router.post(

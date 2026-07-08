@@ -37,18 +37,20 @@ export class UserFollowRepository {
     return followingIds.map((id) => id.toString());
   }
 
-  public async findFollowerIds(followingId: string, limit: number): Promise<string[]> {
+  public async findFollowerIds(followingId: string, limit: number, skip = 0): Promise<string[]> {
     const follows = await UserFollowModel.find({ followingId })
       .sort({ createdAt: -1, _id: -1 })
+      .skip(skip)
       .limit(limit)
       .select("followerId");
 
     return follows.map((follow) => follow.followerId.toString());
   }
 
-  public async findFollowingIdsForList(followerId: string, limit: number): Promise<string[]> {
+  public async findFollowingIdsForList(followerId: string, limit: number, skip = 0): Promise<string[]> {
     const follows = await UserFollowModel.find({ followerId })
       .sort({ createdAt: -1, _id: -1 })
+      .skip(skip)
       .limit(limit)
       .select("followingId");
 

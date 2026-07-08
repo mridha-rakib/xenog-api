@@ -1,6 +1,7 @@
 import httpStatus from "http-status";
 import { AppError } from "../../core/errors/app-error.js";
 import type { AuthUser } from "../auth/auth.interface.js";
+import { EventChatAccessService } from "../events/event-chat-access.service.js";
 import { StorageService } from "../storage/storage.service.js";
 import type { IUser } from "../user/user.interface.js";
 import { UserRepository } from "../user/user.repository.js";
@@ -28,9 +29,13 @@ export class LiveRoomService {
     private readonly messageRepository = new LiveRoomMessageRepository(),
     private readonly userRepository = new UserRepository(),
     private readonly storageService = new StorageService(),
+    private readonly eventChatAccessService = new EventChatAccessService(),
   ) {}
 
-  public async createLiveRoom(user: AuthUser, payload: CreateLiveRoomDto): Promise<LiveRoomResponse> {
+  public async createLiveRoom(
+    user: AuthUser,
+    payload: CreateLiveRoomDto,
+  ): Promise<LiveRoomResponse> {
     const liveRoom = await this.liveRoomRepository.create({
       hostUserId: user.id,
       title: payload.title.trim(),
@@ -44,12 +49,16 @@ export class LiveRoomService {
   }
 
   public async getLiveRoom(user: AuthUser, liveRoomId: string): Promise<LiveRoomResponse> {
+    await this.assertEventChatAccess(user, liveRoomId);
+
     const liveRoom = await this.getExistingLiveRoom(liveRoomId);
 
     return this.toResponse(liveRoom, user);
   }
 
   public async joinLiveRoom(user: AuthUser, liveRoomId: string): Promise<LiveRoomResponse> {
+    await this.assertEventChatAccess(user, liveRoomId);
+
     const liveRoom = await this.getExistingLiveRoom(liveRoomId);
 
     if (liveRoom.status !== "live") {
@@ -77,16 +86,23 @@ export class LiveRoomService {
     const liveRoom = await this.getExistingLiveRoom(liveRoomId);
 
     if (liveRoom.hostUserId.toString() !== user.id) {
-      throw new AppError("Only the room host can update speaking permissions.", httpStatus.FORBIDDEN);
+      throw new AppError(
+        "Only the room host can update speaking permissions.",
+        httpStatus.FORBIDDEN,
+      );
     }
 
-    const updatedLiveRoom = await this.liveRoomRepository.updatePermissionsByIdForHost(liveRoomId, user.id, {
-      allowAllParticipantsToSpeak: payload.allowAllParticipantsToSpeak,
-      speakerIds:
-        payload.speakerIds === undefined
-          ? undefined
-          : this.normalizeSpeakerIds(payload.speakerIds, user.id),
-    });
+    const updatedLiveRoom = await this.liveRoomRepository.updatePermissionsByIdForHost(
+      liveRoomId,
+      user.id,
+      {
+        allowAllParticipantsToSpeak: payload.allowAllParticipantsToSpeak,
+        speakerIds:
+          payload.speakerIds === undefined
+            ? undefined
+            : this.normalizeSpeakerIds(payload.speakerIds, user.id),
+      },
+    );
 
     if (!updatedLiveRoom) {
       throw new AppError("Live room not found.", httpStatus.NOT_FOUND);
@@ -100,6 +116,8 @@ export class LiveRoomService {
     liveRoomId: string,
     query: ListLiveRoomMessagesQuery,
   ): Promise<LiveRoomMessageResponse[]> {
+    await this.assertEventChatAccess(user, liveRoomId);
+
     const liveRoom = await this.liveRoomRepository.findById(liveRoomId);
 
     if (!liveRoom) {
@@ -116,6 +134,8 @@ export class LiveRoomService {
     liveRoomId: string,
     payload: CreateLiveRoomMessageDto,
   ): Promise<LiveRoomMessageResponse> {
+    await this.assertEventChatAccess(user, liveRoomId);
+
     const liveRoom = await this.getExistingLiveRoom(liveRoomId);
 
     if (liveRoom.status !== "live") {
@@ -133,8 +153,18 @@ export class LiveRoomService {
     return this.toMessageResponse(message, user);
   }
 
+  public async assertEventChatAccess(user: AuthUser, eventId: string): Promise<void> {
+    await this.eventChatAccessService.assertEventChatAccess(eventId, user.id);
+  }
+
   private normalizeSpeakerIds(speakerIds: string[], hostUserId: string): string[] {
-    return [...new Set(speakerIds.map((speakerId) => speakerId.trim()).filter((speakerId) => speakerId !== hostUserId))];
+    return [
+      ...new Set(
+        speakerIds
+          .map((speakerId) => speakerId.trim())
+          .filter((speakerId) => speakerId !== hostUserId),
+      ),
+    ];
   }
 
   private async getExistingLiveRoom(liveRoomId: string): Promise<ILiveRoom> {
@@ -168,7 +198,9 @@ export class LiveRoomService {
       allowAllParticipantsToSpeak: liveRoom.allowAllParticipantsToSpeak,
       speakerIds,
       listenerCount,
-      participants: await Promise.all(participants.map((participant) => this.toParticipantResponse(participant, liveRoom))),
+      participants: await Promise.all(
+        participants.map((participant) => this.toParticipantResponse(participant, liveRoom)),
+      ),
       status: liveRoom.status,
       viewerPermissions: {
         isHost,
@@ -193,14 +225,20 @@ export class LiveRoomService {
       id: participant._id.toString(),
       user: await this.toUserResponse(user),
       isActive: participant.isActive,
-      canSpeak: isHost || liveRoom.allowAllParticipantsToSpeak || liveRoom.speakerIds.some((speakerId) => speakerId.toString() === userId),
+      canSpeak:
+        isHost ||
+        liveRoom.allowAllParticipantsToSpeak ||
+        liveRoom.speakerIds.some((speakerId) => speakerId.toString() === userId),
       isHost,
       joinedAt: participant.joinedAt,
       leftAt: participant.leftAt ?? null,
     };
   }
 
-  private async toMessageResponse(message: ILiveRoomMessage, viewer: AuthUser): Promise<LiveRoomMessageResponse> {
+  private async toMessageResponse(
+    message: ILiveRoomMessage,
+    viewer: AuthUser,
+  ): Promise<LiveRoomMessageResponse> {
     const senderId = message.senderId.toString();
     const sender = senderId === viewer.id ? viewer : await this.userRepository.findById(senderId);
     const senderResponse = await this.toUserResponse(sender);
@@ -217,7 +255,9 @@ export class LiveRoomService {
     };
   }
 
-  private async toUserResponse(user: IUser | AuthUser | null): Promise<LiveRoomUserResponse | null> {
+  private async toUserResponse(
+    user: IUser | AuthUser | null,
+  ): Promise<LiveRoomUserResponse | null> {
     if (!user) {
       return null;
     }

@@ -130,11 +130,13 @@ export class CheckoutPaymentService {
         ...receivedShares.map((share) => share.orderId.toString()),
       ]),
     ];
-    const [events, usages] = await Promise.all([
+    const [events, usages, followingIds] = await Promise.all([
       this.eventRepository.findManyByIds(eventIds),
       this.ticketUsageRepository.findByEventIdsAndOrderIds(eventIds, orderIds),
+      this.userFollowRepository.findFollowingIds(user.id),
     ]);
     const eventById = new Map(events.map((event) => [event._id.toString(), event]));
+    const followingIdSet = new Set(followingIds);
     const userIds = [
       ...new Set([
         ...events.map((event) => event.userId.toString()),
@@ -171,7 +173,13 @@ export class CheckoutPaymentService {
         }
 
         const host = userById.get(event.userId.toString()) ?? null;
-        const walletItem = this.toTicketWalletItem(order, lineItem, event, host);
+        const walletItem = this.toTicketWalletItem(
+          order,
+          lineItem,
+          event,
+          host,
+          followingIdSet.has(event.userId.toString()),
+        );
         const itemKey = `${lineItem.eventId}:${lineItem.itemId}`;
         for (const ticketPass of walletItem.ticketPasses) {
           const ticketPassKey = this.getTicketPassKey(lineItem.eventId, lineItem.itemId, ticketPass.orderId, ticketPass.ticketIndex);
@@ -228,7 +236,16 @@ export class CheckoutPaymentService {
           this.getTicketPassKey(share.eventId, share.ticketId, share.orderId.toString(), share.ticketIndex ?? 1),
         ) ?? null;
 
-        return this.toSharedTicketWalletItem(share, order, event, ticket, host, owner, usage);
+        return this.toSharedTicketWalletItem(
+          share,
+          order,
+          event,
+          ticket,
+          host,
+          owner,
+          usage,
+          followingIdSet.has(event.userId.toString()),
+        );
       })
       .filter((item): item is TicketWalletItem => Boolean(item));
 
@@ -1598,6 +1615,7 @@ export class CheckoutPaymentService {
     lineItem: CheckoutOrderLineItem,
     event: IEvent,
     host: IUser | null,
+    isFollowing: boolean,
   ): TicketWalletItem {
     const { paidQuantity, freeQuantity, totalQuantity } = this.getEffectiveTicketQuantities(event, lineItem);
     const ticketPasses = this.buildTicketPasses(order, lineItem, event);
@@ -1641,6 +1659,7 @@ export class CheckoutPaymentService {
               name: host.name,
               username: host.username,
               avatarKey: host.avatarKey ?? null,
+              isFollowing,
             }
           : null,
       },
@@ -1655,6 +1674,7 @@ export class CheckoutPaymentService {
     host: IUser | null,
     owner: IUser | null,
     usage: ITicketUsage | null,
+    isFollowing: boolean,
   ): TicketWalletItem {
     const unitAmount = roundCurrency(ticket.type === "free" ? 0 : ticket.price);
     const ticketIndex = share.ticketIndex ?? 1;
@@ -1707,7 +1727,7 @@ export class CheckoutPaymentService {
             }
           : null,
         status: event.status,
-        host: host ? this.toWalletUser(host) : null,
+        host: host ? { ...this.toWalletUser(host), isFollowing } : null,
       },
     };
   }

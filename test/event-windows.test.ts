@@ -12,11 +12,13 @@ process.env.JWT_ACCESS_SECRET =
 
 const eventId = new Types.ObjectId();
 const windowId = new Types.ObjectId();
+const otherWindowId = new Types.ObjectId();
 const hostId = new Types.ObjectId();
 const attendeeId = new Types.ObjectId();
 const otherAttendeeId = new Types.ObjectId();
 const usageId = new Types.ObjectId();
 const now = new Date();
+const eventPrivacies = ["public", "locked", "private"] as const;
 
 const host = {
   id: hostId.toString(),
@@ -85,6 +87,16 @@ const event = {
   updatedAt: now,
 };
 
+const eventForPrivacy = (
+  privacy: (typeof eventPrivacies)[number],
+  overrides: Record<string, unknown> = {},
+) => ({
+  ...event,
+  privacy,
+  memberUserIds: privacy === "private" ? [attendeeId] : [],
+  ...overrides,
+});
+
 const createWindowDoc = (overrides = {}) => ({
   _id: windowId,
   eventId,
@@ -128,7 +140,9 @@ const validImageMedia = (overrides = {}) => ([{
 const createService = async (overrides: {
   event?: unknown;
   window?: unknown;
+  windows?: unknown[];
   existingPost?: unknown;
+  existingPostsByWindow?: Record<string, unknown>;
   attendance?: unknown;
   createPostResult?: unknown;
   acceptedPosts?: unknown[];
@@ -149,7 +163,7 @@ const createService = async (overrides: {
       allowedContentTypes: payload.allowedContentTypes,
       maxPosts: payload.maxPosts,
     }),
-    findByEventId: async () => [window],
+    findByEventId: async () => overrides.windows ?? [window],
     findByIdForEvent: async () => window,
     updateByIdForEvent: async (_eventId: string, _windowId: string, payload: Record<string, unknown>) => (
       hasOverride("updateResult")
@@ -161,7 +175,13 @@ const createService = async (overrides: {
     ),
     cancelByIdForEvent: async () => ({ ...(window as object), status: "cancelled", cancelledAt: now }),
     countAcceptedPosts: async () => overrides.countAcceptedPosts ?? 0,
-    findAcceptedPostByUser: async () => hasOverride("existingPost") ? overrides.existingPost : null,
+    findAcceptedPostByUser: async (lookupWindowId: string) => {
+      if (overrides.existingPostsByWindow) {
+        return overrides.existingPostsByWindow[lookupWindowId] ?? null;
+      }
+
+      return hasOverride("existingPost") ? overrides.existingPost : null;
+    },
     findAcceptedPostByIdForWindow: async () => overrides.mediaPost ?? createPostDoc({
       mediaItems: [{
         type: "image",
@@ -234,6 +254,54 @@ test("host can create a valid event window", async () => {
   assert.equal(window.hostUserId, hostId.toString());
   assert.deepEqual(window.allowedContentTypes, ["text", "image"]);
   assert.equal(window.maxPosts, 25);
+});
+
+test("published events cannot be managed before they are started", async () => {
+  const service = await createService({
+    event: {
+      ...event,
+      status: "published",
+      startedAt: null,
+    },
+  });
+  const payload = {
+    startsAt: new Date(Date.now() - 10 * 60 * 1000),
+    endsAt: new Date(Date.now() + 10 * 60 * 1000),
+    allowedContentTypes: ["text"],
+    maxPosts: 1,
+  };
+
+  await assert.rejects(() => service.createWindow(host, eventId.toString(), payload), { statusCode: 422 });
+  await assert.rejects(() => service.updateWindow(host, eventId.toString(), windowId.toString(), { maxPosts: 3 }), { statusCode: 422 });
+  await assert.rejects(() => service.cancelWindow(host, eventId.toString(), windowId.toString()), { statusCode: 422 });
+});
+
+test("event windows must end in the future when created or edited", async () => {
+  const service = await createService();
+  const pastWindow = createWindowDoc({
+    startsAt: new Date(Date.now() - 30 * 60 * 1000),
+    endsAt: new Date(Date.now() - 10 * 60 * 1000),
+  });
+  const scheduledService = await createService({
+    window: createWindowDoc({
+      startsAt: new Date(Date.now() + 30 * 60 * 1000),
+      endsAt: new Date(Date.now() + 60 * 60 * 1000),
+    }),
+  });
+
+  await assert.rejects(
+    () => service.createWindow(host, eventId.toString(), {
+      startsAt: pastWindow.startsAt,
+      endsAt: pastWindow.endsAt,
+      allowedContentTypes: ["text"],
+      maxPosts: 1,
+    }),
+    { statusCode: 400 },
+  );
+  await assert.rejects(
+    () => scheduledService.updateWindow(host, eventId.toString(), windowId.toString(), { endsAt: pastWindow.endsAt }),
+    { statusCode: 400 },
+  );
 });
 
 test("non-host cannot create, edit, or cancel event windows", async () => {
@@ -335,6 +403,164 @@ test("window capacity limit is enforced", async () => {
   );
 });
 
+for (const privacy of eventPrivacies) {
+  test(`host can create window only when live for ${privacy} events`, async () => {
+    const liveService = await createService({ event: eventForPrivacy(privacy) });
+    const publishedService = await createService({
+      event: eventForPrivacy(privacy, { status: "published", startedAt: null }),
+    });
+    const payload = {
+      startsAt: new Date(Date.now() - 10 * 60 * 1000),
+      endsAt: new Date(Date.now() + 10 * 60 * 1000),
+      allowedContentTypes: ["text"],
+      maxPosts: 1,
+    };
+
+    await liveService.createWindow(host, eventId.toString(), payload);
+    await assert.rejects(() => publishedService.createWindow(host, eventId.toString(), payload), { statusCode: 422 });
+  });
+
+  test(`non-host cannot manage windows for ${privacy} events`, async () => {
+    const service = await createService({ event: eventForPrivacy(privacy) });
+
+    await assert.rejects(() => service.createWindow(attendee, eventId.toString(), {
+      startsAt: new Date(Date.now() - 10 * 60 * 1000),
+      endsAt: new Date(Date.now() + 10 * 60 * 1000),
+      allowedContentTypes: ["text"],
+      maxPosts: 1,
+    }), { statusCode: 403 });
+    await assert.rejects(() => service.updateWindow(attendee, eventId.toString(), windowId.toString(), { maxPosts: 3 }), { statusCode: 403 });
+    await assert.rejects(() => service.cancelWindow(attendee, eventId.toString(), windowId.toString()), { statusCode: 403 });
+  });
+
+  test(`checked-in attendee can post in open ${privacy} event window`, async () => {
+    const service = await createService({ event: eventForPrivacy(privacy) });
+    const post = await service.createPost(attendee, eventId.toString(), windowId.toString(), {
+      contentType: "text",
+      text: "Checked in attendee",
+      mediaItems: [],
+    });
+
+    assert.equal(post.windowId, windowId.toString());
+    assert.equal(post.userId, attendeeId.toString());
+  });
+
+  test(`non-checked-in ticket owner cannot post in ${privacy} event window`, async () => {
+    const service = await createService({
+      event: eventForPrivacy(privacy),
+      attendance: null,
+    });
+
+    await assert.rejects(
+      () => service.createPost(attendee, eventId.toString(), windowId.toString(), {
+        contentType: "text",
+        text: "Ticket owner only",
+        mediaItems: [],
+      }),
+      (error: unknown) => {
+        assert.ok([403, 404].includes((error as { statusCode?: number }).statusCode ?? 0));
+        return true;
+      },
+    );
+  });
+
+  if (privacy === "private") {
+    test("private member without ticket scan cannot post in private event window", async () => {
+      const service = await createService({
+        event: eventForPrivacy("private", { memberUserIds: [attendeeId] }),
+        attendance: null,
+      });
+
+      await assert.rejects(
+        () => service.createPost(attendee, eventId.toString(), windowId.toString(), {
+          contentType: "text",
+          text: "Member only",
+          mediaItems: [],
+        }),
+        { statusCode: 403 },
+      );
+    });
+
+    test("private non-member with ticket scan cannot access private event windows", async () => {
+      const service = await createService({
+        event: eventForPrivacy("private", { memberUserIds: [otherAttendeeId] }),
+      });
+
+      await assert.rejects(
+        () => service.listWindows(attendee, eventId.toString()),
+        { statusCode: 404 },
+      );
+      await assert.rejects(
+        () => service.createPost(attendee, eventId.toString(), windowId.toString(), {
+          contentType: "text",
+          text: "Checked in but not invited",
+          mediaItems: [],
+        }),
+        { statusCode: 404 },
+      );
+    });
+  }
+
+  test(`full ${privacy} event window rejects additional posts`, async () => {
+    const service = await createService({
+      event: eventForPrivacy(privacy),
+      createPostResult: { status: "unavailable" },
+    });
+
+    await assert.rejects(
+      () => service.createPost(attendee, eventId.toString(), windowId.toString(), {
+        contentType: "text",
+        text: "Too late",
+        mediaItems: [],
+      }),
+      { statusCode: 409 },
+    );
+  });
+
+  test(`live ${privacy} event attendee cannot view other posts`, async () => {
+    const service = await createService({
+      event: eventForPrivacy(privacy),
+      existingPost: createPostDoc(),
+      acceptedPosts: [
+        createPostDoc({ text: "First" }),
+        createPostDoc({ userId: otherAttendeeId, text: "Second" }),
+      ],
+    });
+
+    await assert.rejects(
+      () => service.listPosts(attendee, eventId.toString(), windowId.toString(), { limit: 20 }),
+      { statusCode: 403 },
+    );
+  });
+
+  test(`completed ${privacy} event attendee can view participated window only`, async () => {
+    const participatedWindow = createWindowDoc({ _id: windowId, title: "Joined" });
+    const missedWindow = createWindowDoc({ _id: otherWindowId, title: "Missed" });
+    const service = await createService({
+      event: eventForPrivacy(privacy, { status: "completed", completedAt: now }),
+      window: participatedWindow,
+      windows: [participatedWindow, missedWindow],
+      existingPostsByWindow: {
+        [windowId.toString()]: createPostDoc({ windowId }),
+      },
+      acceptedPosts: [
+        createPostDoc({ text: "First" }),
+        createPostDoc({ userId: otherAttendeeId, text: "Second" }),
+      ],
+    });
+
+    const windows = await service.listWindows(attendee, eventId.toString());
+    const posts = await service.listPosts(attendee, eventId.toString(), windowId.toString(), { limit: 20 });
+
+    assert.deepEqual(windows.map((window) => window.id), [windowId.toString()]);
+    assert.deepEqual(posts.posts.map((post) => post.text), ["First", "Second"]);
+    await assert.rejects(
+      () => service.listPosts(attendee, eventId.toString(), otherWindowId.toString(), { limit: 20 }),
+      { statusCode: 403 },
+    );
+  });
+}
+
 test("user who did not post cannot view window posts", async () => {
   const service = await createService({ existingPost: null });
 
@@ -344,7 +570,7 @@ test("user who did not post cannot view window posts", async () => {
   );
 });
 
-test("user who posted can view posts from the same window", async () => {
+test("checked-in attendee cannot view other users' posts during live event", async () => {
   const service = await createService({
     existingPost: createPostDoc(),
     acceptedPosts: [
@@ -352,11 +578,78 @@ test("user who posted can view posts from the same window", async () => {
       createPostDoc({ userId: otherAttendeeId, text: "Second" }),
     ],
   });
-  const result = await service.listPosts(attendee, eventId.toString(), windowId.toString(), { limit: 20 });
-  const { posts } = result;
 
-  assert.equal(posts.length, 2);
-  assert.deepEqual(posts.map((post) => post.text), ["First", "Second"]);
+  await assert.rejects(
+    () => service.listPosts(attendee, eventId.toString(), windowId.toString(), { limit: 20 }),
+    { statusCode: 403 },
+  );
+});
+
+test("checked-in attendee who participated can view same-window posts after event ended", async () => {
+  const service = await createService({
+    event: { ...event, status: "completed", completedAt: now },
+    existingPost: createPostDoc(),
+    acceptedPosts: [
+      createPostDoc({ text: "First" }),
+      createPostDoc({ userId: otherAttendeeId, text: "Second" }),
+    ],
+  });
+  const result = await service.listPosts(attendee, eventId.toString(), windowId.toString(), { limit: 20 });
+
+  assert.equal(result.posts.length, 2);
+  assert.deepEqual(result.posts.map((post) => post.text), ["First", "Second"]);
+});
+
+test("completed event window listing only includes windows the attendee participated in", async () => {
+  const participatedWindow = createWindowDoc({ _id: windowId, title: "Joined" });
+  const missedWindow = createWindowDoc({ _id: otherWindowId, title: "Missed" });
+  const service = await createService({
+    event: { ...event, status: "completed", completedAt: now },
+    window: participatedWindow,
+    windows: [participatedWindow, missedWindow],
+    existingPostsByWindow: {
+      [windowId.toString()]: createPostDoc({ windowId }),
+    },
+  });
+  const windows = await service.listWindows(attendee, eventId.toString());
+
+  assert.deepEqual(windows.map((window) => window.id), [windowId.toString()]);
+  assert.equal(windows[0]?.canViewPosts, true);
+});
+
+test("attendee cannot view a completed window they did not participate in", async () => {
+  const service = await createService({
+    event: { ...event, status: "completed", completedAt: now },
+    existingPostsByWindow: {
+      [windowId.toString()]: createPostDoc({ windowId }),
+    },
+  });
+
+  await assert.rejects(
+    () => service.listPosts(attendee, eventId.toString(), otherWindowId.toString(), { limit: 20 }),
+    { statusCode: 403 },
+  );
+});
+
+test("ticket owner without check-in cannot view or post in event windows", async () => {
+  const service = await createService({
+    event: { ...event, status: "completed", completedAt: now },
+    attendance: null,
+    existingPost: createPostDoc(),
+  });
+
+  await assert.rejects(
+    () => service.createPost(attendee, eventId.toString(), windowId.toString(), {
+      contentType: "text",
+      text: "I own a ticket",
+      mediaItems: [],
+    }),
+    { statusCode: 403 },
+  );
+  await assert.rejects(
+    () => service.listPosts(attendee, eventId.toString(), windowId.toString(), { limit: 20 }),
+    { statusCode: 403 },
+  );
 });
 
 test("host and admin can view window posts for moderation", async () => {
@@ -382,9 +675,10 @@ test("user who did not post cannot access same-window media", async () => {
   );
 });
 
-test("posted user can access same-window media", async () => {
+test("posted user can access same-window media after event ended", async () => {
   const postId = new Types.ObjectId();
   const service = await createService({
+    event: { ...event, status: "completed", completedAt: now },
     existingPost: createPostDoc(),
     mediaPost: createPostDoc({
       _id: postId,
@@ -396,6 +690,22 @@ test("posted user can access same-window media", async () => {
 
   assert.equal(media.key, `event-windows/${eventId.toString()}/${windowId.toString()}/${attendeeId.toString()}/photo.jpg`);
   assert.equal(media.contentType, "image/jpeg");
+});
+
+test("posted user cannot access same-window media during live event", async () => {
+  const postId = new Types.ObjectId();
+  const service = await createService({
+    existingPost: createPostDoc(),
+    mediaPost: createPostDoc({
+      _id: postId,
+      mediaItems: validImageMedia(),
+    }),
+  });
+
+  await assert.rejects(
+    () => service.getAuthorizedMedia(attendee, eventId.toString(), windowId.toString(), postId.toString(), 0),
+    { statusCode: 403 },
+  );
 });
 
 test("host and admin can access event window media for moderation", async () => {
@@ -414,6 +724,7 @@ test("host and admin can access event window media for moderation", async () => 
 
 test("event window post response uses authorized media paths instead of storage keys", async () => {
   const service = await createService({
+    event: { ...event, status: "completed", completedAt: now },
     existingPost: createPostDoc(),
     acceptedPosts: [
       createPostDoc({
@@ -543,6 +854,7 @@ test("gallery pagination returns limited results", async () => {
   const firstPostId = new Types.ObjectId();
   const secondPostId = new Types.ObjectId();
   const service = await createService({
+    event: { ...event, status: "completed", completedAt: now },
     existingPost: createPostDoc(),
     acceptedPosts: [
       createPostDoc({ _id: firstPostId, text: "First" }),

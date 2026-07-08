@@ -140,6 +140,7 @@ export interface TicketWalletEventHost {
   name: string;
   username?: string;
   avatarKey?: string | null;
+  isFollowing?: boolean;
 }
 
 export interface TicketWalletEvent {

@@ -45,6 +45,7 @@ export class EventWindowService {
     const event = await this.getEventForHost(user, eventId);
     this.ensureEventHasNotEnded(event);
     this.validateWindowPayloadWithinEvent(event, payload.startsAt, payload.endsAt);
+    this.ensureWindowEndsInFuture(payload.endsAt);
 
     const window = await this.eventWindowRepository.create({
       ...payload,
@@ -52,11 +53,11 @@ export class EventWindowService {
       hostUserId: user.id,
     });
 
-    return this.toWindowResponse(window, user);
+    return this.toWindowResponse(window, user, false, false, event);
   }
 
   public async listWindows(user: AuthUser, eventId: string): Promise<EventWindowResponse[]> {
-    await this.getAccessibleEvent(user, eventId);
+    const event = await this.getAccessibleEvent(user, eventId);
     const [windows, attendance] = await Promise.all([
       this.eventWindowRepository.findByEventId(eventId),
       this.ticketUsageRepository.findByEventIdAndHolderUserId(eventId, user.id),
@@ -70,11 +71,16 @@ export class EventWindowService {
       }
     }));
 
-    return windows.map((window) => this.toWindowResponse(
+    const visibleWindows = !this.canModerateEvent(user, event) && this.hasEventEnded(event)
+      ? windows.filter((window) => postedWindowIds.has(window._id.toString()))
+      : windows;
+
+    return visibleWindows.map((window) => this.toWindowResponse(
       window,
       user,
       postedWindowIds.has(window._id.toString()),
       Boolean(attendance),
+      event,
     ));
   }
 
@@ -103,10 +109,7 @@ export class EventWindowService {
     const startsAt = payload.startsAt ?? window.startsAt;
     const endsAt = payload.endsAt ?? window.endsAt;
     this.validateWindowPayloadWithinEvent(event, startsAt, endsAt);
-
-    if (computedStatus === "open" && endsAt <= new Date()) {
-      throw new AppError("Open window end time must stay in the future.", httpStatus.BAD_REQUEST);
-    }
+    this.ensureWindowEndsInFuture(endsAt);
 
     if (payload.maxPosts !== undefined && payload.maxPosts < window.acceptedPostCount) {
       throw new AppError("Window post limit cannot be lower than accepted post count.", httpStatus.UNPROCESSABLE_ENTITY);
@@ -129,11 +132,11 @@ export class EventWindowService {
       throw new AppError("Event window not found.", httpStatus.NOT_FOUND);
     }
 
-    return this.toWindowResponse(updatedWindow, user);
+    return this.toWindowResponse(updatedWindow, user, false, false, event);
   }
 
   public async cancelWindow(user: AuthUser, eventId: string, windowId: string): Promise<EventWindowResponse> {
-    await this.getEventForHost(user, eventId);
+    const event = await this.getEventForHost(user, eventId);
     const currentWindow = await this.getWindowForEvent(eventId, windowId);
     const computedStatus = this.computeWindowStatus(currentWindow);
 
@@ -151,7 +154,7 @@ export class EventWindowService {
       throw new AppError("Event window not found.", httpStatus.NOT_FOUND);
     }
 
-    return this.toWindowResponse(window, user);
+    return this.toWindowResponse(window, user, false, false, event);
   }
 
   public async createPost(
@@ -218,12 +221,7 @@ export class EventWindowService {
     const event = await this.getAccessibleEvent(user, eventId);
     await this.getWindowForEvent(eventId, windowId);
 
-    if (!this.canModerateEvent(user, event)) {
-      const ownPost = await this.eventWindowRepository.findAcceptedPostByUser(windowId, user.id);
-      if (!ownPost) {
-        throw new AppError("Post in this window to view its posts.", httpStatus.FORBIDDEN);
-      }
-    }
+    await this.ensureCanViewWindowPosts(user, event, windowId);
 
     const posts = await this.eventWindowRepository.listAcceptedPosts(windowId, options);
     const pagePosts = posts.slice(0, options.limit);
@@ -245,12 +243,7 @@ export class EventWindowService {
     const event = await this.getAccessibleEvent(user, eventId);
     await this.getWindowForEvent(eventId, windowId);
 
-    if (!this.canModerateEvent(user, event)) {
-      const ownPost = await this.eventWindowRepository.findAcceptedPostByUser(windowId, user.id);
-      if (!ownPost) {
-        throw new AppError("Post in this window to view its media.", httpStatus.FORBIDDEN);
-      }
-    }
+    await this.ensureCanViewWindowPosts(user, event, windowId);
 
     const post = await this.eventWindowRepository.findAcceptedPostByIdForWindow(windowId, postId);
     if (!post) {
@@ -280,7 +273,7 @@ export class EventWindowService {
       return event;
     }
 
-    if (event.status !== "published" && event.status !== "live") {
+    if (event.status !== "published" && event.status !== "live" && event.status !== "completed") {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
@@ -302,8 +295,8 @@ export class EventWindowService {
       throw new AppError("Only the event host can manage event windows.", httpStatus.FORBIDDEN);
     }
 
-    if (event.status !== "published" && event.status !== "live") {
-      throw new AppError("Windows can only be managed for published or live events.", httpStatus.UNPROCESSABLE_ENTITY);
+    if (event.status !== "live") {
+      throw new AppError("Event windows can only be managed after the event has started.", httpStatus.UNPROCESSABLE_ENTITY);
     }
 
     return event;
@@ -339,8 +332,41 @@ export class EventWindowService {
     }
   }
 
+  private ensureWindowEndsInFuture(endsAt: Date): void {
+    if (endsAt <= new Date()) {
+      throw new AppError("Window end time must be in the future.", httpStatus.BAD_REQUEST);
+    }
+  }
+
   private canModerateEvent(user: AuthUser, event: IEvent): boolean {
     return user.role === "admin" || event.userId.toString() === user.id;
+  }
+
+  private hasEventEnded(event: IEvent): boolean {
+    return event.status === "completed";
+  }
+
+  private async ensureCanViewWindowPosts(user: AuthUser, event: IEvent, windowId: string): Promise<void> {
+    if (this.canModerateEvent(user, event)) {
+      return;
+    }
+
+    const [attendance, ownPost] = await Promise.all([
+      this.ticketUsageRepository.findByEventIdAndHolderUserId(event._id.toString(), user.id),
+      this.eventWindowRepository.findAcceptedPostByUser(windowId, user.id),
+    ]);
+
+    if (!attendance) {
+      throw new AppError("You must check in with a scanned ticket before viewing this window.", httpStatus.FORBIDDEN);
+    }
+
+    if (!ownPost) {
+      throw new AppError("Post in this window to view its posts.", httpStatus.FORBIDDEN);
+    }
+
+    if (!this.hasEventEnded(event)) {
+      throw new AppError("Window posts are revealed after the event ends.", httpStatus.FORBIDDEN);
+    }
   }
 
   private computeWindowStatus(window: IEventWindow): EventWindowComputedStatus {
@@ -366,10 +392,12 @@ export class EventWindowService {
     user: AuthUser,
     hasPosted = false,
     hasAttended = false,
+    event?: IEvent,
   ): EventWindowResponse {
     const computedStatus = this.computeWindowStatus(window);
     const remainingSlots = Math.max(0, window.maxPosts - window.acceptedPostCount);
     const canModerate = user.role === "admin" || window.hostUserId.toString() === user.id;
+    const canViewPosts = canModerate || (hasPosted && event !== undefined && this.hasEventEnded(event));
 
     return {
       id: window._id.toString(),
@@ -387,7 +415,7 @@ export class EventWindowService {
       hasAttended,
       hasPosted,
       canPost: !canModerate && hasAttended && computedStatus === "open" && !hasPosted && remainingSlots > 0,
-      canViewPosts: canModerate || hasPosted,
+      canViewPosts,
       remainingSlots,
       createdAt: window.createdAt,
       updatedAt: window.updatedAt,

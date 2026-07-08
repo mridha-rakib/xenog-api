@@ -428,7 +428,10 @@ export class EventController {
   };
 
   public listMapEvents = async (req: Request, res: Response): Promise<void> => {
-    const events = await this.eventService.listMapEvents(req.query as unknown as EventMapQuery);
+    const events = await this.eventService.listMapEvents(
+      req.authUser as AuthUser,
+      req.query as unknown as EventMapQuery,
+    );
 
     ApiResponse.success(res, {
       message: "Map events retrieved",

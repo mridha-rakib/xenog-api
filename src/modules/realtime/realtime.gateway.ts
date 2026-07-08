@@ -14,6 +14,7 @@ import { ChatService } from "../chat/chat.service.js";
 import type { GroupMessageResponse } from "../chat/group.interface.js";
 import { GroupService } from "../chat/group.service.js";
 import { GroupRepository } from "../chat/group.repository.js";
+import type { LiveRoomMessageResponse } from "../live-rooms/live-room.interface.js";
 import { LiveRoomService } from "../live-rooms/live-room.service.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
 import { presenceService } from "./presence.service.js";
@@ -26,7 +27,10 @@ type RealtimeClient = {
   liveRooms: Set<string>;
 };
 
-const objectId = z.string().trim().regex(/^[a-f\d]{24}$/i);
+const objectId = z
+  .string()
+  .trim()
+  .regex(/^[a-f\d]{24}$/i);
 const chatMessageFields = {
   messageType: z.enum(["text", "image", "video", "audio", "location", "event"]).optional(),
   text: z.string().trim().max(2000).optional(),
@@ -50,26 +54,33 @@ const validateRealtimeChatBody = (
 };
 
 const clientMessageSchema = z.union([
-  z.object({
-    type: z.literal("dm:message"),
-    clientMessageId: z.string().trim().min(1).max(120).optional(),
-    recipientId: objectId,
-    ...chatMessageFields,
-  }).strict().superRefine(validateRealtimeChatBody),
+  z
+    .object({
+      type: z.literal("dm:message"),
+      clientMessageId: z.string().trim().min(1).max(120).optional(),
+      recipientId: objectId,
+      ...chatMessageFields,
+    })
+    .strict()
+    .superRefine(validateRealtimeChatBody),
   z.object({
     type: z.literal("dm:typing"),
     recipientId: objectId,
     isTyping: z.boolean(),
   }),
-  z.object({
-    type: z.literal("dm:message:edit"),
-    messageId: objectId,
-    text: z.string().trim().min(1).max(2000),
-  }).strict(),
-  z.object({
-    type: z.literal("dm:message:delete"),
-    messageId: objectId,
-  }).strict(),
+  z
+    .object({
+      type: z.literal("dm:message:edit"),
+      messageId: objectId,
+      text: z.string().trim().min(1).max(2000),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("dm:message:delete"),
+      messageId: objectId,
+    })
+    .strict(),
   z.object({
     type: z.literal("live:join"),
     roomId: z.string().trim().min(1).max(160),
@@ -84,21 +95,28 @@ const clientMessageSchema = z.union([
     roomId: z.string().trim().min(1).max(160),
     text: z.string().trim().min(1).max(1000),
   }),
-  z.object({
-    type: z.literal("group:message"),
-    clientMessageId: z.string().trim().min(1).max(120).optional(),
-    groupId: objectId,
-    ...chatMessageFields,
-  }).strict().superRefine(validateRealtimeChatBody),
-  z.object({
-    type: z.literal("group:message:edit"),
-    messageId: objectId,
-    text: z.string().trim().min(1).max(2000),
-  }).strict(),
-  z.object({
-    type: z.literal("group:message:delete"),
-    messageId: objectId,
-  }).strict(),
+  z
+    .object({
+      type: z.literal("group:message"),
+      clientMessageId: z.string().trim().min(1).max(120).optional(),
+      groupId: objectId,
+      ...chatMessageFields,
+    })
+    .strict()
+    .superRefine(validateRealtimeChatBody),
+  z
+    .object({
+      type: z.literal("group:message:edit"),
+      messageId: objectId,
+      text: z.string().trim().min(1).max(2000),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("group:message:delete"),
+      messageId: objectId,
+    })
+    .strict(),
   z.object({
     type: z.literal("ping"),
   }),
@@ -150,7 +168,9 @@ export class RealtimeGateway {
       this.heartbeatInterval = undefined;
     }
 
-    const clients = Array.from(this.clientsByUserId.values()).flatMap((userClients) => Array.from(userClients));
+    const clients = Array.from(this.clientsByUserId.values()).flatMap((userClients) =>
+      Array.from(userClients),
+    );
     for (const client of clients) {
       this.removeClient(client);
       client.socket.terminate();
@@ -258,7 +278,7 @@ export class RealtimeGateway {
         await this.handleGroupMessageDelete(client, message);
         return;
       case "live:join":
-        this.joinLiveRoom(client, message.roomId);
+        await this.handleLiveJoin(client, message);
         return;
       case "live:leave":
         this.leaveLiveRoom(client, message.roomId);
@@ -338,7 +358,11 @@ export class RealtimeGateway {
     let updated: DirectMessageResponse;
 
     try {
-      updated = await this.chatService.editDirectMessage(client.user, message.messageId, message.text);
+      updated = await this.chatService.editDirectMessage(
+        client.user,
+        message.messageId,
+        message.text,
+      );
     } catch (error) {
       if (error instanceof AppError) {
         this.sendError(client.socket, "MESSAGE_EDIT_FAILED", error.message);
@@ -501,7 +525,11 @@ export class RealtimeGateway {
     let updated: GroupMessageResponse;
 
     try {
-      updated = await this.groupService.editGroupMessage(client.user, message.messageId, message.text);
+      updated = await this.groupService.editGroupMessage(
+        client.user,
+        message.messageId,
+        message.text,
+      );
     } catch (error) {
       if (error instanceof AppError) {
         this.sendError(client.socket, "MESSAGE_EDIT_FAILED", error.message);
@@ -563,8 +591,6 @@ export class RealtimeGateway {
     client: RealtimeClient,
     message: Extract<ClientMessage, { type: "live:message" }>,
   ): Promise<void> | void {
-    this.joinLiveRoom(client, message.roomId);
-
     if (objectId.safeParse(message.roomId).success) {
       return this.handlePersistedLiveMessage(client, message);
     }
@@ -583,13 +609,44 @@ export class RealtimeGateway {
     });
   }
 
+  private async handleLiveJoin(
+    client: RealtimeClient,
+    message: Extract<ClientMessage, { type: "live:join" }>,
+  ): Promise<void> {
+    if (objectId.safeParse(message.roomId).success) {
+      try {
+        await this.liveRoomService.assertEventChatAccess(client.user, message.roomId);
+      } catch (error) {
+        if (error instanceof AppError) {
+          this.sendError(client.socket, "EVENT_CHAT_ACCESS_DENIED", error.message);
+          return;
+        }
+
+        throw error;
+      }
+    }
+
+    this.joinLiveRoom(client, message.roomId);
+  }
+
   private async handlePersistedLiveMessage(
     client: RealtimeClient,
     message: Extract<ClientMessage, { type: "live:message" }>,
   ): Promise<void> {
-    const savedMessage = await this.liveRoomService.createMessage(client.user, message.roomId, {
-      text: message.text,
-    });
+    let savedMessage: LiveRoomMessageResponse;
+
+    try {
+      savedMessage = await this.liveRoomService.createMessage(client.user, message.roomId, {
+        text: message.text,
+      });
+    } catch (error) {
+      if (error instanceof AppError) {
+        this.sendError(client.socket, "EVENT_CHAT_ACCESS_DENIED", error.message);
+        return;
+      }
+
+      throw error;
+    }
 
     this.broadcastToLiveRoom(message.roomId, {
       type: "live:message",
@@ -698,7 +755,9 @@ export class RealtimeGateway {
   }
 
   private terminateDeadClients(): void {
-    const clients = Array.from(this.clientsByUserId.values()).flatMap((userClients) => Array.from(userClients));
+    const clients = Array.from(this.clientsByUserId.values()).flatMap((userClients) =>
+      Array.from(userClients),
+    );
 
     for (const client of clients) {
       if (client.socket.readyState !== WebSocket.OPEN) {

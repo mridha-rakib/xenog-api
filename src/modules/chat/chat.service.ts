@@ -477,14 +477,26 @@ export class ChatService {
       throw new AppError("You cannot send a direct message to yourself.", httpStatus.BAD_REQUEST);
     }
 
-    const [friend, senderFollowsRecipient, recipientFollowsSender] = await Promise.all([
+    const [
+      friend,
+      senderFollowsRecipient,
+      recipientFollowsSender,
+      senderBlockedRecipient,
+      recipientBlockedSender,
+    ] = await Promise.all([
       this.userRepository.findById(friendId),
       this.userFollowRepository.isFollowing(userId, friendId),
       this.userFollowRepository.isFollowing(friendId, userId),
+      this.userBlockRepository.isBlocked(userId, friendId),
+      this.userBlockRepository.isBlocked(friendId, userId),
     ]);
 
     if (!friend || friend.role !== "user" || !friend.isActive || !friend.emailVerified) {
       throw new AppError("Friend not found.", httpStatus.NOT_FOUND);
+    }
+
+    if (senderBlockedRecipient || recipientBlockedSender) {
+      throw new AppError("You cannot message this user.", httpStatus.FORBIDDEN);
     }
 
     if (!senderFollowsRecipient || !recipientFollowsSender) {

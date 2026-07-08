@@ -20,6 +20,7 @@ import { presenceService } from "./presence.service.js";
 import { sendPushNotifications } from "../notifications/fcm.service.js";
 
 type RealtimeClient = {
+  isAlive: boolean;
   socket: WebSocket;
   user: AuthUser;
   liveRooms: Set<string>;
@@ -108,6 +109,7 @@ type ClientMessage = z.infer<typeof clientMessageSchema>;
 export class RealtimeGateway {
   private readonly clientsByUserId = new Map<string, Set<RealtimeClient>>();
   private readonly liveRooms = new Map<string, Set<RealtimeClient>>();
+  private heartbeatInterval?: ReturnType<typeof setInterval>;
   private wss?: WebSocketServer;
 
   public constructor(
@@ -137,18 +139,32 @@ export class RealtimeGateway {
     this.wss.on("connection", (socket, request) => {
       void this.handleConnection(socket, request);
     });
+    this.heartbeatInterval = setInterval(() => this.terminateDeadClients(), 30_000);
 
     logger.info({ path: "/ws" }, "Realtime WebSocket gateway attached");
   }
 
   public close(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = undefined;
+    }
+
+    const clients = Array.from(this.clientsByUserId.values()).flatMap((userClients) => Array.from(userClients));
+    for (const client of clients) {
+      this.removeClient(client);
+      client.socket.terminate();
+    }
+
     this.wss?.close();
+    this.wss = undefined;
   }
 
   private async handleConnection(socket: WebSocket, request: IncomingMessage): Promise<void> {
     try {
       const user = await this.authenticateRequest(request);
       const client: RealtimeClient = {
+        isAlive: true,
         liveRooms: new Set(),
         socket,
         user,
@@ -165,6 +181,9 @@ export class RealtimeGateway {
 
       socket.on("message", (data) => {
         void this.handleMessage(client, data);
+      });
+      socket.on("pong", () => {
+        client.isAlive = true;
       });
       socket.on("close", () => this.removeClient(client));
       socket.on("error", (error) => {
@@ -662,7 +681,11 @@ export class RealtimeGateway {
 
   private send(socket: WebSocket, payload: unknown): void {
     if (socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(payload));
+      try {
+        socket.send(JSON.stringify(payload));
+      } catch (error) {
+        logger.warn({ error }, "Realtime socket send failed");
+      }
     }
   }
 
@@ -672,6 +695,30 @@ export class RealtimeGateway {
       message,
       type: "error",
     });
+  }
+
+  private terminateDeadClients(): void {
+    const clients = Array.from(this.clientsByUserId.values()).flatMap((userClients) => Array.from(userClients));
+
+    for (const client of clients) {
+      if (client.socket.readyState !== WebSocket.OPEN) {
+        continue;
+      }
+
+      if (!client.isAlive) {
+        logger.warn({ userId: client.user.id }, "Terminating stale realtime socket");
+        client.socket.terminate();
+        continue;
+      }
+
+      client.isAlive = false;
+      try {
+        client.socket.ping();
+      } catch (error) {
+        logger.warn({ error, userId: client.user.id }, "Realtime ping failed");
+        client.socket.terminate();
+      }
+    }
   }
 }
 

@@ -73,6 +73,13 @@ export class TicketShareRepository {
     }).sort({ sharedAt: -1, _id: -1 });
   }
 
+  public async findActiveByEventId(eventId: string): Promise<ITicketShare[]> {
+    return TicketShareModel.find({
+      eventId,
+      status: "active",
+    }).sort({ sharedAt: -1, _id: -1 });
+  }
+
   public async hasActiveShareForRecipientAtEvent(recipientUserId: string, eventId: string): Promise<boolean> {
     const share = await TicketShareModel.findOne({
       recipientUserId,

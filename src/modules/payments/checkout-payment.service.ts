@@ -17,6 +17,9 @@ import type {
   CheckoutOrderLineItem,
   CheckoutOrderResponse,
   CreateCheckoutIntentDto,
+  EventTicketStatItemResponse,
+  EventTicketStatItemStatus,
+  EventTicketStatUserResponse,
   ICheckoutOrder,
   ITicketShare,
   ITicketUsage,
@@ -92,6 +95,98 @@ export class CheckoutPaymentService {
     }
 
     return { stats };
+  }
+
+  public async getEventTicketStatItems(
+    user: AuthUser,
+    eventId: string,
+  ): Promise<{ tickets: EventTicketStatItemResponse[] }> {
+    const event = await this.eventRepository.findByIdForUser(eventId, user.id);
+
+    if (!event) {
+      throw new AppError("Event not found", httpStatus.NOT_FOUND);
+    }
+
+    const orders = await this.repository.findTicketStatOrdersByEventId(eventId);
+    const orderIds = orders.map((order) => order._id.toString());
+    const [activeShares, usages] = await Promise.all([
+      this.ticketShareRepository.findActiveByEventId(eventId),
+      this.ticketUsageRepository.findByEventIdsAndOrderIds([eventId], orderIds),
+    ]);
+    const activeShareByTicketPass = new Map(
+      activeShares.map((share) => [
+        this.getTicketPassKey(share.eventId, share.ticketId, share.orderId.toString(), share.ticketIndex ?? 1),
+        share,
+      ]),
+    );
+    const usageByTicketPass = new Map(
+      usages.map((usage) => [
+        this.getTicketPassKey(usage.eventId, usage.ticketId, usage.orderId.toString(), usage.ticketIndex),
+        usage,
+      ]),
+    );
+    const userIds = new Set<string>();
+
+    for (const order of orders) {
+      userIds.add(order.userId.toString());
+    }
+
+    for (const share of activeShares) {
+      userIds.add(share.recipientUserId.toString());
+    }
+
+    for (const usage of usages) {
+      userIds.add(usage.holderUserId.toString());
+    }
+
+    const users = userIds.size > 0 ? await this.userRepository.findByIds([...userIds]) : [];
+    const userById = new Map(users.map((item) => [item._id.toString(), item]));
+    const tickets: EventTicketStatItemResponse[] = [];
+
+    for (const order of orders) {
+      for (const ticketPass of order.ticketPasses) {
+        if (ticketPass.eventId !== eventId) {
+          continue;
+        }
+
+        const lineItem = order.lineItems.find(
+          (item) =>
+            item.itemType === "ticket" &&
+            item.eventId === eventId &&
+            item.itemId === ticketPass.ticketId,
+        );
+
+        if (!lineItem) {
+          continue;
+        }
+
+        const key = this.getTicketPassKey(
+          ticketPass.eventId,
+          ticketPass.ticketId,
+          order._id.toString(),
+          ticketPass.ticketIndex,
+        );
+        const usage = usageByTicketPass.get(key) ?? null;
+        const activeShare = activeShareByTicketPass.get(key) ?? null;
+        const holderUserId =
+          usage?.holderUserId.toString() ??
+          activeShare?.recipientUserId.toString() ??
+          order.userId.toString();
+        const attendee = userById.get(holderUserId) ?? null;
+        const ticket = event.tickets.find((item) => item.id === ticketPass.ticketId);
+
+        tickets.push({
+          id: `${order._id.toString()}-${ticketPass.ticketId}-${ticketPass.ticketIndex}`,
+          attendee: attendee ? this.toTicketStatUser(attendee) : null,
+          ticketName: ticket?.name ?? lineItem.name,
+          amount: this.getTicketPassAmount(lineItem, ticketPass.ticketIndex),
+          currency: order.currency,
+          status: this.getTicketStatItemStatus(order, usage),
+        });
+      }
+    }
+
+    return { tickets };
   }
 
   public async getMyTicketWallet(user: AuthUser): Promise<TicketWalletItem[]> {
@@ -1558,6 +1653,28 @@ export class CheckoutPaymentService {
 
   private getTicketPassKey(eventId: string, ticketId: string, orderId: string, ticketIndex: number): string {
     return `${eventId}:${ticketId}:${orderId}:${ticketIndex}`;
+  }
+
+  private getTicketPassAmount(lineItem: CheckoutOrderLineItem, ticketIndex: number): number {
+    const paidQuantity = lineItem.paidQuantity ?? lineItem.quantity;
+
+    return ticketIndex <= paidQuantity ? lineItem.unitAmount : 0;
+  }
+
+  private getTicketStatItemStatus(
+    order: ICheckoutOrder,
+    usage: ITicketUsage | null,
+  ): EventTicketStatItemStatus {
+    return usage ? "checked_in" : order.paymentStatus;
+  }
+
+  private toTicketStatUser(user: IUser): EventTicketStatUserResponse {
+    return {
+      id: user._id.toString(),
+      name: user.name,
+      username: user.username,
+      avatarKey: user.avatarKey ?? null,
+    };
   }
 
   private getStoredCheckInCode(

@@ -261,3 +261,21 @@ export interface ScanTicketResponse {
   holderName: string;
   usedAt: Date;
 }
+
+export type EventTicketStatItemStatus = "checked_in" | CheckoutPaymentStatus;
+
+export interface EventTicketStatUserResponse {
+  id: string;
+  name: string;
+  username?: string;
+  avatarKey?: string | null;
+}
+
+export interface EventTicketStatItemResponse {
+  id: string;
+  attendee: EventTicketStatUserResponse | null;
+  ticketName: string;
+  amount: number;
+  currency: string;
+  status: EventTicketStatItemStatus;
+}

@@ -75,6 +75,16 @@ export class CheckoutPaymentController {
     });
   };
 
+  public getEventTicketStatItems = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const result = await this.service.getEventTicketStatItems(req.authUser as AuthUser, id);
+
+    ApiResponse.success(res, {
+      message: "Event ticket stat items retrieved",
+      data: result,
+    });
+  };
+
   public getMyTicketWallet = async (req: Request, res: Response): Promise<void> => {
     const tickets = await this.service.getMyTicketWallet(req.authUser as AuthUser);
 

@@ -1,8 +1,11 @@
 import type { FilterQuery, SortOrder, Types, UpdateQuery } from "mongoose";
 import { EventModel } from "./event.model.js";
 import type {
+  EventAgeRestriction,
   EventCategory,
   EventMapQuery,
+  EventPriceFilter,
+  EventTimePeriod,
   ProfileEventFilter,
   EventReward,
   EventTicket,
@@ -25,6 +28,29 @@ type PublicFeedEventOptions = {
   radiusKm?: number;
   activeOnly?: boolean;
   limit?: number;
+  ageRestriction?: EventAgeRestriction;
+  priceFilter?: EventPriceFilter;
+  date?: string;
+  timePeriod?: EventTimePeriod;
+  timezoneOffsetMinutes?: number;
+  hashtags?: string[];
+};
+
+type LocationFilter = {
+  latitude: number;
+  longitude: number;
+  radiusKm: number;
+};
+
+type EventFilterOptions = PublicFeedEventOptions | (EventMapQuery & { activeSince?: Date });
+
+const EXACT_RADIUS_EPSILON_KM = 0.000001;
+const MINUTES_PER_DAY = 24 * 60;
+const TIME_PERIOD_RANGES: Record<Exclude<EventTimePeriod, "any">, { start: number; end: number }> = {
+  morning: { start: 5 * 60, end: 12 * 60 },
+  noon: { start: 12 * 60, end: 17 * 60 },
+  evening: { start: 17 * 60, end: 21 * 60 },
+  late_night: { start: 21 * 60, end: 5 * 60 },
 };
 
 const toRadians = (value: number) => (value * Math.PI) / 180;
@@ -49,6 +75,228 @@ const getDistanceKm = (
 
 const isFiniteCoordinate = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
+
+const getLocationFilter = (options: EventFilterOptions): LocationFilter | null =>
+  isFiniteCoordinate(options.latitude) &&
+  isFiniteCoordinate(options.longitude) &&
+  isFiniteCoordinate(options.radiusKm)
+    ? {
+        latitude: options.latitude,
+        longitude: options.longitude,
+        radiusKm: options.radiusKm,
+      }
+    : null;
+
+const getTimezoneOffsetMinutes = (options: EventFilterOptions): number =>
+  typeof options.timezoneOffsetMinutes === "number" && Number.isFinite(options.timezoneOffsetMinutes)
+    ? options.timezoneOffsetMinutes
+    : 0;
+
+const parseDateKey = (value: string): { year: number; month: number; day: number } | null => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) {
+    return null;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return null;
+  }
+
+  return { year, month, day };
+};
+
+const localDateTimeToUtc = (
+  dateKey: string,
+  hour: number,
+  minute: number,
+  timezoneOffsetMinutes: number,
+  dayOffset = 0,
+): Date | null => {
+  const parsed = parseDateKey(dateKey);
+  if (!parsed) {
+    return null;
+  }
+
+  return new Date(Date.UTC(parsed.year, parsed.month - 1, parsed.day + dayOffset, hour, minute) + timezoneOffsetMinutes * 60_000);
+};
+
+const addDateAndTimeFilter = (filters: FilterQuery<IEvent>[], options: EventFilterOptions): void => {
+  const date = options.date;
+  const timePeriod = options.timePeriod && options.timePeriod !== "any" ? options.timePeriod : undefined;
+  const timezoneOffsetMinutes = getTimezoneOffsetMinutes(options);
+
+  if (date) {
+    const range = timePeriod ? TIME_PERIOD_RANGES[timePeriod] : null;
+    const startMinutes = range?.start ?? 0;
+    const endMinutes = range?.end ?? MINUTES_PER_DAY;
+    const crossesMidnight = Boolean(range && endMinutes <= startMinutes);
+    const start = localDateTimeToUtc(date, Math.floor(startMinutes / 60), startMinutes % 60, timezoneOffsetMinutes);
+    const end = localDateTimeToUtc(
+      date,
+      Math.floor(endMinutes / 60),
+      endMinutes % 60,
+      timezoneOffsetMinutes,
+      crossesMidnight || !range ? 1 : 0,
+    );
+
+    if (start && end) {
+      filters.push({ scheduledAt: { $gte: start, $lt: end } });
+    }
+
+    return;
+  }
+
+  if (!timePeriod) {
+    return;
+  }
+
+  const range = TIME_PERIOD_RANGES[timePeriod];
+  const timezone = offsetMinutesToTimezone(timezoneOffsetMinutes);
+  const minuteOfDayExpression = {
+    $add: [
+      { $multiply: [{ $hour: { date: "$scheduledAt", timezone } }, 60] },
+      { $minute: { date: "$scheduledAt", timezone } },
+    ],
+  };
+
+  filters.push({
+    $expr: timePeriod === "late_night"
+      ? {
+          $or: [
+            { $gte: [minuteOfDayExpression, range.start] },
+            { $lt: [minuteOfDayExpression, range.end] },
+          ],
+        }
+      : {
+          $and: [
+            { $gte: [minuteOfDayExpression, range.start] },
+            { $lt: [minuteOfDayExpression, range.end] },
+          ],
+        },
+  } as FilterQuery<IEvent>);
+};
+
+const offsetMinutesToTimezone = (offsetMinutes: number): string => {
+  const localOffsetMinutes = -offsetMinutes;
+  const sign = localOffsetMinutes >= 0 ? "+" : "-";
+  const absoluteMinutes = Math.abs(localOffsetMinutes);
+  const hours = String(Math.floor(absoluteMinutes / 60)).padStart(2, "0");
+  const minutes = String(absoluteMinutes % 60).padStart(2, "0");
+
+  return `${sign}${hours}:${minutes}`;
+};
+
+const getAvailableTicketPrice = (ticket: EventTicket): number | null => {
+  if (ticket.capacity <= 0 || ticket.availableCount === 0) {
+    return null;
+  }
+
+  const price = ticket.type === "free" ? 0 : ticket.price;
+
+  return Number.isFinite(price) && price >= 0 ? price : null;
+};
+
+const getAvailableTicketPrices = (event: IEvent): number[] =>
+  event.tickets
+    .map(getAvailableTicketPrice)
+    .filter((price): price is number => typeof price === "number");
+
+const matchesPriceFilter = (event: IEvent, priceFilter?: EventPriceFilter): boolean => {
+  if (!priceFilter) {
+    return true;
+  }
+
+  const prices = getAvailableTicketPrices(event);
+  if (prices.length === 0) {
+    return false;
+  }
+
+  const minimumPrice = Math.min(...prices);
+
+  if (priceFilter === "free") return prices.some((price) => price === 0);
+  if (priceFilter === "lt_10") return minimumPrice < 10;
+  if (priceFilter === "lt_50") return minimumPrice < 50;
+  if (priceFilter === "lt_100") return minimumPrice < 100;
+  return minimumPrice >= 100;
+};
+
+const addPriceCandidateFilter = (filters: FilterQuery<IEvent>[], priceFilter?: EventPriceFilter): void => {
+  if (!priceFilter || priceFilter === "gte_100") {
+    return;
+  }
+
+  const ticketAvailabilityConditions = [
+    { capacity: { $gt: 0 } },
+    { $or: [{ availableCount: { $gt: 0 } }, { availableCount: null }, { availableCount: { $exists: false } }] },
+  ];
+  const priceQuery =
+    priceFilter === "free"
+      ? { $or: [{ type: "free" }, { price: 0 }] }
+      : { price: { $lt: priceFilter === "lt_10" ? 10 : priceFilter === "lt_50" ? 50 : 100 } };
+
+  filters.push({
+    tickets: {
+      $elemMatch: {
+        $and: [...ticketAvailabilityConditions, priceQuery],
+      },
+    },
+  });
+};
+
+const addSharedEventFilters = (filters: FilterQuery<IEvent>[], options: EventFilterOptions): void => {
+  if (options.ageRestriction) {
+    filters.push({ ageRestriction: options.ageRestriction });
+  }
+
+  if (options.hashtags?.length) {
+    filters.push({ hashtags: { $all: options.hashtags } });
+  }
+
+  addPriceCandidateFilter(filters, options.priceFilter);
+  addDateAndTimeFilter(filters, options);
+};
+
+const addCategoryFilter = (filters: FilterQuery<IEvent>[], category?: EventCategory): void => {
+  if (!category) {
+    return;
+  }
+
+  filters.push({ $or: [{ categories: category }, { category }] });
+};
+
+const filterAndLimitEvents = (
+  events: IEvent[],
+  options: EventFilterOptions,
+  locationFilter: LocationFilter | null,
+): IEvent[] => {
+  const exactEvents = events.filter((event) => {
+    if (!matchesPriceFilter(event, options.priceFilter)) {
+      return false;
+    }
+
+    if (!locationFilter) {
+      return true;
+    }
+
+    const latitude = event.location?.latitude;
+    const longitude = event.location?.longitude;
+
+    if (!isFiniteCoordinate(latitude) || !isFiniteCoordinate(longitude)) {
+      return false;
+    }
+
+    return getDistanceKm(
+      { latitude: locationFilter.latitude, longitude: locationFilter.longitude },
+      { latitude, longitude },
+    ) <= locationFilter.radiusKm + EXACT_RADIUS_EPSILON_KM;
+  });
+
+  return options.limit ? exactEvents.slice(0, options.limit) : exactEvents;
+};
 
 export class EventRepository {
   public async countStatusesByUserIds(
@@ -88,6 +336,7 @@ export class EventRepository {
       bannerOriginalImageKey: payload.bannerOriginalImageKey ?? null,
       bannerImageDisplay: payload.bannerImageDisplay ?? null,
       ageRestriction: payload.ageRestriction ?? null,
+      hashtags: payload.hashtags ?? [],
       category: payload.categories?.[0] ?? payload.category ?? null,
       categories: payload.categories ?? (payload.category ? [payload.category] : []),
       scheduledAt: payload.scheduledAt ?? null,
@@ -177,6 +426,8 @@ export class EventRepository {
       filters.push({ $or: [{ categories: options.category }, { category: options.category }] });
     }
 
+    addSharedEventFilters(filters, options);
+
     if (options.activeOnly) {
       const now = new Date();
       const activeSince = new Date(now.getTime() - 12 * 60 * 60 * 1000);
@@ -189,16 +440,7 @@ export class EventRepository {
       });
     }
 
-    const locationFilter =
-      isFiniteCoordinate(options.latitude) &&
-      isFiniteCoordinate(options.longitude) &&
-      isFiniteCoordinate(options.radiusKm)
-        ? {
-            latitude: options.latitude,
-            longitude: options.longitude,
-            radiusKm: options.radiusKm,
-          }
-        : null;
+    const locationFilter = getLocationFilter(options);
 
     if (locationFilter) {
       const radiusKm = Math.max(1, locationFilter.radiusKm);
@@ -225,23 +467,7 @@ export class EventRepository {
       : { publishedAt: -1, createdAt: -1, _id: -1 };
     const events = await EventModel.find(query).sort(sort);
 
-    const exactEvents = locationFilter
-      ? events.filter((event) => {
-          const latitude = event.location?.latitude;
-          const longitude = event.location?.longitude;
-
-          if (!isFiniteCoordinate(latitude) || !isFiniteCoordinate(longitude)) {
-            return false;
-          }
-
-          return getDistanceKm(
-            { latitude: locationFilter.latitude, longitude: locationFilter.longitude },
-            { latitude, longitude },
-          ) <= locationFilter.radiusKm;
-        })
-      : events;
-
-    return options.limit ? exactEvents.slice(0, options.limit) : exactEvents;
+    return filterAndLimitEvents(events, options, locationFilter);
   }
 
   public async findPrivateFeedEventsForUser(
@@ -263,6 +489,8 @@ export class EventRepository {
       filters.push({ $or: [{ categories: options.category }, { category: options.category }] });
     }
 
+    addSharedEventFilters(filters, options);
+
     if (options.activeOnly) {
       const now = new Date();
       const activeSince = new Date(now.getTime() - 12 * 60 * 60 * 1000);
@@ -275,16 +503,7 @@ export class EventRepository {
       });
     }
 
-    const locationFilter =
-      isFiniteCoordinate(options.latitude) &&
-      isFiniteCoordinate(options.longitude) &&
-      isFiniteCoordinate(options.radiusKm)
-        ? {
-            latitude: options.latitude,
-            longitude: options.longitude,
-            radiusKm: options.radiusKm,
-          }
-        : null;
+    const locationFilter = getLocationFilter(options);
 
     if (locationFilter) {
       const radiusKm = Math.max(1, locationFilter.radiusKm);
@@ -311,23 +530,7 @@ export class EventRepository {
       : { publishedAt: -1, createdAt: -1, _id: -1 };
     const events = await EventModel.find(query).sort(sort);
 
-    const exactEvents = locationFilter
-      ? events.filter((event) => {
-          const latitude = event.location?.latitude;
-          const longitude = event.location?.longitude;
-
-          if (!isFiniteCoordinate(latitude) || !isFiniteCoordinate(longitude)) {
-            return false;
-          }
-
-          return getDistanceKm(
-            { latitude: locationFilter.latitude, longitude: locationFilter.longitude },
-            { latitude, longitude },
-          ) <= locationFilter.radiusKm;
-        })
-      : events;
-
-    return options.limit ? exactEvents.slice(0, options.limit) : exactEvents;
+    return filterAndLimitEvents(events, options, locationFilter);
   }
 
   public async findActiveAndUpcomingByUserId(userId: string, activeSince: Date, now: Date): Promise<IEvent[]> {
@@ -480,7 +683,7 @@ export class EventRepository {
   }
 
   public async findMapEvents(query: EventMapQuery & { activeSince: Date }): Promise<IEvent[]> {
-    const eventQuery: FilterQuery<IEvent> = {
+    const filters: FilterQuery<IEvent>[] = [{
       status: { $in: ["published", "live"] },
       privacy: { $in: ["public", "locked"] },
       $or: [
@@ -490,34 +693,40 @@ export class EventRepository {
       ],
       "location.latitude": { $type: "number" },
       "location.longitude": { $type: "number" },
-    };
+    }];
+    addCategoryFilter(filters, query.category);
+    addSharedEventFilters(filters, query);
+    const locationFilter = getLocationFilter(query);
 
-    if (typeof query.latitude === "number" && typeof query.longitude === "number" && typeof query.radiusKm === "number") {
-      const latitudeDelta = query.radiusKm / 111.32;
-      const longitudeDelta = query.radiusKm / (111.32 * Math.max(Math.cos((query.latitude * Math.PI) / 180), 0.01));
+    if (locationFilter) {
+      const latitudeDelta = locationFilter.radiusKm / 111.32;
+      const longitudeDelta = locationFilter.radiusKm / (111.32 * Math.max(Math.cos((locationFilter.latitude * Math.PI) / 180), 0.01));
 
-      eventQuery["location.latitude"] = {
-        $type: "number",
-        $gte: query.latitude - latitudeDelta,
-        $lte: query.latitude + latitudeDelta,
-      };
-      eventQuery["location.longitude"] = {
-        $type: "number",
-        $gte: query.longitude - longitudeDelta,
-        $lte: query.longitude + longitudeDelta,
-      };
+      filters.push({
+        "location.latitude": {
+          $type: "number",
+          $gte: locationFilter.latitude - latitudeDelta,
+          $lte: locationFilter.latitude + latitudeDelta,
+        },
+        "location.longitude": {
+          $type: "number",
+          $gte: locationFilter.longitude - longitudeDelta,
+          $lte: locationFilter.longitude + longitudeDelta,
+        },
+      });
     }
 
-    return EventModel.find(eventQuery)
-      .sort({ scheduledAt: 1, publishedAt: -1, _id: -1 })
-      .limit(query.limit ?? 100);
+    const eventQuery: FilterQuery<IEvent> = filters.length > 1 ? { $and: filters } : filters[0]!;
+    const events = await EventModel.find(eventQuery).sort({ scheduledAt: 1, publishedAt: -1, _id: -1 });
+
+    return filterAndLimitEvents(events, query, locationFilter);
   }
 
   public async findPrivateMapEventsForUser(
     userId: string,
     query: EventMapQuery & { activeSince: Date },
   ): Promise<IEvent[]> {
-    const eventQuery: FilterQuery<IEvent> = {
+    const filters: FilterQuery<IEvent>[] = [{
       status: { $in: ["published", "live"] },
       privacy: "private",
       $or: [{ userId }, { memberUserIds: userId }],
@@ -530,27 +739,33 @@ export class EventRepository {
       }],
       "location.latitude": { $type: "number" },
       "location.longitude": { $type: "number" },
-    };
+    }];
+    addCategoryFilter(filters, query.category);
+    addSharedEventFilters(filters, query);
+    const locationFilter = getLocationFilter(query);
 
-    if (typeof query.latitude === "number" && typeof query.longitude === "number" && typeof query.radiusKm === "number") {
-      const latitudeDelta = query.radiusKm / 111.32;
-      const longitudeDelta = query.radiusKm / (111.32 * Math.max(Math.cos((query.latitude * Math.PI) / 180), 0.01));
+    if (locationFilter) {
+      const latitudeDelta = locationFilter.radiusKm / 111.32;
+      const longitudeDelta = locationFilter.radiusKm / (111.32 * Math.max(Math.cos((locationFilter.latitude * Math.PI) / 180), 0.01));
 
-      eventQuery["location.latitude"] = {
-        $type: "number",
-        $gte: query.latitude - latitudeDelta,
-        $lte: query.latitude + latitudeDelta,
-      };
-      eventQuery["location.longitude"] = {
-        $type: "number",
-        $gte: query.longitude - longitudeDelta,
-        $lte: query.longitude + longitudeDelta,
-      };
+      filters.push({
+        "location.latitude": {
+          $type: "number",
+          $gte: locationFilter.latitude - latitudeDelta,
+          $lte: locationFilter.latitude + latitudeDelta,
+        },
+        "location.longitude": {
+          $type: "number",
+          $gte: locationFilter.longitude - longitudeDelta,
+          $lte: locationFilter.longitude + longitudeDelta,
+        },
+      });
     }
 
-    return EventModel.find(eventQuery)
-      .sort({ scheduledAt: 1, publishedAt: -1, _id: -1 })
-      .limit(query.limit ?? 100);
+    const eventQuery: FilterQuery<IEvent> = filters.length > 1 ? { $and: filters } : filters[0]!;
+    const events = await EventModel.find(eventQuery).sort({ scheduledAt: 1, publishedAt: -1, _id: -1 });
+
+    return filterAndLimitEvents(events, query, locationFilter);
   }
 
   public async findAdminMapEvents(now: Date, activeSince: Date): Promise<IEvent[]> {
@@ -880,6 +1095,7 @@ export class EventRepository {
     if (payload.bannerOriginalImageKey !== undefined) update.bannerOriginalImageKey = payload.bannerOriginalImageKey;
     if (payload.bannerImageDisplay !== undefined) update.bannerImageDisplay = payload.bannerImageDisplay;
     if (payload.ageRestriction !== undefined) update.ageRestriction = payload.ageRestriction;
+    if (payload.hashtags !== undefined) update.hashtags = payload.hashtags;
     if (payload.category !== undefined) update.category = payload.category;
     if (payload.categories !== undefined) {
       update.categories = payload.categories;

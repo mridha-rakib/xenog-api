@@ -8,6 +8,7 @@ import { MomentModel } from "../moments/moment.model.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
 import { StorageService } from "../storage/storage.service.js";
 import { UserRepository } from "../user/user.repository.js";
+import { TicketUsageRepository } from "../payments/ticket-usage.repository.js";
 import type {
   AdminReportResponse,
   CreateReportDto,
@@ -32,6 +33,7 @@ export class ReportService {
     private readonly userRepository = new UserRepository(),
     private readonly storageService = new StorageService(),
     private readonly notificationRepository = new NotificationRepository(),
+    private readonly ticketUsageRepository = new TicketUsageRepository(),
   ) {}
 
   public async create(payload: CreateReportDto, reporter: AuthUser): Promise<AdminReportResponse> {
@@ -45,6 +47,17 @@ export class ReportService {
     ]);
     if (!reportedUser || reportedUser.role !== "user" || target.ownerId !== payload.reportedUserId) {
       throw new AppError("Reported content or user not found", httpStatus.NOT_FOUND);
+    }
+
+    if (payload.targetType === "event") {
+      const attendance = await this.ticketUsageRepository.findByEventIdAndHolderUserId(
+        payload.targetId,
+        reporter.id,
+      );
+
+      if (!attendance) {
+        throw new AppError("Only checked-in attendees can report this event.", httpStatus.FORBIDDEN);
+      }
     }
 
     const report = await this.reportRepository.create({

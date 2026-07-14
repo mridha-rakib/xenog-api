@@ -4,7 +4,7 @@ import { StorageService } from "../storage/storage.service.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
 import { AppError } from "../../core/errors/app-error.js";
 import { StoryRepository } from "./story.repository.js";
-import type { CreateStoryDto, IStory, StoryAuthorResponse, StoryResponse } from "./story.interface.js";
+import type { CreateStoryDto, IStory, StoryAuthorResponse, StoryCommentResponse, StoryResponse } from "./story.interface.js";
 import { MomentRepository } from "../moments/moment.repository.js";
 
 const STORY_TTL_HOURS = 24;
@@ -125,7 +125,7 @@ export class StoryService {
   public async listComments(id: string, _user: AuthUser) {
     await this.getActiveStory(id);
     const comments = await this.storyRepository.findComments(id);
-    const responses = await Promise.all(comments.map(async (comment) => {
+    const responses: StoryCommentResponse[] = await Promise.all(comments.map(async (comment) => {
       const author = this.getCommentAuthor(comment.userId);
       return {
         id: comment._id.toString(), storyId: id,
@@ -135,12 +135,18 @@ export class StoryService {
         createdAt: comment.createdAt, updatedAt: comment.updatedAt,
       };
     }));
-    const byParent = new Map<string, typeof responses>();
+    const byParent = new Map<string, StoryCommentResponse[]>();
     responses.forEach((comment) => {
-      if (!comment.parentCommentId) return;
-      byParent.set(comment.parentCommentId, [...(byParent.get(comment.parentCommentId) ?? []), comment]);
+      const parentId = comment.parentCommentId ?? "root";
+      byParent.set(parentId, [...(byParent.get(parentId) ?? []), comment]);
     });
-    return responses.filter((comment) => !comment.parentCommentId).map((comment) => ({ ...comment, replies: byParent.get(comment.id) ?? [] }));
+
+    const buildTree = (comment: StoryCommentResponse): StoryCommentResponse => ({
+      ...comment,
+      replies: (byParent.get(comment.id) ?? []).map(buildTree),
+    });
+
+    return (byParent.get("root") ?? []).map(buildTree);
   }
 
   public async createComment(id: string, user: AuthUser, payload: { text: string; parentCommentId?: string | null }) {

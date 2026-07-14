@@ -286,6 +286,14 @@ const eventSchema = new Schema<IEvent>(
       enum: eventAgeRestrictions,
       default: null,
     },
+    hashtags: {
+      type: [{ type: String, trim: true, lowercase: true, maxlength: 64 }],
+      default: [],
+      validate: {
+        validator: (values: string[]) => values.length <= 20 && new Set(values).size === values.length,
+        message: "An event can have up to 20 unique hashtags",
+      },
+    },
     category: {
       type: String,
       enum: eventCategories,
@@ -365,6 +373,7 @@ eventSchema.index({ userId: 1, status: 1, scheduledAt: 1, endAt: 1, publishedAt:
 eventSchema.index({ userId: 1, privacy: 1, status: 1, scheduledAt: 1, endAt: 1, publishedAt: -1, _id: -1 });
 eventSchema.index({ categories: 1, status: 1, privacy: 1, publishedAt: -1, createdAt: -1, _id: -1 });
 eventSchema.index({ category: 1, status: 1, privacy: 1, publishedAt: -1, createdAt: -1, _id: -1 });
+eventSchema.index({ hashtags: 1, status: 1, privacy: 1, scheduledAt: 1, _id: -1 });
 eventSchema.index({ status: 1, privacy: 1, "location.latitude": 1, "location.longitude": 1, scheduledAt: 1, endAt: 1 });
 eventSchema.index({ name: "text", description: "text", category: "text", "location.venue": "text", "location.address": "text" });
 

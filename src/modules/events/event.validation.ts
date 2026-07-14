@@ -2,8 +2,10 @@ import { z } from "zod";
 import {
   eventAgeRestrictions,
   eventCategories,
+  eventPriceFilters,
   eventPrivacyOptions,
   eventRewardTypes,
+  eventTimePeriods,
   eventTicketTypes,
 } from "./event.interface.js";
 
@@ -18,6 +20,36 @@ const optionalText = (label: string, maxLength: number) =>
     .optional()
     .nullable()
     .transform((value) => (value === undefined ? undefined : value || null));
+
+const normalizeHashtag = (value: string): string => {
+  const normalized = value.normalize("NFKC").trim().replace(/^#+/, "").toLocaleLowerCase();
+  return (normalized.match(/^[\p{L}\p{N}_]+/u)?.[0] ?? "").slice(0, 64);
+};
+
+const hashtagList = z.preprocess(
+  (value) => {
+    if (Array.isArray(value)) {
+      return value;
+    }
+
+    if (typeof value === "string") {
+      return value.split(/[\s,]+/);
+    }
+
+    return value;
+  },
+  z
+    .array(z.string().max(65))
+    .max(20)
+    .optional()
+    .transform((value) => (
+      value === undefined
+        ? undefined
+        : [...new Set(value.map(normalizeHashtag).filter(Boolean))]
+    )),
+);
+
+const eventDateKey = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional();
 
 const dateTime = (label: string) =>
   z.preprocess(
@@ -248,6 +280,7 @@ const draftBodyBase = z
     bannerOriginalImageKey: optionalText("Original banner image", 300),
     bannerImageDisplay,
     ageRestriction: z.enum(eventAgeRestrictions).optional().nullable(),
+    hashtags: hashtagList,
     category: optionalEventCategory,
     categories: draftEventCategoryList.optional(),
     scheduledAt: optionalDateTime("Event start date and time"),
@@ -315,10 +348,17 @@ const publishBody = draftBodyBase.extend({
 
 const mapQuery = z
   .object({
+    category: eventCategory.optional(),
     latitude: queryNumber(z.number().min(-90).max(90)),
     longitude: queryNumber(z.number().min(-180).max(180)),
     radiusKm: queryNumber(z.number().min(1).max(250)),
     limit: queryNumber(z.number().int().min(1).max(200)),
+    ageRestriction: z.enum(eventAgeRestrictions).optional(),
+    priceFilter: z.enum(eventPriceFilters).optional(),
+    date: eventDateKey,
+    timePeriod: z.enum(eventTimePeriods).optional(),
+    timezoneOffsetMinutes: queryNumber(z.number().int().min(-840).max(840)),
+    hashtags: hashtagList,
   })
   .strict()
   .refine((query) => (query.latitude === undefined) === (query.longitude === undefined), {
@@ -333,6 +373,12 @@ const feedQuery = z
     longitude: queryNumber(z.number().min(-180).max(180)),
     radiusKm: queryNumber(z.number().min(1).max(500)),
     limit: queryNumber(z.number().int().min(1).max(200)),
+    ageRestriction: z.enum(eventAgeRestrictions).optional(),
+    priceFilter: z.enum(eventPriceFilters).optional(),
+    date: eventDateKey,
+    timePeriod: z.enum(eventTimePeriods).optional(),
+    timezoneOffsetMinutes: queryNumber(z.number().int().min(-840).max(840)),
+    hashtags: hashtagList,
   })
   .refine((query) => (query.latitude === undefined) === (query.longitude === undefined), {
     message: "Latitude and longitude must be provided together",

@@ -13,6 +13,12 @@ export type EventPrivacy = (typeof eventPrivacyOptions)[number];
 export const eventTicketTypes = ["free", "pay"] as const;
 export type EventTicketType = (typeof eventTicketTypes)[number];
 
+export const eventPriceFilters = ["free", "lt_10", "lt_50", "lt_100", "gte_100"] as const;
+export type EventPriceFilter = (typeof eventPriceFilters)[number];
+
+export const eventTimePeriods = ["morning", "noon", "evening", "late_night", "any"] as const;
+export type EventTimePeriod = (typeof eventTimePeriods)[number];
+
 export const eventRewardTypes = ["ticket", "product"] as const;
 export type EventRewardType = (typeof eventRewardTypes)[number];
 
@@ -143,6 +149,7 @@ export interface IEvent {
   bannerOriginalImageKey?: string | null;
   bannerImageDisplay?: EventImageDisplay | null;
   ageRestriction?: EventAgeRestriction | null;
+  hashtags?: string[];
   category?: EventCategory | null;
   categories?: EventCategory[];
   scheduledAt?: Date | null;
@@ -168,6 +175,7 @@ export interface SaveEventDraftDto {
   bannerOriginalImageKey?: string | null;
   bannerImageDisplay?: EventImageDisplay | null;
   ageRestriction?: EventAgeRestriction | null;
+  hashtags?: string[];
   category?: EventCategory | null;
   categories?: EventCategory[];
   scheduledAt?: Date | null;
@@ -206,6 +214,7 @@ export interface EventResponse {
   sharesCount?: number;
   isLiked?: boolean;
   isSaved?: boolean;
+  canReport?: boolean;
   status: EventStatus;
   name?: string | null;
   description?: string | null;
@@ -213,6 +222,7 @@ export interface EventResponse {
   bannerOriginalImageKey?: string | null;
   bannerImageDisplay?: EventImageDisplay | null;
   ageRestriction?: EventAgeRestriction | null;
+  hashtags?: string[];
   category?: EventCategory | null;
   categories: EventCategory[];
   scheduledAt?: Date | null;
@@ -253,10 +263,17 @@ export interface ProfileEventsQuery {
 }
 
 export interface EventMapQuery {
+  category?: EventCategory;
   latitude?: number;
   longitude?: number;
   radiusKm?: number;
   limit?: number;
+  ageRestriction?: EventAgeRestriction;
+  priceFilter?: EventPriceFilter;
+  date?: string;
+  timePeriod?: EventTimePeriod;
+  timezoneOffsetMinutes?: number;
+  hashtags?: string[];
 }
 
 export type AdminMapEventStatus = "upcoming" | "live" | "active";
@@ -281,6 +298,12 @@ export interface EventFeedQuery {
   longitude?: number;
   radiusKm?: number;
   limit?: number;
+  ageRestriction?: EventAgeRestriction;
+  priceFilter?: EventPriceFilter;
+  date?: string;
+  timePeriod?: EventTimePeriod;
+  timezoneOffsetMinutes?: number;
+  hashtags?: string[];
 }
 
 export interface RewardClaimResponse {

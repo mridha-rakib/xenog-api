@@ -72,6 +72,14 @@ const STARTING_SOON_MS = 60 * 60 * 1000;
 const PROFILE_EVENTS_CACHE_VERSION = "v1";
 const PROFILE_EVENTS_CACHE_TTL_SECONDS = 30;
 
+const normalizeEventHashtag = (value: string): string => {
+  const normalized = value.normalize("NFKC").trim().replace(/^#+/, "").toLocaleLowerCase();
+  return (normalized.match(/^[\p{L}\p{N}_]+/u)?.[0] ?? "").slice(0, 64);
+};
+
+const normalizeEventHashtags = (values: string[] | undefined): string[] =>
+  [...new Set((values ?? []).map(normalizeEventHashtag).filter(Boolean))].slice(0, 20);
+
 const getNowStatus = (
   scheduledAt: Date | null | undefined,
   endAt?: Date | null,
@@ -739,6 +747,12 @@ export class EventService {
       longitude: query.longitude,
       radiusKm: query.radiusKm,
       activeOnly: hasNearbyFilter,
+      ageRestriction: query.ageRestriction,
+      priceFilter: query.priceFilter,
+      date: query.date,
+      timePeriod: query.timePeriod,
+      timezoneOffsetMinutes: query.timezoneOffsetMinutes,
+      hashtags: query.hashtags,
     };
     const [publicEvents, privateEvents] = await Promise.all([
       this.eventRepository.findPublicFeedEvents(excludeUserIds, feedOptions),
@@ -1168,11 +1182,13 @@ export class EventService {
       ]);
 
     const interactionMomentId = interactionMoment._id.toString();
-    const [likeCounts, commentCounts, shareCounts, likedMomentIds] = await Promise.all([
+    const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds, attendance] = await Promise.all([
       this.momentReactionRepository.countByMomentIds([interactionMomentId]),
       this.momentCommentRepository.countByMomentIds([interactionMomentId]),
       this.momentShareRepository.countByMomentIds([interactionMomentId]),
       this.momentReactionRepository.findLikedMomentIds(user.id, [interactionMomentId]),
+      this.momentSaveRepository.findSavedMomentIds(user.id, [interactionMomentId]),
+      this.ticketUsageRepository.findByEventIdAndHolderUserId(event._id.toString(), user.id),
     ]);
 
     let myJoinRequestStatus: EventJoinRequestStatus | null = null;
@@ -1198,6 +1214,8 @@ export class EventService {
       commentsCount: commentCounts.get(interactionMomentId) ?? 0,
       sharesCount: shareCounts.get(interactionMomentId) ?? 0,
       isLiked: likedMomentIds.has(interactionMomentId),
+      isSaved: savedMomentIds.has(interactionMomentId),
+      canReport: Boolean(attendance),
       isMember: !isOwner && event.memberUserIds.some((id) => id.toString() === user.id),
       hostReviewEligibility,
     };
@@ -1603,6 +1621,10 @@ export class EventService {
       normalized.category = payload.category ?? null;
     }
 
+    if (payload.hashtags !== undefined) {
+      normalized.hashtags = normalizeEventHashtags(payload.hashtags);
+    }
+
     if (payload.categories !== undefined) {
       normalized.categories = [...new Set(payload.categories)];
       normalized.category = normalized.categories[0] ?? null;
@@ -1644,6 +1666,7 @@ export class EventService {
       ...draftPayload,
       name: payload.name.trim(),
       ageRestriction: payload.ageRestriction,
+      hashtags: normalizeEventHashtags(payload.hashtags),
       category: payload.categories[0],
       categories: payload.categories,
       scheduledAt: payload.scheduledAt,
@@ -2213,6 +2236,7 @@ export class EventService {
       bannerOriginalImageKey: event.bannerOriginalImageKey ?? null,
       bannerImageDisplay: event.bannerImageDisplay ?? null,
       ageRestriction: event.ageRestriction ?? null,
+      hashtags: event.hashtags ?? [],
       category: event.categories?.[0] ?? event.category ?? null,
       categories: event.categories?.length
         ? event.categories

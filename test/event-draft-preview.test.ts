@@ -99,6 +99,7 @@ const createEventService = (overrides: {
   momentRepository?: Record<string, unknown>;
   checkoutPaymentRepository?: Record<string, unknown>;
   ticketShareRepository?: Record<string, unknown>;
+  eventWindowRepository?: Record<string, unknown>;
 } = {}) => new EventService(
   overrides.eventRepository as never,
   (overrides.userRepository ?? { findById: async () => host }) as never,
@@ -129,6 +130,9 @@ const createEventService = (overrides: {
   {} as never,
   {} as never,
   {} as never,
+  (overrides.eventWindowRepository ?? {
+    findConflictingForEventSchedule: async () => [],
+  }) as never,
 );
 
 test("saving a new event through draft API stores draft status", async () => {
@@ -153,6 +157,7 @@ test("saving a new event through draft API stores draft status", async () => {
 test("updating a draft preserves the same event id", async () => {
   const service = createEventService({
     eventRepository: {
+      findByIdForUser: async () => createEvent(),
       updateDraftByIdForUser: async (requestedId: string, requestedUserId: string) => {
         assert.equal(requestedId, eventId.toString());
         assert.equal(requestedUserId, owner.id);
@@ -170,6 +175,44 @@ test("updating a draft preserves the same event id", async () => {
   assert.equal(response.id, eventId.toString());
   assert.equal(response.status, "draft");
   assert.equal(response.name, "Updated Draft");
+});
+
+test("draft schedule update is blocked when existing windows would fall outside the new event time", async () => {
+  let updateCalled = false;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () => createEvent(),
+      updateDraftByIdForUser: async () => {
+        updateCalled = true;
+        throw new Error("conflicting draft schedule should not be saved");
+      },
+    },
+    eventWindowRepository: {
+      findConflictingForEventSchedule: async (
+        requestedEventId: string,
+        requestedStart: Date | null,
+        requestedEnd: Date | null,
+      ) => {
+        assert.equal(requestedEventId, eventId.toString());
+        assert.equal(requestedStart?.toISOString(), "2026-07-15T10:30:00.000Z");
+        assert.equal(requestedEnd?.toISOString(), "2026-07-15T11:00:00.000Z");
+        return [{ _id: new Types.ObjectId() }];
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => service.saveDraft(
+      owner as never,
+      {
+        scheduledAt: new Date("2026-07-15T10:30:00.000Z"),
+        endAt: new Date("2026-07-15T11:00:00.000Z"),
+      } as never,
+      eventId.toString(),
+    ),
+    { statusCode: 422 },
+  );
+  assert.equal(updateCalled, false);
 });
 
 test("draft owner can read draft detail without creating interaction moment or chat room", async () => {
@@ -287,6 +330,70 @@ test("owner can publish a draft without creating a duplicate event", async () =>
   assert.equal(response.status, "published");
   assert.equal(publishCalled, true);
   assert.equal(createCalled, false);
+});
+
+test("publishing a draft is blocked when existing windows would fall outside the published schedule", async () => {
+  let publishCalled = false;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () => createEvent(),
+      publishDraftByIdForUser: async () => {
+        publishCalled = true;
+        throw new Error("conflicting draft schedule should not be published");
+      },
+    },
+    eventWindowRepository: {
+      findConflictingForEventSchedule: async () => [{ _id: new Types.ObjectId() }],
+    },
+  });
+
+  await assert.rejects(
+    () => service.publish(
+      owner as never,
+      {
+        name: "Draft Preview",
+        ageRestriction: "all_ages",
+        category: "Music",
+        categories: ["Music"],
+        scheduledAt: new Date("2026-07-15T10:30:00.000Z"),
+        endAt: new Date("2026-07-15T11:00:00.000Z"),
+        privacy: "public",
+        tickets: [],
+      } as never,
+      eventId.toString(),
+    ),
+    { statusCode: 422 },
+  );
+  assert.equal(publishCalled, false);
+});
+
+test("published event schedule update is blocked when existing windows conflict", async () => {
+  let updateCalled = false;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () => createEvent({ status: "published", publishedAt: now }),
+      updateByIdForUser: async () => {
+        updateCalled = true;
+        throw new Error("conflicting published schedule should not be updated");
+      },
+    },
+    eventWindowRepository: {
+      findConflictingForEventSchedule: async () => [{ _id: new Types.ObjectId() }],
+    },
+  });
+
+  await assert.rejects(
+    () => service.updateEvent(
+      owner as never,
+      eventId.toString(),
+      {
+        scheduledAt: new Date("2026-07-15T10:30:00.000Z"),
+        endAt: new Date("2026-07-15T11:00:00.000Z"),
+      } as never,
+    ),
+    { statusCode: 422 },
+  );
+  assert.equal(updateCalled, false);
 });
 
 test("completed and cancelled events cannot be republished through publish retry path", async () => {

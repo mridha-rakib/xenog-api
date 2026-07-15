@@ -40,6 +40,7 @@ export class EventWindowRepository {
       eventId: payload.eventId,
       hostUserId: payload.hostUserId,
       title: payload.title ?? null,
+      details: payload.details ?? null,
       startsAt: payload.startsAt,
       endsAt: payload.endsAt,
       allowedContentTypes: payload.allowedContentTypes,
@@ -54,6 +55,22 @@ export class EventWindowRepository {
     return EventWindowModel.find({ eventId }).sort({ startsAt: 1, _id: 1 });
   }
 
+  public async findConflictingForEventSchedule(
+    eventId: string,
+    eventStartsAt: Date | null,
+    eventEndsAt: Date | null,
+  ): Promise<IEventWindow[]> {
+    const scheduleFilter = eventStartsAt && eventEndsAt
+      ? { $or: [{ startsAt: { $lt: eventStartsAt } }, { endsAt: { $gt: eventEndsAt } }] }
+      : {};
+
+    return EventWindowModel.find({
+      eventId,
+      status: { $ne: "cancelled" },
+      ...scheduleFilter,
+    }).sort({ startsAt: 1, _id: 1 });
+  }
+
   public async findByIdForEvent(eventId: string, windowId: string): Promise<IEventWindow | null> {
     return EventWindowModel.findOne({ _id: windowId, eventId });
   }
@@ -66,6 +83,7 @@ export class EventWindowRepository {
     const update: Partial<IEventWindow> = {};
 
     if (payload.title !== undefined) update.title = payload.title ?? null;
+    if (payload.details !== undefined) update.details = payload.details ?? null;
     if (payload.startsAt !== undefined) update.startsAt = payload.startsAt;
     if (payload.endsAt !== undefined) update.endsAt = payload.endsAt;
     if (payload.allowedContentTypes !== undefined) update.allowedContentTypes = payload.allowedContentTypes;

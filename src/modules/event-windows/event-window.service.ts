@@ -43,7 +43,6 @@ export class EventWindowService {
 
   public async createWindow(user: AuthUser, eventId: string, payload: CreateEventWindowDto): Promise<EventWindowResponse> {
     const event = await this.getEventForHost(user, eventId);
-    this.ensureEventHasNotEnded(event);
     this.validateWindowPayloadWithinEvent(event, payload.startsAt, payload.endsAt);
     this.ensureWindowEndsInFuture(payload.endsAt);
 
@@ -171,6 +170,10 @@ export class EventWindowService {
       throw new AppError("Hosts and admins cannot post as attendees in event windows.", httpStatus.FORBIDDEN);
     }
 
+    if (!this.canEventAcceptWindowPosts(event)) {
+      throw new AppError("This event is not accepting window posts.", httpStatus.FORBIDDEN);
+    }
+
     if (computedStatus !== "open") {
       throw new AppError("This window is not accepting posts.", httpStatus.FORBIDDEN);
     }
@@ -269,6 +272,14 @@ export class EventWindowService {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
+    if (event.status === "draft") {
+      if (event.userId.toString() === user.id) {
+        return event;
+      }
+
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
     if (this.canModerateEvent(user, event)) {
       return event;
     }
@@ -295,9 +306,7 @@ export class EventWindowService {
       throw new AppError("Only the event host can manage event windows.", httpStatus.FORBIDDEN);
     }
 
-    if (event.status !== "live") {
-      throw new AppError("Event windows can only be managed after the event has started.", httpStatus.UNPROCESSABLE_ENTITY);
-    }
+    this.ensureEventWindowManagementAllowed(event);
 
     return event;
   }
@@ -326,9 +335,17 @@ export class EventWindowService {
     }
   }
 
-  private ensureEventHasNotEnded(event: IEvent): void {
-    if (event.endAt && event.endAt <= new Date()) {
-      throw new AppError("Event windows cannot be created after the event has ended.", httpStatus.UNPROCESSABLE_ENTITY);
+  private ensureEventWindowManagementAllowed(event: IEvent): void {
+    if (event.status !== "draft" && event.status !== "published" && event.status !== "live") {
+      throw new AppError("Event windows can only be managed before the event is completed or cancelled.", httpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    if (!event.scheduledAt || !event.endAt) {
+      throw new AppError("Event must have a start and end time before windows can be managed.", httpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    if (event.endAt <= new Date()) {
+      throw new AppError("Event windows cannot be managed after the event has ended.", httpStatus.UNPROCESSABLE_ENTITY);
     }
   }
 
@@ -344,6 +361,20 @@ export class EventWindowService {
 
   private hasEventEnded(event: IEvent): boolean {
     return event.status === "completed";
+  }
+
+  private canEventAcceptWindowPosts(event: IEvent): boolean {
+    if (event.status !== "live") {
+      return false;
+    }
+
+    if (!event.scheduledAt || !event.endAt) {
+      return false;
+    }
+
+    const now = Date.now();
+
+    return event.scheduledAt.getTime() <= now && event.endAt.getTime() > now;
   }
 
   private async ensureCanViewWindowPosts(user: AuthUser, event: IEvent, windowId: string): Promise<void> {
@@ -397,6 +428,7 @@ export class EventWindowService {
     const computedStatus = this.computeWindowStatus(window);
     const remainingSlots = Math.max(0, window.maxPosts - window.acceptedPostCount);
     const canModerate = user.role === "admin" || window.hostUserId.toString() === user.id;
+    const eventAcceptsPosts = event !== undefined && this.canEventAcceptWindowPosts(event);
     const canViewPosts = canModerate || (hasPosted && event !== undefined && this.hasEventEnded(event));
 
     return {
@@ -404,6 +436,7 @@ export class EventWindowService {
       eventId: window.eventId.toString(),
       hostUserId: window.hostUserId.toString(),
       title: window.title ?? null,
+      details: window.details ?? null,
       startsAt: window.startsAt,
       endsAt: window.endsAt,
       allowedContentTypes: window.allowedContentTypes,
@@ -414,7 +447,7 @@ export class EventWindowService {
       cancelledAt: window.cancelledAt ?? null,
       hasAttended,
       hasPosted,
-      canPost: !canModerate && hasAttended && computedStatus === "open" && !hasPosted && remainingSlots > 0,
+      canPost: !canModerate && eventAcceptsPosts && hasAttended && computedStatus === "open" && !hasPosted && remainingSlots > 0,
       canViewPosts,
       remainingSlots,
       createdAt: window.createdAt,

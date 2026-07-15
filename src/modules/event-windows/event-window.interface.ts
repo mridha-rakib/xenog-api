@@ -38,6 +38,7 @@ export interface IEventWindow {
   eventId: Types.ObjectId;
   hostUserId: Types.ObjectId;
   title?: string | null;
+  details?: string | null;
   startsAt: Date;
   endsAt: Date;
   allowedContentTypes: EventWindowContentType[];
@@ -65,6 +66,7 @@ export interface IEventWindowPost {
 
 export interface CreateEventWindowDto {
   title?: string | null;
+  details?: string | null;
   startsAt: Date;
   endsAt: Date;
   allowedContentTypes: EventWindowContentType[];
@@ -86,6 +88,7 @@ export interface EventWindowResponse {
   eventId: string;
   hostUserId: string;
   title?: string | null;
+  details?: string | null;
   startsAt: Date;
   endsAt: Date;
   allowedContentTypes: EventWindowContentType[];

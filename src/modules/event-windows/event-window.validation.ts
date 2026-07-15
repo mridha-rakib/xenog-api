@@ -135,6 +135,7 @@ const listPostsQuery = z.object({
 const createWindowBody = z
   .object({
     title: optionalText("Window title", 120),
+    details: optionalText("Window details", 500),
     startsAt: dateTime("Window start date and time"),
     endsAt: dateTime("Window end date and time"),
     allowedContentTypes,
@@ -146,6 +147,7 @@ const createWindowBody = z
 const updateWindowBody = z
   .object({
     title: optionalText("Window title", 120),
+    details: optionalText("Window details", 500),
     startsAt: optionalDateTime("Window start date and time"),
     endsAt: optionalDateTime("Window end date and time"),
     allowedContentTypes: allowedContentTypes.optional(),

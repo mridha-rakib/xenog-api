@@ -29,6 +29,12 @@ const eventWindowSchema = new Schema<IEventWindow>(
       maxlength: 120,
       default: null,
     },
+    details: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: null,
+    },
     startsAt: {
       type: Date,
       required: true,

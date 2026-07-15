@@ -29,6 +29,7 @@ import { TicketShareRepository } from "../payments/ticket-share.repository.js";
 import { TicketUsageRepository } from "../payments/ticket-usage.repository.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
 import { EventHostReviewRepository } from "./event-host-review.repository.js";
+import { EventWindowRepository } from "../event-windows/event-window.repository.js";
 import type {
   EventHostReviewEligibilityResponse,
   EventHostReviewResponse,
@@ -131,6 +132,7 @@ export class EventService {
     private readonly momentSaveRepository = new MomentSaveRepository(),
     private readonly ticketUsageRepository = new TicketUsageRepository(),
     private readonly eventHostReviewRepository = new EventHostReviewRepository(),
+    private readonly eventWindowRepository = new EventWindowRepository(),
   ) {}
 
   public async saveDraft(
@@ -141,6 +143,9 @@ export class EventService {
     const normalizedPayload = this.normalizeDraftPayload(payload);
 
     if (eventId) {
+      const draft = await this.getDraftForUser(user, eventId);
+      await this.assertPostingWindowsFitSchedule(draft, normalizedPayload);
+
       const event = await this.eventRepository.updateDraftByIdForUser(
         eventId,
         user.id,
@@ -181,6 +186,8 @@ export class EventService {
           );
         }
 
+        await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
+
         // Preserve the atomic availableCount counter — do NOT reset it to capacity on re-publish.
         // For new tickets added in the payload, start fully available.
         // For capacity changes, adjust the counter by the delta.
@@ -206,6 +213,10 @@ export class EventService {
         }
 
         return this.toProfileMutatingResponse(event);
+      }
+
+      if (existingEvent) {
+        await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
       }
 
       const event = await this.eventRepository.publishDraftByIdForUser(
@@ -236,11 +247,14 @@ export class EventService {
     eventId: string,
     payload: SaveEventDraftDto,
   ): Promise<EventResponse> {
-    await this.getModifiableEventForOwner(user, eventId);
+    const existingEvent = await this.getModifiableEventForOwner(user, eventId);
+    const normalizedPayload = this.normalizeDraftPayload(payload);
+    await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
+
     const event = await this.eventRepository.updateByIdForUser(
       eventId,
       user.id,
-      this.normalizeDraftPayload(payload),
+      normalizedPayload,
     );
 
     if (!event) {
@@ -1933,6 +1947,37 @@ export class EventService {
     const claims = await this.rewardClaimRepository.findByUserAndEvent(user.id, eventId);
 
     return claims.map((claim) => this.toClaimResponse(claim));
+  }
+
+  private async assertPostingWindowsFitSchedule(
+    event: IEvent,
+    payload: Pick<SaveEventDraftDto, "scheduledAt" | "endAt">,
+  ): Promise<void> {
+    if (payload.scheduledAt === undefined && payload.endAt === undefined) {
+      return;
+    }
+
+    const nextStartsAt = payload.scheduledAt !== undefined
+      ? payload.scheduledAt ?? null
+      : event.scheduledAt ?? null;
+    const nextEndsAt = payload.endAt !== undefined
+      ? payload.endAt ?? null
+      : event.endAt ?? null;
+
+    const conflicts = await this.eventWindowRepository.findConflictingForEventSchedule(
+      event._id.toString(),
+      nextStartsAt,
+      nextEndsAt,
+    );
+
+    if (conflicts.length === 0) {
+      return;
+    }
+
+    throw new AppError(
+      "Event schedule cannot be changed while posting windows fall outside the new event time. Edit or cancel conflicting windows first.",
+      httpStatus.UNPROCESSABLE_ENTITY,
+    );
   }
 
   private async getDraftForUser(user: AuthUser, eventId: string): Promise<IEvent> {

@@ -102,6 +102,7 @@ const createWindowDoc = (overrides = {}) => ({
   eventId,
   hostUserId: hostId,
   title: "Photo Drop",
+  details: null,
   startsAt: new Date(Date.now() - 5 * 60 * 1000),
   endsAt: new Date(Date.now() + 5 * 60 * 1000),
   allowedContentTypes: ["text", "image"],
@@ -153,17 +154,19 @@ const createService = async (overrides: {
   storageError?: unknown;
 } = {}) => {
   const { EventWindowService } = await import("../src/modules/event-windows/event-window.service.js");
-  const window = overrides.window ?? createWindowDoc();
   const hasOverride = (key: keyof typeof overrides) => Object.prototype.hasOwnProperty.call(overrides, key);
+  const window = hasOverride("window") ? overrides.window : createWindowDoc();
   const eventWindowRepository = {
     create: async (payload: Record<string, unknown>) => createWindowDoc({
       title: payload.title,
+      details: payload.details,
       startsAt: payload.startsAt,
       endsAt: payload.endsAt,
       allowedContentTypes: payload.allowedContentTypes,
       maxPosts: payload.maxPosts,
     }),
     findByEventId: async () => overrides.windows ?? [window],
+    findConflictingForEventSchedule: async () => [],
     findByIdForEvent: async () => window,
     updateByIdForEvent: async (_eventId: string, _windowId: string, payload: Record<string, unknown>) => (
       hasOverride("updateResult")
@@ -244,6 +247,7 @@ test("host can create a valid event window", async () => {
   const service = await createService();
   const window = await service.createWindow(host, eventId.toString(), {
     title: "Photo Drop",
+    details: "Bring your best opening-night shots.",
     startsAt: new Date(Date.now() - 10 * 60 * 1000),
     endsAt: new Date(Date.now() + 10 * 60 * 1000),
     allowedContentTypes: ["text", "image"],
@@ -252,17 +256,110 @@ test("host can create a valid event window", async () => {
 
   assert.equal(window.eventId, eventId.toString());
   assert.equal(window.hostUserId, hostId.toString());
+  assert.equal(window.details, "Bring your best opening-night shots.");
   assert.deepEqual(window.allowedContentTypes, ["text", "image"]);
   assert.equal(window.maxPosts, 25);
 });
 
-test("published events cannot be managed before they are started", async () => {
+test("event window details are listed, updated, and backward compatible", async () => {
   const service = await createService({
-    event: {
-      ...event,
-      status: "published",
-      startedAt: null,
-    },
+    window: createWindowDoc({ details: "Initial details" }),
+  });
+
+  const [listedWindow] = await service.listWindows(host, eventId.toString());
+  const updatedWindow = await service.updateWindow(host, eventId.toString(), windowId.toString(), {
+    details: "Updated details",
+  });
+  const legacyService = await createService({
+    window: createWindowDoc({ details: undefined }),
+  });
+  const [legacyWindow] = await legacyService.listWindows(host, eventId.toString());
+
+  assert.equal(listedWindow.id, windowId.toString());
+  assert.equal(listedWindow.details, "Initial details");
+  assert.equal(updatedWindow.id, windowId.toString());
+  assert.equal(updatedWindow.details, "Updated details");
+  assert.equal(legacyWindow.details, null);
+});
+
+test("event window details validation enforces 500 characters", async () => {
+  const { eventWindowValidation } = await import("../src/modules/event-windows/event-window.validation.js");
+  const baseBody = {
+    title: "Photo Drop",
+    startsAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    endsAt: new Date(Date.now() + 20 * 60 * 1000).toISOString(),
+    allowedContentTypes: ["text"],
+    maxPosts: 1,
+  };
+
+  assert.doesNotThrow(() => eventWindowValidation.createWindow.parse({
+    params: { eventId: eventId.toString() },
+    body: { ...baseBody, details: "x".repeat(500) },
+  }));
+  assert.throws(() => eventWindowValidation.createWindow.parse({
+    params: { eventId: eventId.toString() },
+    body: { ...baseBody, details: "x".repeat(501) },
+  }));
+  assert.throws(() => eventWindowValidation.updateWindow.parse({
+    params: { eventId: eventId.toString(), windowId: windowId.toString() },
+    body: { details: "x".repeat(501) },
+  }));
+});
+
+test("published events can be managed before they are started", async () => {
+  const scheduledEvent = {
+    ...event,
+    status: "published",
+    startedAt: null,
+    scheduledAt: new Date(Date.now() + 60 * 60 * 1000),
+    endAt: new Date(Date.now() + 3 * 60 * 60 * 1000),
+  };
+  const scheduledWindow = createWindowDoc({
+    startsAt: new Date(Date.now() + 70 * 60 * 1000),
+    endsAt: new Date(Date.now() + 90 * 60 * 1000),
+  });
+  const service = await createService({
+    event: scheduledEvent,
+    window: scheduledWindow,
+  });
+  const payload = {
+    startsAt: new Date(Date.now() + 80 * 60 * 1000),
+    endsAt: new Date(Date.now() + 100 * 60 * 1000),
+    allowedContentTypes: ["text"],
+    maxPosts: 1,
+  };
+
+  await service.createWindow(host, eventId.toString(), payload);
+  await service.updateWindow(host, eventId.toString(), windowId.toString(), { maxPosts: 3 });
+  const cancelled = await service.cancelWindow(host, eventId.toString(), windowId.toString());
+
+  assert.equal(cancelled.status, "cancelled");
+});
+
+test("owner can create, list, edit, and cancel draft event windows", async () => {
+  const draftEvent = { ...event, status: "draft", publishedAt: null, startedAt: null };
+  const service = await createService({ event: draftEvent });
+  const payload = {
+    startsAt: new Date(Date.now() - 10 * 60 * 1000),
+    endsAt: new Date(Date.now() + 10 * 60 * 1000),
+    allowedContentTypes: ["text"],
+    maxPosts: 1,
+  };
+
+  const created = await service.createWindow(host, eventId.toString(), payload);
+  const windows = await service.listWindows(host, eventId.toString());
+  const updated = await service.updateWindow(host, eventId.toString(), windowId.toString(), { maxPosts: 3 });
+  const cancelled = await service.cancelWindow(host, eventId.toString(), windowId.toString());
+
+  assert.equal(created.eventId, eventId.toString());
+  assert.deepEqual(windows.map((window) => window.id), [windowId.toString()]);
+  assert.equal(updated.maxPosts, 3);
+  assert.equal(cancelled.status, "cancelled");
+});
+
+test("non-owner cannot create or list draft event windows", async () => {
+  const service = await createService({
+    event: { ...event, status: "draft", publishedAt: null, startedAt: null },
   });
   const payload = {
     startsAt: new Date(Date.now() - 10 * 60 * 1000),
@@ -271,9 +368,9 @@ test("published events cannot be managed before they are started", async () => {
     maxPosts: 1,
   };
 
-  await assert.rejects(() => service.createWindow(host, eventId.toString(), payload), { statusCode: 422 });
-  await assert.rejects(() => service.updateWindow(host, eventId.toString(), windowId.toString(), { maxPosts: 3 }), { statusCode: 422 });
-  await assert.rejects(() => service.cancelWindow(host, eventId.toString(), windowId.toString()), { statusCode: 422 });
+  await assert.rejects(() => service.createWindow(attendee, eventId.toString(), payload), { statusCode: 403 });
+  await assert.rejects(() => service.listWindows(attendee, eventId.toString()), { statusCode: 404 });
+  await assert.rejects(() => service.listWindows(admin, eventId.toString()), { statusCode: 404 });
 });
 
 test("event windows must end in the future when created or edited", async () => {
@@ -332,6 +429,86 @@ test("window outside event time is rejected", async () => {
   );
 });
 
+test("window ending after event time is rejected", async () => {
+  const service = await createService();
+
+  await assert.rejects(
+    () => service.createWindow(host, eventId.toString(), {
+      startsAt: new Date(Date.now() + 10 * 60 * 1000),
+      endsAt: new Date(Date.now() + 2 * 60 * 60 * 1000),
+      allowedContentTypes: ["text"],
+      maxPosts: 1,
+    }),
+    { statusCode: 400 },
+  );
+});
+
+test("editing a window outside event time is rejected", async () => {
+  const scheduledService = await createService({
+    window: createWindowDoc({
+      startsAt: new Date(Date.now() + 10 * 60 * 1000),
+      endsAt: new Date(Date.now() + 20 * 60 * 1000),
+    }),
+  });
+  const openService = await createService();
+
+  await assert.rejects(
+    () => scheduledService.updateWindow(host, eventId.toString(), windowId.toString(), {
+      startsAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+    }),
+    { statusCode: 400 },
+  );
+  await assert.rejects(
+    () => openService.updateWindow(host, eventId.toString(), windowId.toString(), {
+      endsAt: new Date(Date.now() + 2 * 60 * 60 * 1000),
+    }),
+    { statusCode: 400 },
+  );
+});
+
+test("window ending at or before its start is rejected", async () => {
+  const service = await createService();
+  const startsAt = new Date(Date.now() + 10 * 60 * 1000);
+
+  await assert.rejects(
+    () => service.createWindow(host, eventId.toString(), {
+      startsAt,
+      endsAt: startsAt,
+      allowedContentTypes: ["text"],
+      maxPosts: 1,
+    }),
+    { statusCode: 400 },
+  );
+});
+
+test("completed and cancelled events reject new window creation", async () => {
+  const payload = {
+    startsAt: new Date(Date.now() - 10 * 60 * 1000),
+    endsAt: new Date(Date.now() + 10 * 60 * 1000),
+    allowedContentTypes: ["text"],
+    maxPosts: 1,
+  };
+
+  for (const status of ["completed", "cancelled"]) {
+    const service = await createService({ event: { ...event, status } });
+
+    await assert.rejects(() => service.createWindow(host, eventId.toString(), payload), { statusCode: 422 });
+  }
+});
+
+test("a window belonging to another event cannot be edited or cancelled", async () => {
+  const service = await createService({ window: null });
+
+  await assert.rejects(
+    () => service.updateWindow(host, eventId.toString(), windowId.toString(), { maxPosts: 3 }),
+    { statusCode: 404 },
+  );
+  await assert.rejects(
+    () => service.cancelWindow(host, eventId.toString(), windowId.toString()),
+    { statusCode: 404 },
+  );
+});
+
 test("posting before scan attendance is rejected", async () => {
   const service = await createService({ attendance: null });
 
@@ -377,6 +554,73 @@ test("posting after successful ticket scan is accepted", async () => {
   assert.equal(post.text, "Checked in");
 });
 
+test("published event windows are visible but not postable", async () => {
+  const service = await createService({
+    event: { ...event, status: "published", startedAt: null },
+  });
+  const [window] = await service.listWindows(attendee, eventId.toString());
+
+  assert.equal(window.canPost, false);
+  await assert.rejects(
+    () => service.createPost(attendee, eventId.toString(), windowId.toString(), {
+      contentType: "text",
+      text: "Too early",
+      mediaItems: [],
+    }),
+    { statusCode: 403 },
+  );
+});
+
+test("attendee cannot post before a window starts or at/after it ends", async () => {
+  const scheduledService = await createService({
+    window: createWindowDoc({
+      startsAt: new Date(Date.now() + 10 * 60 * 1000),
+      endsAt: new Date(Date.now() + 20 * 60 * 1000),
+    }),
+  });
+  const closedService = await createService({
+    window: createWindowDoc({
+      startsAt: new Date(Date.now() - 20 * 60 * 1000),
+      endsAt: new Date(Date.now() - 10 * 60 * 1000),
+    }),
+  });
+
+  await assert.rejects(
+    () => scheduledService.createPost(attendee, eventId.toString(), windowId.toString(), {
+      contentType: "text",
+      text: "Too early",
+      mediaItems: [],
+    }),
+    { statusCode: 403 },
+  );
+  await assert.rejects(
+    () => closedService.createPost(attendee, eventId.toString(), windowId.toString(), {
+      contentType: "text",
+      text: "Too late",
+      mediaItems: [],
+    }),
+    { statusCode: 403 },
+  );
+});
+
+test("completed and cancelled events cannot accept window posts", async () => {
+  for (const status of ["completed", "cancelled"]) {
+    const service = await createService({ event: { ...event, status } });
+
+    await assert.rejects(
+      () => service.createPost(attendee, eventId.toString(), windowId.toString(), {
+        contentType: "text",
+        text: "Lifecycle blocked",
+        mediaItems: [],
+      }),
+      (error: unknown) => {
+        assert.ok([403, 404].includes((error as { statusCode?: number }).statusCode ?? 0));
+        return true;
+      },
+    );
+  }
+});
+
 test("user cannot post twice in the same window", async () => {
   const service = await createService({ existingPost: createPostDoc() });
 
@@ -404,11 +648,14 @@ test("window capacity limit is enforced", async () => {
 });
 
 for (const privacy of eventPrivacies) {
-  test(`host can create window only when live for ${privacy} events`, async () => {
-    const liveService = await createService({ event: eventForPrivacy(privacy) });
+  test(`host can create windows while draft, published, or live for ${privacy} events`, async () => {
+    const draftService = await createService({
+      event: eventForPrivacy(privacy, { status: "draft", publishedAt: null, startedAt: null }),
+    });
     const publishedService = await createService({
       event: eventForPrivacy(privacy, { status: "published", startedAt: null }),
     });
+    const liveService = await createService({ event: eventForPrivacy(privacy) });
     const payload = {
       startsAt: new Date(Date.now() - 10 * 60 * 1000),
       endsAt: new Date(Date.now() + 10 * 60 * 1000),
@@ -416,8 +663,9 @@ for (const privacy of eventPrivacies) {
       maxPosts: 1,
     };
 
+    await draftService.createWindow(host, eventId.toString(), payload);
+    await publishedService.createWindow(host, eventId.toString(), payload);
     await liveService.createWindow(host, eventId.toString(), payload);
-    await assert.rejects(() => publishedService.createWindow(host, eventId.toString(), payload), { statusCode: 422 });
   });
 
   test(`non-host cannot manage windows for ${privacy} events`, async () => {
@@ -1009,7 +1257,10 @@ test("existing event moments and event interaction stats remain unaffected", asy
     { countByMomentIds: async () => new Map([[interactionMomentId.toString(), 5]]) },
     {},
     { countByMomentIds: async () => new Map([[interactionMomentId.toString(), 6]]) },
+    { findSavedMomentIds: async () => new Set<string>() },
+    { findByEventIdAndHolderUserId: async () => null },
     {},
+    { findConflictingForEventSchedule: async () => [] },
   );
   const eventResponse = await eventService.getEventById(attendee, eventId.toString());
 

@@ -175,6 +175,7 @@ export const momentValidation = {
           .max(50, "You cannot tag more than 50 people")
           .default([])
           .transform((names) => [...new Set(names)]),
+        taggedFriendIds: z.array(objectId).max(50).default([]).transform((ids) => [...new Set(ids)]),
         eventTitle: optionalText("Event", 200),
         eventId: objectId.optional().nullable(),
         eventCode: optionalText("Event code", 200),

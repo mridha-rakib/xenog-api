@@ -174,6 +174,13 @@ export class EventService {
       const existingEvent = await this.eventRepository.findByIdForUser(eventId, user.id);
 
       if (existingEvent && existingEvent.status !== "draft") {
+        if (existingEvent.status === "completed" || existingEvent.status === "cancelled") {
+          throw new AppError(
+            "This event cannot be published because it has already ended.",
+            httpStatus.UNPROCESSABLE_ENTITY,
+          );
+        }
+
         // Preserve the atomic availableCount counter — do NOT reset it to capacity on re-publish.
         // For new tickets added in the payload, start fully available.
         // For capacity changes, adjust the counter by the delta.
@@ -802,7 +809,7 @@ export class EventService {
   ): Promise<{ eventId: string; isSaved: boolean }> {
     const event = await this.eventRepository.findById(eventId);
 
-    if (!event) {
+    if (!event || event.status === "draft") {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
@@ -885,7 +892,7 @@ export class EventService {
   public async getTicketAccess(user: AuthUser, eventId: string): Promise<TicketAccessResponse> {
     const event = await this.eventRepository.findById(eventId);
 
-    if (!event) {
+    if (!event || event.status === "draft") {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
@@ -1165,6 +1172,31 @@ export class EventService {
     }
 
     const host = await this.userRepository.findById(event.userId.toString());
+
+    if (event.status === "draft") {
+      const [avatarUrl, followersCount, eventsCount] = await Promise.all([
+        host?.avatarKey
+          ? this.storageService.createDownloadUrl(host.avatarKey).then((download) => download.url)
+          : Promise.resolve(null),
+        host ? this.userFollowRepository.countFollowers(host._id.toString()) : Promise.resolve(0),
+        host
+          ? this.eventRepository.countByUserId(host._id.toString(), ["published", "live"])
+          : Promise.resolve(0),
+      ]);
+
+      return {
+        ...this.toResponse(event, host, { avatarUrl, followersCount, eventsCount, isFollowing: false }),
+        likesCount: 0,
+        commentsCount: 0,
+        sharesCount: 0,
+        isLiked: false,
+        isSaved: false,
+        canReport: false,
+        isMember: false,
+        hostReviewEligibility: { canReview: false, hasReviewed: false },
+      };
+    }
+
     const [avatarUrl, followersCount, eventsCount, isFollowing, interactionMoment] =
       await Promise.all([
         host?.avatarKey
@@ -1292,7 +1324,7 @@ export class EventService {
   }
 
   public async listEventMembers(user: AuthUser, eventId: string): Promise<EventMemberResponse[]> {
-    const event = await this.getEventForOwner(user, eventId);
+    const event = await this.getNonDraftEventForOwner(user, eventId);
     return this.resolveMemberResponses(event.memberUserIds.map((id) => id.toString()));
   }
 
@@ -1301,11 +1333,7 @@ export class EventService {
     eventId: string,
     memberId: string,
   ): Promise<EventMemberResponse[]> {
-    const event = await this.eventRepository.findByIdForUser(eventId, user.id);
-
-    if (!event) {
-      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
-    }
+    const event = await this.getNonDraftEventForOwner(user, eventId);
 
     if (event.status === "completed" || event.status === "cancelled") {
       throw new AppError(
@@ -1356,6 +1384,7 @@ export class EventService {
     eventId: string,
     memberId: string,
   ): Promise<EventMemberResponse[]> {
+    await this.getNonDraftEventForOwner(user, eventId);
     const updatedEvent = await this.eventRepository.removeMemberById(eventId, user.id, memberId);
 
     if (!updatedEvent) {
@@ -1410,7 +1439,7 @@ export class EventService {
   public async listJoinRequests(user: AuthUser, eventId: string): Promise<JoinRequestResponse[]> {
     const event = await this.eventRepository.findById(eventId);
 
-    if (!event) {
+    if (!event || event.status === "draft") {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
@@ -1462,6 +1491,12 @@ export class EventService {
     eventId: string,
     requestUserId: string,
   ): Promise<void> {
+    const event = await this.getNonDraftEventForOwner(user, eventId);
+
+    if (event.privacy !== "locked") {
+      throw new AppError("Join requests are only for locked events.", httpStatus.BAD_REQUEST);
+    }
+
     const updated = await this.eventRepository.updateJoinRequestStatus(
       eventId,
       user.id,
@@ -1530,6 +1565,12 @@ export class EventService {
     eventId: string,
     requestUserId: string,
   ): Promise<void> {
+    const event = await this.getNonDraftEventForOwner(user, eventId);
+
+    if (event.privacy !== "locked") {
+      throw new AppError("Join requests are only for locked events.", httpStatus.BAD_REQUEST);
+    }
+
     const updated = await this.eventRepository.updateJoinRequestStatus(
       eventId,
       user.id,
@@ -1885,7 +1926,7 @@ export class EventService {
   ): Promise<RewardClaimResponse[]> {
     const event = await this.eventRepository.findById(eventId);
 
-    if (!event) {
+    if (!event || event.status === "draft") {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
@@ -1911,11 +1952,25 @@ export class EventService {
   private async getModifiableEventForOwner(user: AuthUser, eventId: string): Promise<IEvent> {
     const event = await this.getEventForOwner(user, eventId);
 
+    if (event.status === "draft") {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
     if (event.status === "completed" || event.status === "cancelled") {
       throw new AppError(
         "This event cannot be modified because it has been completed or cancelled.",
         httpStatus.UNPROCESSABLE_ENTITY,
       );
+    }
+
+    return event;
+  }
+
+  private async getNonDraftEventForOwner(user: AuthUser, eventId: string): Promise<IEvent> {
+    const event = await this.getEventForOwner(user, eventId);
+
+    if (event.status === "draft") {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
     return event;

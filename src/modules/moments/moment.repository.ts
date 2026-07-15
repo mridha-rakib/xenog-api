@@ -17,6 +17,7 @@ export class MomentRepository {
       hashtags: payload.hashtags,
       audience: payload.audience,
       taggedPeople: payload.taggedPeople ?? [],
+      taggedFriendIds: payload.taggedFriendIds ?? [],
       eventTitle: payload.eventTitle ?? null,
       eventId: payload.eventId ?? null,
       isEventAnnouncement: false,
@@ -38,6 +39,7 @@ export class MomentRepository {
           hashtags: payload.hashtags,
           audience: payload.audience,
           taggedPeople: payload.taggedPeople ?? [],
+          taggedFriendIds: payload.taggedFriendIds ?? [],
           eventTitle: payload.eventTitle ?? null,
           eventId: payload.eventId ?? null,
           isEventAnnouncement: false,
@@ -70,6 +72,7 @@ export class MomentRepository {
         $setOnInsert: {
           hashtags: [],
           taggedPeople: [],
+          taggedFriendIds: [],
           eventId: payload.eventId,
           isEventAnnouncement: true,
           eventCode: null,

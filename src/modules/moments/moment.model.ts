@@ -89,6 +89,10 @@ const momentSchema = new Schema<IMoment>(
       ],
       default: [],
     },
+    taggedFriendIds: {
+      type: [{ type: Schema.Types.ObjectId, ref: "User" }],
+      default: [],
+    },
     eventTitle: {
       type: String,
       trim: true,

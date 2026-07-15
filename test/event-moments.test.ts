@@ -253,7 +253,8 @@ test("event detail keeps interactionMomentId and interaction stats on the announ
     { countByMomentIds: async () => new Map([[interactionMomentId.toString(), 3]]) },
     {},
     { countByMomentIds: async () => new Map([[interactionMomentId.toString(), 2]]) },
-    {},
+    { findSavedMomentIds: async () => new Set<string>() },
+    { findByEventIdAndHolderUserId: async () => null },
   );
 
   const response = await eventService.getEventById(viewer, eventId.toString());

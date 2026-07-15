@@ -94,13 +94,32 @@ export class MomentService {
       }
     }
 
+    const taggedFriendIds = [...new Set(payload.taggedFriendIds ?? [])];
+    let taggedPeople = payload.taggedPeople ?? [];
+
+    if (taggedFriendIds.length > 0) {
+      const taggedUsers = await this.userRepository.findByIds(taggedFriendIds);
+      const taggedUserById = new Map(taggedUsers
+        .filter((taggedUser) => taggedUser.isActive && taggedUser.role === "user")
+        .map((taggedUser) => [taggedUser._id.toString(), taggedUser]));
+
+      if (taggedFriendIds.some((id) => !taggedUserById.has(id))) {
+        throw new AppError("Tagged users not found.", httpStatus.BAD_REQUEST);
+      }
+
+      if (taggedPeople.length === 0) {
+        taggedPeople = taggedFriendIds.map((id) => taggedUserById.get(id)?.name).filter(Boolean) as string[];
+      }
+    }
+
     const moment = await this.momentRepository.create({
       userId: user.id,
       mode: payload.mode,
       caption: payload.caption?.trim() || null,
       hashtags: extractHashtags(payload.caption),
       audience: payload.audience,
-      taggedPeople: payload.taggedPeople ?? [],
+      taggedPeople,
+      taggedFriendIds,
       eventTitle: resolvedEventTitle,
       eventId: resolvedEventId,
       eventCode: payload.eventCode?.trim() || null,
@@ -568,9 +587,11 @@ export class MomentService {
     interactionContext?: MomentInteractionContext,
   ): Promise<MomentResponse> {
     const momentId = moment._id.toString();
-    const [mediaItems, resolvedAuthor, interactionSummary, isSaved] = await Promise.all([
+    const taggedFriendIds = (moment.taggedFriendIds ?? []).map((id) => id.toString());
+    const [mediaItems, resolvedAuthor, taggedFriendUsers, interactionSummary, isSaved] = await Promise.all([
       Promise.all(moment.mediaItems.map((mediaItem) => this.toMediaResponse(mediaItem))),
       author === undefined ? this.userRepository.findById(moment.userId.toString()) : Promise.resolve(author),
+      taggedFriendIds.length > 0 ? this.userRepository.findByIds(taggedFriendIds) : Promise.resolve([]),
       interactionContext
         ? Promise.resolve(this.getInteractionSummaryFromContext(momentId, interactionContext))
         : this.getInteractionSummary(momentId, viewer),
@@ -580,6 +601,10 @@ export class MomentService {
           ? this.momentSaveRepository.findSavedMomentIds(viewer.id, [momentId]).then((ids) => ids.has(momentId))
           : Promise.resolve(false),
     ]);
+    const taggedFriendById = new Map(taggedFriendUsers.map((entry) => [entry._id.toString(), entry]));
+    const taggedFriends = (await Promise.all(taggedFriendIds.map((id) => (
+      this.toAuthorResponse(taggedFriendById.get(id) ?? null, viewer, viewerFollowingIds)
+    )))).filter((entry): entry is MomentAuthorResponse => Boolean(entry));
 
     return {
       id: momentId,
@@ -590,6 +615,7 @@ export class MomentService {
       hashtags: moment.hashtags ?? [],
       audience: moment.audience,
       taggedPeople: moment.taggedPeople,
+      taggedFriends,
       eventTitle: moment.eventTitle ?? null,
       eventId: moment.eventId?.toString() ?? null,
       eventCode: moment.eventCode ?? null,
@@ -746,6 +772,13 @@ export class MomentService {
 
     if (moment.audience !== "public" && moment.userId.toString() !== viewer.id) {
       throw new AppError("You do not have access to this moment", httpStatus.FORBIDDEN);
+    }
+
+    if (moment.isEventAnnouncement && moment.eventId) {
+      const event = await this.eventRepository.findById(moment.eventId.toString());
+      if (!event || event.status === "draft") {
+        throw new AppError("Moment not found", httpStatus.NOT_FOUND);
+      }
     }
 
     return moment;

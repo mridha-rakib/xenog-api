@@ -29,6 +29,7 @@ export interface IMoment {
   hashtags: string[];
   audience: MomentAudience;
   taggedPeople: string[];
+  taggedFriendIds?: Types.ObjectId[];
   eventTitle?: string | null;
   eventId?: Types.ObjectId | null;
   isEventAnnouncement?: boolean;
@@ -101,6 +102,7 @@ export interface CreateMomentDto {
   caption?: string | null;
   audience: MomentAudience;
   taggedPeople?: string[];
+  taggedFriendIds?: string[];
   eventTitle?: string | null;
   eventId?: string | null;
   eventCode?: string | null;
@@ -125,6 +127,7 @@ export interface MomentResponse {
   hashtags: string[];
   audience: MomentAudience;
   taggedPeople: string[];
+  taggedFriends?: MomentAuthorResponse[];
   eventTitle?: string | null;
   eventId?: string | null;
   eventCode?: string | null;

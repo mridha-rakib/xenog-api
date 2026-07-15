@@ -147,12 +147,18 @@ export class ReportService {
     if (type === "post") {
       const post = await MomentModel.findById(id);
       if (!post) throw new AppError("Reported post not found", httpStatus.NOT_FOUND);
+      if (post.isEventAnnouncement && post.eventId) {
+        const event = await EventModel.findById(post.eventId);
+        if (!event || event.status === "draft") {
+          throw new AppError("Reported post not found", httpStatus.NOT_FOUND);
+        }
+      }
       const media = post.mediaItems[0];
       return { ownerId: post.userId.toString(), title: "Post", description: post.caption, imageKey: media?.storageKey, imageUrl: media?.url };
     }
     if (type === "event") {
       const event = await EventModel.findById(id);
-      if (!event) throw new AppError("Reported event not found", httpStatus.NOT_FOUND);
+      if (!event || event.status === "draft") throw new AppError("Reported event not found", httpStatus.NOT_FOUND);
       return { ownerId: event.userId.toString(), title: event.name, description: event.description, imageKey: event.bannerImageKey };
     }
     if (type === "room") {

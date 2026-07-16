@@ -184,7 +184,19 @@ export class MomentService {
   public async listFeedMoments(user: AuthUser, query: MomentFeedQuery = {}): Promise<MomentResponse[]> {
     const hashtags = query.hashtags?.map(normalizeHashtag).filter(Boolean);
     const excludeUserIds = await this.userBlockRepository.findBlockedIds(user.id);
-    const moments = await this.momentRepository.findFeed({ ...query, hashtags, excludeUserIds });
+    const candidateEventIds = await this.momentRepository.findFeedCandidateEventIds({ ...query, hashtags, excludeUserIds });
+    const visibleEvents = await this.eventRepository.findFeedVisibleByIdsForUser(
+      candidateEventIds,
+      user.id,
+      excludeUserIds,
+    );
+    const visibleEventIds = visibleEvents.map((event) => event._id.toString());
+    const moments = await this.momentRepository.findFeed({
+      ...query,
+      hashtags,
+      excludeUserIds,
+      visibleEventIds,
+    });
     const uniqueUserIds = [...new Set(moments.map((m) => m.userId.toString()))];
     const [authors, viewerFollowingIds, interactionContext] = await Promise.all([
       this.userRepository.findByIds(uniqueUserIds),

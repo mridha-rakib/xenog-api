@@ -533,6 +533,40 @@ export class EventRepository {
     return filterAndLimitEvents(events, options, locationFilter);
   }
 
+  public async findFeedVisibleByIdsForUser(
+    eventIds: string[],
+    userId: string,
+    excludeUserIds: string[] = [],
+  ): Promise<IEvent[]> {
+    const uniqueEventIds = [...new Set(eventIds.filter(Boolean))];
+
+    if (uniqueEventIds.length === 0) {
+      return [];
+    }
+
+    const filters: FilterQuery<IEvent>[] = [
+      {
+        _id: { $in: uniqueEventIds },
+        status: { $in: ["published", "live"] },
+      },
+      {
+        $or: [
+          { privacy: { $in: ["public", "locked"] } },
+          {
+            privacy: "private",
+            $or: [{ userId }, { memberUserIds: userId }],
+          },
+        ],
+      },
+    ];
+
+    if (excludeUserIds.length > 0) {
+      filters.push({ userId: { $nin: excludeUserIds } });
+    }
+
+    return EventModel.find(filters.length > 1 ? { $and: filters } : filters[0]!);
+  }
+
   public async findActiveAndUpcomingByUserId(userId: string, activeSince: Date, now: Date): Promise<IEvent[]> {
     return EventModel.find({
       userId,

@@ -147,15 +147,43 @@ export class MomentRepository {
   public async findFeed(query: MomentFeedQuery = {}): Promise<IMoment[]> {
     const hashtags = query.hashtags?.filter(Boolean) ?? [];
     const excludeUserIds = query.excludeUserIds ?? [];
+    const visibleEventIds = query.visibleEventIds?.filter(Boolean) ?? [];
+    const visibilityFilter = visibleEventIds.length > 0
+      ? {
+          $or: [
+            { mode: "feed" },
+            {
+              mode: "event",
+              eventId: { $in: visibleEventIds },
+              isEventAnnouncement: { $ne: true },
+            },
+          ],
+        }
+      : { mode: "feed" };
 
     return MomentModel.find({
-      mode: "feed",
+      ...visibilityFilter,
       audience: "public",
       ...(hashtags.length > 0 ? { hashtags: { $all: hashtags } } : {}),
       ...(excludeUserIds.length > 0 ? { userId: { $nin: excludeUserIds } } : {}),
     })
       .sort({ createdAt: -1 })
       .limit(query.limit ?? 50);
+  }
+
+  public async findFeedCandidateEventIds(query: MomentFeedQuery = {}): Promise<string[]> {
+    const hashtags = query.hashtags?.filter(Boolean) ?? [];
+    const excludeUserIds = query.excludeUserIds ?? [];
+    const eventIds = await MomentModel.find({
+      mode: "event",
+      audience: "public",
+      eventId: { $ne: null },
+      isEventAnnouncement: { $ne: true },
+      ...(hashtags.length > 0 ? { hashtags: { $all: hashtags } } : {}),
+      ...(excludeUserIds.length > 0 ? { userId: { $nin: excludeUserIds } } : {}),
+    }).distinct("eventId");
+
+    return eventIds.map((eventId) => eventId.toString());
   }
 
   public async findPublicByHashtag(hashtag: string, limit = 100): Promise<IMoment[]> {

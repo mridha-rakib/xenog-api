@@ -1225,7 +1225,7 @@ test("existing event moments and event interaction stats remain unaffected", asy
     {},
     {},
     {},
-    {},
+    { getPublicEventGoingSummaries: async () => new Map() },
     {},
     {},
     {},

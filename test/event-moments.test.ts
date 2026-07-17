@@ -224,7 +224,7 @@ test("event detail keeps interactionMomentId and interaction stats on the announ
     {},
     {},
     {},
-    {},
+    { getPublicEventGoingSummaries: async () => new Map() },
     {},
     {},
     {},

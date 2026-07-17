@@ -141,6 +141,9 @@ const createEventService = (privateEventsForUser: Record<string, unknown[]> = {}
   const momentSaveRepository = {
     findSavedMomentIds: async () => new Set<string>(),
   };
+  const checkoutPaymentService = {
+    getPublicEventGoingSummaries: async () => new Map(),
+  };
   const noopRepository = {};
 
   return new EventService(
@@ -151,7 +154,7 @@ const createEventService = (privateEventsForUser: Record<string, unknown[]> = {}
     noopRepository as never,
     noopRepository as never,
     noopRepository as never,
-    noopRepository as never,
+    checkoutPaymentService as never,
     noopRepository as never,
     noopRepository as never,
     noopRepository as never,

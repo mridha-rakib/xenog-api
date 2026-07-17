@@ -28,6 +28,9 @@ import type {
   ICheckoutOrder,
   ITicketShare,
   ITicketUsage,
+  PublicEventGoingAvatarResponse,
+  PublicEventGoingItemResponse,
+  PublicEventGoingSummaryResponse,
   ScanTicketDto,
   ScanTicketResponse,
   ShareTicketDto,
@@ -47,6 +50,15 @@ import { realtimeGateway } from "../realtime/realtime.gateway.js";
 type StripeClient = InstanceType<typeof Stripe>;
 type StripePaymentIntent = Awaited<ReturnType<StripeClient["paymentIntents"]["retrieve"]>>;
 type CheckoutOrderCreatePayload = Parameters<CheckoutPaymentRepository["create"]>[0];
+type PublicGoingEventRef = {
+  id: string;
+  status?: string | null;
+};
+type PublicGoingPass = {
+  id: string;
+  eventId: string;
+  holderUserId: string;
+};
 
 const BUYER_FEE_STRIPE = 0.10;
 const CREATOR_PLATFORM_FEE = 0.05;
@@ -332,6 +344,124 @@ export class CheckoutPaymentService {
       canceled,
       noShow,
       avatars,
+    };
+  }
+
+  public async getPublicEventGoingSummaries(
+    eventRefs: PublicGoingEventRef[],
+  ): Promise<Map<string, PublicEventGoingSummaryResponse>> {
+    const eventById = new Map(
+      eventRefs
+        .map((event) => ({ ...event, id: event.id.trim() }))
+        .filter((event) => event.id)
+        .map((event) => [event.id, event]),
+    );
+    const summaries = new Map<string, PublicEventGoingSummaryResponse>();
+
+    for (const event of eventById.values()) {
+      summaries.set(event.id, { going: 0, avatars: [] });
+    }
+
+    const activeEventIds = [...eventById.values()]
+      .filter((event) => this.canExposePublicGoingForStatus(event.status))
+      .map((event) => event.id);
+
+    if (activeEventIds.length === 0) {
+      return summaries;
+    }
+
+    const passes = await this.getPublicGoingPasses(activeEventIds);
+    const avatarIdsByEventId = new Map<string, string[]>();
+    const avatarIdSetsByEventId = new Map<string, Set<string>>();
+    const userIds = new Set<string>();
+
+    for (const pass of passes) {
+      const summary = summaries.get(pass.eventId);
+
+      if (!summary) {
+        continue;
+      }
+
+      summary.going += 1;
+      userIds.add(pass.holderUserId);
+
+      const avatarIds = avatarIdsByEventId.get(pass.eventId) ?? [];
+      const avatarIdSet = avatarIdSetsByEventId.get(pass.eventId) ?? new Set<string>();
+
+      if (avatarIds.length < 3 && !avatarIdSet.has(pass.holderUserId)) {
+        avatarIds.push(pass.holderUserId);
+        avatarIdSet.add(pass.holderUserId);
+        avatarIdsByEventId.set(pass.eventId, avatarIds);
+        avatarIdSetsByEventId.set(pass.eventId, avatarIdSet);
+      }
+    }
+
+    const users = userIds.size > 0 ? await this.userRepository.findByIds([...userIds]) : [];
+    const userById = new Map(users.map((user) => [user._id.toString(), user]));
+
+    for (const [eventId, avatarIds] of avatarIdsByEventId.entries()) {
+      const summary = summaries.get(eventId);
+
+      if (!summary) {
+        continue;
+      }
+
+      summary.avatars = avatarIds
+        .map((userId) => {
+          const user = userById.get(userId);
+          return user ? this.toPublicEventGoingAvatar(user) : null;
+        })
+        .filter((avatar): avatar is PublicEventGoingAvatarResponse => Boolean(avatar));
+    }
+
+    return summaries;
+  }
+
+  public async getPublicEventGoingItems(
+    user: AuthUser,
+    eventId: string,
+    query: { page?: unknown; limit?: unknown } = {},
+  ): Promise<{
+    tickets: PublicEventGoingItemResponse[];
+    pagination?: ReturnType<typeof createPaginationMeta>;
+  }> {
+    const event = await this.eventRepository.findById(eventId);
+
+    if (!event || !this.canViewPublicGoingEvent(event, user)) {
+      throw new AppError("Event not found", httpStatus.NOT_FOUND);
+    }
+
+    const shouldPaginate = query.page !== undefined || query.limit !== undefined;
+    const { page, limit, skip } = getPaginationOptions({
+      page: Number(query.page) || undefined,
+      limit: Number(query.limit) || undefined,
+    });
+    const passes = this.canExposePublicGoingForStatus(event.status)
+      ? await this.getPublicGoingPasses([eventId])
+      : [];
+    const userIds = [...new Set(passes.map((pass) => pass.holderUserId))];
+    const [users, viewerFollowingIds] = await Promise.all([
+      userIds.length > 0 ? this.userRepository.findByIds(userIds) : Promise.resolve([]),
+      this.userFollowRepository.findFollowingIds(user.id),
+    ]);
+    const userById = new Map(users.map((item) => [item._id.toString(), item]));
+    const viewerFollowingIdSet = new Set(viewerFollowingIds);
+    const tickets = passes.map((pass) => {
+      const attendee = userById.get(pass.holderUserId) ?? null;
+
+      return {
+        id: pass.id,
+        attendee: attendee ? this.toTicketStatUser(attendee, viewerFollowingIdSet) : null,
+      };
+    });
+
+    if (!shouldPaginate) {
+      return { tickets };
+    }
+
+    return {
+      tickets: tickets.slice(skip, skip + limit),
+      pagination: createPaginationMeta(page, limit, tickets.length),
     };
   }
 
@@ -1797,6 +1927,82 @@ export class CheckoutPaymentService {
     return "active";
   }
 
+  private async getPublicGoingPasses(eventIds: string[]): Promise<PublicGoingPass[]> {
+    const uniqueEventIds = [...new Set(eventIds.map((id) => id.trim()).filter(Boolean))];
+
+    if (uniqueEventIds.length === 0) {
+      return [];
+    }
+
+    const [orders, activeShares] = await Promise.all([
+      this.repository.findIssuedTicketOrdersByEventIds(uniqueEventIds),
+      this.ticketShareRepository.findActiveByEventIds(uniqueEventIds),
+    ]);
+    const eventIdSet = new Set(uniqueEventIds);
+    const activeShareByTicketPass = new Map(
+      activeShares.map((share) => [
+        this.getTicketPassKey(share.eventId, share.ticketId, share.orderId.toString(), share.ticketIndex ?? 1),
+        share,
+      ]),
+    );
+    const passes: PublicGoingPass[] = [];
+
+    for (const order of orders) {
+      const orderId = order._id.toString();
+
+      for (const ticketPass of order.ticketPasses) {
+        if (!eventIdSet.has(ticketPass.eventId)) {
+          continue;
+        }
+
+        const lineItem = order.lineItems.find(
+          (item) =>
+            item.itemType === "ticket" &&
+            item.eventId === ticketPass.eventId &&
+            item.itemId === ticketPass.ticketId,
+        );
+
+        if (!lineItem) {
+          continue;
+        }
+
+        const key = this.getTicketPassKey(
+          ticketPass.eventId,
+          ticketPass.ticketId,
+          orderId,
+          ticketPass.ticketIndex,
+        );
+        const activeShare = activeShareByTicketPass.get(key) ?? null;
+        const holderUserId = activeShare?.recipientUserId.toString() ?? order.userId.toString();
+
+        passes.push({
+          id: key,
+          eventId: ticketPass.eventId,
+          holderUserId,
+        });
+      }
+    }
+
+    return passes;
+  }
+
+  private canExposePublicGoingForStatus(status?: string | null): boolean {
+    return status !== "draft" && status !== "cancelled";
+  }
+
+  private canViewPublicGoingEvent(event: IEvent, user: AuthUser): boolean {
+    if (event.status === "draft") {
+      return false;
+    }
+
+    if (event.privacy !== "private") {
+      return true;
+    }
+
+    return event.userId.toString() === user.id
+      || event.memberUserIds.some((memberId) => memberId.toString() === user.id);
+  }
+
   private getTicketPassKey(eventId: string, ticketId: string, orderId: string, ticketIndex: number): string {
     return `${eventId}:${ticketId}:${orderId}:${ticketIndex}`;
   }
@@ -1871,6 +2077,14 @@ export class CheckoutPaymentService {
       username: user.username,
       avatarKey: user.avatarKey ?? null,
       ...(viewerFollowingIds ? { isFollowing: viewerFollowingIds.has(userId) } : {}),
+    };
+  }
+
+  private toPublicEventGoingAvatar(user: IUser): PublicEventGoingAvatarResponse {
+    return {
+      userId: user._id.toString(),
+      name: user.name,
+      avatarKey: user.avatarKey ?? null,
     };
   }
 

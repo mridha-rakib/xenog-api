@@ -98,6 +98,17 @@ export class CheckoutPaymentController {
     });
   };
 
+  public getPublicEventGoingItems = async (req: Request, res: Response): Promise<void> => {
+    const { eventId } = req.params as { eventId: string };
+    const result = await this.service.getPublicEventGoingItems(req.authUser as AuthUser, eventId, req.query);
+
+    ApiResponse.success(res, {
+      message: "Event going list retrieved",
+      data: { tickets: result.tickets },
+      meta: result.pagination ? { pagination: result.pagination } : undefined,
+    });
+  };
+
   public getMyTicketWallet = async (req: Request, res: Response): Promise<void> => {
     const tickets = await this.service.getMyTicketWallet(req.authUser as AuthUser);
 

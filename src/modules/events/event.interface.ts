@@ -1,5 +1,6 @@
 import type { Types } from "mongoose";
 import type { EventHostReviewEligibilityResponse } from "./event-host-review.interface.js";
+import type { PublicEventGoingSummaryResponse } from "../payments/checkout-payment.interface.js";
 
 export const eventStatuses = ["draft", "published", "live", "completed", "cancelled"] as const;
 export type EventStatus = (typeof eventStatuses)[number];
@@ -235,6 +236,7 @@ export interface EventResponse {
   isMember?: boolean;
   myJoinRequestStatus?: EventJoinRequestStatus | null;
   hostReviewEligibility?: EventHostReviewEligibilityResponse;
+  publicGoingSummary?: PublicEventGoingSummaryResponse;
   publishedAt?: Date | null;
   startedAt?: Date | null;
   completedAt?: Date | null;

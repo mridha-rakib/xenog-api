@@ -813,7 +813,10 @@ export class EventService {
       events.map((event) => this.ensureEventInteractionMoment(event)),
     );
     const momentIds = interactionMoments.map((moment) => moment._id.toString());
-    const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds] =
+    const publicGoingSummariesPromise = this.checkoutPaymentService.getPublicEventGoingSummaries(
+      events.map((event) => ({ id: event._id.toString(), status: event.status })),
+    );
+    const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds, publicGoingSummaries] =
       await Promise.all([
         this.momentReactionRepository.countByMomentIds(momentIds),
         this.momentCommentRepository.countByMomentIds(momentIds),
@@ -824,6 +827,7 @@ export class EventService {
         user
           ? this.momentSaveRepository.findSavedMomentIds(user.id, momentIds)
           : Promise.resolve(new Set<string>()),
+        publicGoingSummariesPromise,
       ]);
 
     return events.map((event, index) => {
@@ -839,6 +843,7 @@ export class EventService {
         sharesCount: shareCounts.get(interactionMomentId) ?? 0,
         isLiked: likedMomentIds.has(interactionMomentId),
         isSaved: savedMomentIds.has(interactionMomentId),
+        publicGoingSummary: publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },
       };
     });
   }
@@ -976,7 +981,7 @@ export class EventService {
         this.eventRepository.countProfileEventsByUserId(userId, includePrivateEvents, filter),
         this.userRepository.findById(userId),
       ]);
-      const responseEvents = await Promise.all(events.map((event) => this.toResponse(event, host)));
+      const responseEvents = await this.withPublicGoingSummaries(events.map((event) => this.toResponse(event, host)));
 
       return {
         active: filter === "past" ? [] : responseEvents,
@@ -989,7 +994,7 @@ export class EventService {
     const cachedEvents = await this.getCachedProfileEvents(cacheKey);
 
     if (cachedEvents) {
-      return cachedEvents;
+      return this.withPublicGoingSummariesForGroups(cachedEvents);
     }
 
     const [events, host] = await Promise.all([
@@ -1004,7 +1009,7 @@ export class EventService {
 
     await this.cacheProfileEvents(cacheKey, response);
 
-    return response;
+    return this.withPublicGoingSummariesForGroups(response);
   }
 
   public async startEvent(user: AuthUser, eventId: string): Promise<EventResponse> {
@@ -1254,13 +1259,24 @@ export class EventService {
       ]);
 
     const interactionMomentId = interactionMoment._id.toString();
-    const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds, attendance] = await Promise.all([
+    const [
+      likeCounts,
+      commentCounts,
+      shareCounts,
+      likedMomentIds,
+      savedMomentIds,
+      attendance,
+      publicGoingSummaries,
+    ] = await Promise.all([
       this.momentReactionRepository.countByMomentIds([interactionMomentId]),
       this.momentCommentRepository.countByMomentIds([interactionMomentId]),
       this.momentShareRepository.countByMomentIds([interactionMomentId]),
       this.momentReactionRepository.findLikedMomentIds(user.id, [interactionMomentId]),
       this.momentSaveRepository.findSavedMomentIds(user.id, [interactionMomentId]),
       this.ticketUsageRepository.findByEventIdAndHolderUserId(event._id.toString(), user.id),
+      this.checkoutPaymentService.getPublicEventGoingSummaries([
+        { id: event._id.toString(), status: event.status },
+      ]),
     ]);
 
     let myJoinRequestStatus: EventJoinRequestStatus | null = null;
@@ -1290,6 +1306,7 @@ export class EventService {
       canReport: Boolean(attendance),
       isMember: !isOwner && event.memberUserIds.some((id) => id.toString() === user.id),
       hostReviewEligibility,
+      publicGoingSummary: publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },
     };
   }
 
@@ -2259,6 +2276,36 @@ export class EventService {
       followersCount: extras?.followersCount,
       eventsCount: extras?.eventsCount,
       ...(extras?.isFollowing !== undefined ? { isFollowing: extras.isFollowing } : {}),
+    };
+  }
+
+  private async withPublicGoingSummaries(events: EventResponse[]): Promise<EventResponse[]> {
+    if (events.length === 0) {
+      return events;
+    }
+
+    const summaries = await this.checkoutPaymentService.getPublicEventGoingSummaries(
+      events.map((event) => ({ id: event.id, status: event.status })),
+    );
+
+    return events.map((event) => ({
+      ...event,
+      publicGoingSummary: summaries.get(event.id) ?? { going: 0, avatars: [] },
+    }));
+  }
+
+  private async withPublicGoingSummariesForGroups(
+    groups: ProfileEventGroupsResponse,
+  ): Promise<ProfileEventGroupsResponse> {
+    const [active, past] = await Promise.all([
+      this.withPublicGoingSummaries(groups.active),
+      this.withPublicGoingSummaries(groups.past),
+    ]);
+
+    return {
+      ...groups,
+      active,
+      past,
     };
   }
 

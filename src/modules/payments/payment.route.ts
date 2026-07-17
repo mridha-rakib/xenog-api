@@ -81,6 +81,11 @@ router.get(
   validate(checkoutPaymentValidation.eventParams),
   catchAsync(checkoutPaymentController.getEventAttendanceSummary),
 );
+router.get(
+  "/event-going-items/:eventId",
+  validate(checkoutPaymentValidation.publicGoingItems),
+  catchAsync(checkoutPaymentController.getPublicEventGoingItems),
+);
 router.get("/ticket-wallet", catchAsync(checkoutPaymentController.getMyTicketWallet));
 router.post(
   "/ticket-shares",

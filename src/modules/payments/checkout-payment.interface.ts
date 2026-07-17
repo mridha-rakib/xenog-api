@@ -295,3 +295,19 @@ export interface EventAttendanceSummaryResponse {
   noShow: number;
   avatars: EventAttendanceSummaryAvatarResponse[];
 }
+
+export interface PublicEventGoingAvatarResponse {
+  userId: string;
+  name: string;
+  avatarKey?: string | null;
+}
+
+export interface PublicEventGoingSummaryResponse {
+  going: number;
+  avatars: PublicEventGoingAvatarResponse[];
+}
+
+export interface PublicEventGoingItemResponse {
+  id: string;
+  attendee: EventTicketStatUserResponse | null;
+}

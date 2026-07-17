@@ -72,6 +72,18 @@ export class CheckoutPaymentRepository {
     });
   }
 
+  public async findIssuedTicketOrdersByEventIds(eventIds: string[]): Promise<ICheckoutOrder[]> {
+    if (eventIds.length === 0) {
+      return [];
+    }
+
+    return CheckoutOrderModel.find({
+      kind: "ticket",
+      paymentStatus: "paid",
+      "lineItems.eventId": { $in: eventIds },
+    }).sort({ paidAt: -1, createdAt: -1, _id: -1 });
+  }
+
   public async findTicketStatOrdersByEventId(eventId: string): Promise<ICheckoutOrder[]> {
     return CheckoutOrderModel.find({
       kind: "ticket",

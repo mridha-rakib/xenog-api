@@ -127,19 +127,29 @@ const createSummaryService = async ({
     _id: eventId,
     userId: hostId,
     status: eventStatus,
+    privacy: "public",
+    memberUserIds: [],
     endAt,
     tickets: eventTickets,
     rewards: [],
   };
   const repository = {
     findTicketStatOrdersByEventId: async () => orders,
+    findIssuedTicketOrdersByEventIds: async (ids: string[]) =>
+      orders.filter((order) =>
+        order.paymentStatus === "paid" &&
+        order.lineItems.some((item) => item.eventId && ids.includes(item.eventId)),
+      ),
   };
   const eventRepository = {
     findByIdForUser: async (id: string, userId: string) =>
       id === eventId.toString() && userId === hostId.toString() ? event : null,
+    findById: async (id: string) =>
+      id === eventId.toString() ? event : null,
   };
   const ticketShareRepository = {
     findActiveByEventId: async () => shares,
+    findActiveByEventIds: async (ids: string[]) => shares.filter((share) => ids.includes(share.eventId)),
   };
   const ticketUsageRepository = {
     findByEventIdsAndOrderIds: async () => usages,
@@ -553,4 +563,81 @@ test("ticket stat item pagination does not duplicate pass rows across pages", as
 
   assert.equal(pageOne.pagination?.total, 3);
   assert.equal(new Set(ids).size, 3);
+});
+
+test("public going summary counts paid issued passes only", async () => {
+  const paidOrder = createOrder({ quantity: 2 });
+  const service = await createSummaryService({
+    orders: [
+      paidOrder,
+      createOrder({ paymentStatus: "refunded" }),
+      createOrder({ paymentStatus: "canceled" }),
+      createOrder({ paymentStatus: "failed" }),
+      createOrder({ paymentStatus: "processing" }),
+      createOrder({ paymentStatus: "requires_payment" }),
+    ],
+    users: [createUser(paidOrder.userId, "Paid User", "paid.png")],
+  });
+  const summaries = await service.getPublicEventGoingSummaries([
+    { id: eventId.toString(), status: "published" },
+  ]);
+  const summary = summaries.get(eventId.toString());
+
+  assert.equal(summary?.going, 2);
+  assert.deepEqual(summary?.avatars, [{
+    userId: paidOrder.userId.toString(),
+    name: "Paid User",
+    avatarKey: "paid.png",
+  }]);
+});
+
+test("public going summary uses active share recipient and canceled share fallback owner", async () => {
+  const ownerId = new Types.ObjectId();
+  const recipientId = new Types.ObjectId();
+  const sharedOrder = createOrder({ userId: ownerId });
+  const ownerOrder = createOrder({ userId: ownerId });
+  const service = await createSummaryService({
+    orders: [sharedOrder, ownerOrder],
+    shares: [activeShare(sharedOrder, recipientId)],
+    users: [createUser(ownerId, "Owner"), createUser(recipientId, "Recipient")],
+  });
+  const summaries = await service.getPublicEventGoingSummaries([
+    { id: eventId.toString(), status: "published" },
+  ]);
+  const summary = summaries.get(eventId.toString());
+
+  assert.equal(summary?.going, 2);
+  assert.equal(summary?.avatars[0]?.userId, recipientId.toString());
+  assert.equal(summary?.avatars[1]?.userId, ownerId.toString());
+});
+
+test("public going summary is zero for cancelled events", async () => {
+  const service = await createSummaryService({
+    orders: [createOrder({ quantity: 2 })],
+    eventStatus: "cancelled",
+  });
+  const summaries = await service.getPublicEventGoingSummaries([
+    { id: eventId.toString(), status: "cancelled" },
+  ]);
+
+  assert.deepEqual(summaries.get(eventId.toString()), { going: 0, avatars: [] });
+});
+
+test("public going list returns pass-based rows with synchronized follow state", async () => {
+  const ownerId = new Types.ObjectId();
+  const order = createOrder({ quantity: 2, userId: ownerId });
+  const service = await createSummaryService({
+    orders: [order],
+    users: [createUser(ownerId, "Owner")],
+    followingIds: [ownerId.toString()],
+  });
+  const result = await service.getPublicEventGoingItems(host as never, eventId.toString(), {
+    page: 1,
+    limit: 30,
+  });
+
+  assert.deepEqual(result.tickets.map((item) => item.id), [passId(order, 1), passId(order, 2)]);
+  assert.ok(result.tickets.every((item) => item.attendee?.id === ownerId.toString()));
+  assert.ok(result.tickets.every((item) => item.attendee?.isFollowing === true));
+  assert.equal(result.pagination?.total, 2);
 });

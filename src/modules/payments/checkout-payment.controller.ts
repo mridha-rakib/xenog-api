@@ -77,11 +77,24 @@ export class CheckoutPaymentController {
 
   public getEventTicketStatItems = async (req: Request, res: Response): Promise<void> => {
     const { id } = req.params as { id: string };
-    const result = await this.service.getEventTicketStatItems(req.authUser as AuthUser, id);
+    const result = await this.service.getEventTicketStatItems(req.authUser as AuthUser, id, req.query);
 
     ApiResponse.success(res, {
       message: "Event ticket stat items retrieved",
-      data: result,
+      data: { tickets: result.tickets },
+      meta: result.pagination ? { pagination: result.pagination } : undefined,
+    });
+  };
+
+  public getEventAttendanceSummary = async (req: Request, res: Response): Promise<void> => {
+    const { eventId } = req.params as { eventId: string };
+    const summary = await this.service.getEventAttendanceSummary(req.authUser as AuthUser, eventId);
+
+    ApiResponse.success(res, {
+      message: "Event attendance summary retrieved",
+      data: {
+        summary,
+      },
     });
   };
 

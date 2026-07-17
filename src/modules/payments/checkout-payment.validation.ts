@@ -5,6 +5,7 @@ const objectId = z.string().trim().regex(/^[a-f\d]{24}$/i, "Invalid MongoDB Obje
 const ticketId = z.string().trim().min(1, "Ticket ID is required").max(80, "Ticket ID cannot exceed 80 characters");
 const paymentMethod = z.enum(checkoutPaymentMethods);
 const quantity = z.coerce.number().int().min(1).max(100);
+const ticketStatFilter = z.enum(["going", "attended", "canceled", "noShow"]);
 
 const acceptedTerms = z.literal(true, {
   invalid_type_error: "Terms must be accepted",
@@ -107,6 +108,16 @@ export const checkoutPaymentValidation = {
   idParam: z.object({
     params: z.object({
       id: objectId,
+    }),
+  }),
+  ticketStatItems: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+    query: z.object({
+      status: ticketStatFilter.optional(),
+      page: z.coerce.number().int().min(1).optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
     }),
   }),
 };

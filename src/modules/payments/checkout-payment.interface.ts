@@ -262,13 +262,15 @@ export interface ScanTicketResponse {
   usedAt: Date;
 }
 
-export type EventTicketStatItemStatus = "checked_in" | CheckoutPaymentStatus;
+export type EventTicketStatFilter = "going" | "attended" | "canceled" | "noShow";
+export type EventTicketStatItemStatus = "checked_in" | "no_show" | "active" | CheckoutPaymentStatus;
 
 export interface EventTicketStatUserResponse {
   id: string;
   name: string;
   username?: string;
   avatarKey?: string | null;
+  isFollowing?: boolean;
 }
 
 export interface EventTicketStatItemResponse {
@@ -278,4 +280,18 @@ export interface EventTicketStatItemResponse {
   amount: number;
   currency: string;
   status: EventTicketStatItemStatus;
+}
+
+export interface EventAttendanceSummaryAvatarResponse {
+  userId: string;
+  name: string;
+  avatarUrl?: string | null;
+}
+
+export interface EventAttendanceSummaryResponse {
+  going: number;
+  attended: number;
+  canceled: number;
+  noShow: number;
+  avatars: EventAttendanceSummaryAvatarResponse[];
 }

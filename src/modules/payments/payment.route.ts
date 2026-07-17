@@ -73,8 +73,13 @@ router.get(
 );
 router.get(
   "/event-ticket-stat-items/:id",
-  validate(checkoutPaymentValidation.idParam),
+  validate(checkoutPaymentValidation.ticketStatItems),
   catchAsync(checkoutPaymentController.getEventTicketStatItems),
+);
+router.get(
+  "/event-attendance-summary/:eventId",
+  validate(checkoutPaymentValidation.eventParams),
+  catchAsync(checkoutPaymentController.getEventAttendanceSummary),
 );
 router.get("/ticket-wallet", catchAsync(checkoutPaymentController.getMyTicketWallet));
 router.post(

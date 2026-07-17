@@ -145,6 +145,7 @@ export class EventService {
     if (eventId) {
       const draft = await this.getDraftForUser(user, eventId);
       await this.assertPostingWindowsFitSchedule(draft, normalizedPayload);
+      this.assertTicketAndRewardDatesFitEventSchedule(this.getEventScheduleCandidate(draft, normalizedPayload));
 
       const event = await this.eventRepository.updateDraftByIdForUser(
         eventId,
@@ -158,6 +159,13 @@ export class EventService {
 
       return this.toResponse(event);
     }
+
+    this.assertTicketAndRewardDatesFitEventSchedule({
+      scheduledAt: normalizedPayload.scheduledAt ?? null,
+      endAt: normalizedPayload.endAt ?? null,
+      tickets: normalizedPayload.tickets ?? [],
+      rewards: normalizedPayload.rewards ?? [],
+    });
 
     const event = await this.eventRepository.create({
       ...normalizedPayload,
@@ -187,6 +195,7 @@ export class EventService {
         }
 
         await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
+        this.assertTicketAndRewardDatesFitEventSchedule(this.getEventScheduleCandidate(existingEvent, normalizedPayload));
 
         // Preserve the atomic availableCount counter — do NOT reset it to capacity on re-publish.
         // For new tickets added in the payload, start fully available.
@@ -217,6 +226,7 @@ export class EventService {
 
       if (existingEvent) {
         await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
+        this.assertTicketAndRewardDatesFitEventSchedule(this.getEventScheduleCandidate(existingEvent, normalizedPayload));
       }
 
       const event = await this.eventRepository.publishDraftByIdForUser(
@@ -231,6 +241,13 @@ export class EventService {
 
       return this.toProfileMutatingResponse(event);
     }
+
+    this.assertTicketAndRewardDatesFitEventSchedule({
+      scheduledAt: normalizedPayload.scheduledAt,
+      endAt: normalizedPayload.endAt,
+      tickets: normalizedPayload.tickets,
+      rewards: normalizedPayload.rewards ?? [],
+    });
 
     const event = await this.eventRepository.create({
       ...normalizedPayload,
@@ -250,6 +267,7 @@ export class EventService {
     const existingEvent = await this.getModifiableEventForOwner(user, eventId);
     const normalizedPayload = this.normalizeDraftPayload(payload);
     await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
+    this.assertTicketAndRewardDatesFitEventSchedule(this.getEventScheduleCandidate(existingEvent, normalizedPayload));
 
     const event = await this.eventRepository.updateByIdForUser(
       eventId,
@@ -320,12 +338,13 @@ export class EventService {
     eventId: string,
     payload: CreateEventTicketDto,
   ): Promise<EventResponse> {
-    await this.getEventForTicketOwner(user, eventId);
+    const event = await this.getEventForTicketOwner(user, eventId);
     // New published tickets start fully available — availableCount is set here, not by normalizeTicket.
     const ticket: EventTicket = {
       ...this.normalizeTicket(payload),
       availableCount: payload.capacity,
     };
+    this.assertTicketDatesFitEventSchedule(event, [ticket]);
     const updatedEvent = await this.eventRepository.addTicketToEvent(eventId, user.id, ticket);
 
     if (!updatedEvent) {
@@ -376,6 +395,7 @@ export class EventService {
       id: existingTicket.id,
       type: payload.type ?? existingTicket.type,
     });
+    this.assertTicketDatesFitEventSchedule(event, [merged]);
 
     const updatedEvent = await this.eventRepository.updateTicketFields(eventId, user.id, ticketId, {
       name: merged.name,
@@ -434,6 +454,7 @@ export class EventService {
   ): Promise<EventResponse> {
     const event = await this.getDraftForUser(user, eventId);
     const ticket = this.normalizeTicket(payload);
+    this.assertTicketDatesFitEventSchedule(event, [ticket]);
     const updatedEvent = await this.eventRepository.updateDraftByIdForUser(eventId, user.id, {
       tickets: [...event.tickets.map((item) => this.normalizeTicket(item)), ticket],
     });
@@ -473,6 +494,7 @@ export class EventService {
     if (!foundTicket) {
       throw new AppError("Event draft ticket not found.", httpStatus.NOT_FOUND);
     }
+    this.assertTicketDatesFitEventSchedule(event, tickets);
 
     const updatedEvent = await this.eventRepository.updateDraftByIdForUser(eventId, user.id, {
       tickets,
@@ -516,6 +538,7 @@ export class EventService {
   ): Promise<EventResponse> {
     const event = await this.getModifiableEventForOwner(user, eventId);
     const reward = await this.normalizeReward(payload, event, user.id);
+    this.assertRewardDatesFitEventSchedule(event, [reward]);
     const rewards = this.normalizeExistingRewards(event.rewards);
     this.assertTicketRewardAvailable(rewards, reward);
     const nextRewards = [...rewards, reward];
@@ -575,6 +598,7 @@ export class EventService {
     }
 
     const updatedReward = nextRewards.find((reward) => reward.id === rewardId)!;
+    this.assertRewardDatesFitEventSchedule(event, [updatedReward]);
     this.assertTicketRewardAvailable(rewards, updatedReward, rewardId);
     const updatedEvent =
       updatedReward.rewardType === "ticket" && updatedReward.ticketId
@@ -628,6 +652,7 @@ export class EventService {
   ): Promise<EventResponse> {
     const event = await this.getDraftForUser(user, eventId);
     const reward = await this.normalizeReward(payload, event, user.id);
+    this.assertRewardDatesFitEventSchedule(event, [reward]);
     const rewards = this.normalizeExistingRewards(event.rewards);
     this.assertTicketRewardAvailable(rewards, reward);
     const nextRewards = [...rewards, reward];
@@ -690,6 +715,7 @@ export class EventService {
     }
 
     const updatedReward = nextRewards.find((reward) => reward.id === rewardId)!;
+    this.assertRewardDatesFitEventSchedule(event, [updatedReward]);
     this.assertTicketRewardAvailable(rewards, updatedReward, rewardId);
     const updatedEvent =
       updatedReward.rewardType === "ticket" && updatedReward.ticketId
@@ -1978,6 +2004,92 @@ export class EventService {
       "Event schedule cannot be changed while posting windows fall outside the new event time. Edit or cancel conflicting windows first.",
       httpStatus.UNPROCESSABLE_ENTITY,
     );
+  }
+
+  private getEventScheduleCandidate(event: IEvent, payload: SaveEventDraftDto): {
+    scheduledAt?: Date | null;
+    endAt?: Date | null;
+    tickets: Array<Pick<EventTicket, "name" | "salesEndAt">>;
+    rewards: Array<Pick<EventReward, "name" | "expiresAt">>;
+  } {
+    return {
+      scheduledAt: payload.scheduledAt !== undefined ? payload.scheduledAt : event.scheduledAt ?? null,
+      endAt: payload.endAt !== undefined ? payload.endAt : event.endAt ?? null,
+      tickets: payload.tickets !== undefined ? payload.tickets : event.tickets,
+      rewards: payload.rewards !== undefined ? payload.rewards : this.normalizeExistingRewards(event.rewards),
+    };
+  }
+
+  private assertTicketAndRewardDatesFitEventSchedule(event: {
+    scheduledAt?: Date | null;
+    endAt?: Date | null;
+    tickets?: Array<Pick<EventTicket, "name" | "salesEndAt">>;
+    rewards?: Array<Pick<EventReward, "name" | "expiresAt">>;
+  }): void {
+    this.assertTicketDatesFitEventSchedule(event, event.tickets ?? []);
+    this.assertRewardDatesFitEventSchedule(event, event.rewards ?? []);
+  }
+
+  private assertTicketDatesFitEventSchedule(
+    event: { scheduledAt?: Date | null; endAt?: Date | null },
+    tickets: Array<Pick<EventTicket, "name" | "salesEndAt">>,
+  ): void {
+    const eventStartsAt = this.getValidDateOrNull(event.scheduledAt);
+    const eventEndsAt = this.getValidDateOrNull(event.endAt);
+
+    tickets.forEach((ticket) => {
+      const salesEndAt = this.getValidDateOrNull(ticket.salesEndAt);
+
+      if (!salesEndAt) {
+        return;
+      }
+
+      const ticketName = ticket.name?.trim() || "Ticket";
+
+      if (eventEndsAt && salesEndAt > eventEndsAt) {
+        throw new AppError(
+          `Ticket "${ticketName}" sales end date must not be after the event end date and time.`,
+          httpStatus.UNPROCESSABLE_ENTITY,
+        );
+      }
+
+      if (eventStartsAt && salesEndAt > eventStartsAt) {
+        throw new AppError(
+          `Ticket "${ticketName}" sales end date must not be after the event start date and time.`,
+          httpStatus.UNPROCESSABLE_ENTITY,
+        );
+      }
+    });
+  }
+
+  private assertRewardDatesFitEventSchedule(
+    event: { endAt?: Date | null },
+    rewards: Array<Pick<EventReward, "name" | "expiresAt">>,
+  ): void {
+    const eventEndsAt = this.getValidDateOrNull(event.endAt);
+
+    if (!eventEndsAt) {
+      return;
+    }
+
+    rewards.forEach((reward) => {
+      const expiresAt = this.getValidDateOrNull(reward.expiresAt);
+
+      if (!expiresAt) {
+        return;
+      }
+
+      if (expiresAt > eventEndsAt) {
+        throw new AppError(
+          `Reward "${reward.name?.trim() || "Reward"}" expiry date must not be after the event end date and time.`,
+          httpStatus.UNPROCESSABLE_ENTITY,
+        );
+      }
+    });
+  }
+
+  private getValidDateOrNull(value?: Date | null): Date | null {
+    return value instanceof Date && !Number.isNaN(value.getTime()) ? value : null;
   }
 
   private async getDraftForUser(user: AuthUser, eventId: string): Promise<IEvent> {

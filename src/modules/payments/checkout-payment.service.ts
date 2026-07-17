@@ -3,6 +3,7 @@ import Stripe from "stripe";
 import { Types } from "mongoose";
 import { env } from "../../config/env.js";
 import { AppError } from "../../core/errors/app-error.js";
+import { createPaginationMeta, getPaginationOptions } from "../../core/utils/pagination.js";
 import { RedisClient } from "../../config/redis.js";
 import { logger } from "../../core/logger/logger.js";
 import type { AuthUser } from "../auth/auth.interface.js";
@@ -11,12 +12,16 @@ import type { EventReward, EventTicket, IEvent } from "../events/event.interface
 import { ProductRepository } from "../products/product.repository.js";
 import { UserRepository } from "../user/user.repository.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
+import { StorageService } from "../storage/storage.service.js";
 import type { IUser } from "../user/user.interface.js";
 import type {
   CheckoutIntentResponse,
   CheckoutOrderLineItem,
   CheckoutOrderResponse,
   CreateCheckoutIntentDto,
+  EventAttendanceSummaryAvatarResponse,
+  EventAttendanceSummaryResponse,
+  EventTicketStatFilter,
   EventTicketStatItemResponse,
   EventTicketStatItemStatus,
   EventTicketStatUserResponse,
@@ -63,6 +68,7 @@ export class CheckoutPaymentService {
     private readonly ticketShareRepository = new TicketShareRepository(),
     private readonly ticketUsageRepository = new TicketUsageRepository(),
     private readonly notificationRepository = new NotificationRepository(),
+    private readonly storageService = new StorageService(),
   ) {}
 
   public async getMyTicketPurchaseCounts(
@@ -100,13 +106,24 @@ export class CheckoutPaymentService {
   public async getEventTicketStatItems(
     user: AuthUser,
     eventId: string,
-  ): Promise<{ tickets: EventTicketStatItemResponse[] }> {
+    query: { status?: unknown; page?: unknown; limit?: unknown } = {},
+  ): Promise<{
+    tickets: EventTicketStatItemResponse[];
+    pagination?: ReturnType<typeof createPaginationMeta>;
+  }> {
     const event = await this.eventRepository.findByIdForUser(eventId, user.id);
 
     if (!event) {
       throw new AppError("Event not found", httpStatus.NOT_FOUND);
     }
 
+    const requestedStatus = typeof query.status === "string" ? query.status : undefined;
+    const filter = this.isEventTicketStatFilter(requestedStatus) ? requestedStatus : undefined;
+    const shouldPaginate = query.page !== undefined || query.limit !== undefined;
+    const { page, limit, skip } = getPaginationOptions({
+      page: Number(query.page) || undefined,
+      limit: Number(query.limit) || undefined,
+    });
     const orders = await this.repository.findTicketStatOrdersByEventId(eventId);
     const orderIds = orders.map((order) => order._id.toString());
     const [activeShares, usages] = await Promise.all([
@@ -139,9 +156,15 @@ export class CheckoutPaymentService {
       userIds.add(usage.holderUserId.toString());
     }
 
-    const users = userIds.size > 0 ? await this.userRepository.findByIds([...userIds]) : [];
+    const [users, viewerFollowingIds] = await Promise.all([
+      userIds.size > 0 ? this.userRepository.findByIds([...userIds]) : Promise.resolve([]),
+      this.userFollowRepository.findFollowingIds(user.id),
+    ]);
     const userById = new Map(users.map((item) => [item._id.toString(), item]));
+    const viewerFollowingIdSet = new Set(viewerFollowingIds);
     const tickets: EventTicketStatItemResponse[] = [];
+    const eventEnded = event.status === "completed"
+      || Boolean(event.endAt && event.endAt.getTime() <= Date.now());
 
     for (const order of orders) {
       for (const ticketPass of order.ticketPasses) {
@@ -174,19 +197,142 @@ export class CheckoutPaymentService {
           order.userId.toString();
         const attendee = userById.get(holderUserId) ?? null;
         const ticket = event.tickets.find((item) => item.id === ticketPass.ticketId);
+        const status = this.getTicketStatItemStatus(order, usage, eventEnded, Boolean(filter));
+
+        if (!this.shouldIncludeTicketStatItem(status, filter)) {
+          continue;
+        }
 
         tickets.push({
-          id: `${order._id.toString()}-${ticketPass.ticketId}-${ticketPass.ticketIndex}`,
-          attendee: attendee ? this.toTicketStatUser(attendee) : null,
+          id: key,
+          attendee: attendee ? this.toTicketStatUser(attendee, viewerFollowingIdSet) : null,
           ticketName: ticket?.name ?? lineItem.name,
           amount: this.getTicketPassAmount(lineItem, ticketPass.ticketIndex),
           currency: order.currency,
-          status: this.getTicketStatItemStatus(order, usage),
+          status,
         });
       }
     }
 
-    return { tickets };
+    if (!shouldPaginate) {
+      return { tickets };
+    }
+
+    return {
+      tickets: tickets.slice(skip, skip + limit),
+      pagination: createPaginationMeta(page, limit, tickets.length),
+    };
+  }
+
+  public async getEventAttendanceSummary(
+    user: AuthUser,
+    eventId: string,
+  ): Promise<EventAttendanceSummaryResponse> {
+    const event = await this.eventRepository.findByIdForUser(eventId, user.id);
+
+    if (!event) {
+      throw new AppError("Event not found", httpStatus.NOT_FOUND);
+    }
+
+    const orders = (await this.repository.findTicketStatOrdersByEventId(eventId))
+      .filter((order) => order.paymentStatus === "paid" || order.paymentStatus === "refunded");
+    const orderIds = orders.map((order) => order._id.toString());
+    const [activeShares, usages] = await Promise.all([
+      this.ticketShareRepository.findActiveByEventId(eventId),
+      this.ticketUsageRepository.findByEventIdsAndOrderIds([eventId], orderIds),
+    ]);
+    const activeShareByTicketPass = new Map(
+      activeShares.map((share) => [
+        this.getTicketPassKey(share.eventId, share.ticketId, share.orderId.toString(), share.ticketIndex ?? 1),
+        share,
+      ]),
+    );
+    const usageByTicketPass = new Map(
+      usages.map((usage) => [
+        this.getTicketPassKey(usage.eventId, usage.ticketId, usage.orderId.toString(), usage.ticketIndex),
+        usage,
+      ]),
+    );
+    const eventEnded = event.status === "completed"
+      || Boolean(event.endAt && event.endAt.getTime() <= Date.now());
+    const avatarUserIds: string[] = [];
+    const avatarUserIdSet = new Set<string>();
+    let going = 0;
+    let attended = 0;
+    let canceled = 0;
+    let noShow = 0;
+
+    for (const order of orders) {
+      const orderId = order._id.toString();
+      const isCanceled = order.paymentStatus === "refunded";
+
+      for (const ticketPass of order.ticketPasses) {
+        if (ticketPass.eventId !== eventId) {
+          continue;
+        }
+
+        const lineItem = order.lineItems.find(
+          (item) =>
+            item.itemType === "ticket" &&
+            item.eventId === eventId &&
+            item.itemId === ticketPass.ticketId,
+        );
+
+        if (!lineItem) {
+          continue;
+        }
+
+        going += 1;
+
+        const key = this.getTicketPassKey(
+          ticketPass.eventId,
+          ticketPass.ticketId,
+          orderId,
+          ticketPass.ticketIndex,
+        );
+
+        if (isCanceled) {
+          canceled += 1;
+          continue;
+        }
+
+        if (usageByTicketPass.has(key)) {
+          attended += 1;
+        } else if (eventEnded) {
+          noShow += 1;
+        }
+
+        if (avatarUserIds.length < 3) {
+          const activeShare = activeShareByTicketPass.get(key) ?? null;
+          const holderUserId = activeShare?.recipientUserId.toString() ?? order.userId.toString();
+
+          if (!avatarUserIdSet.has(holderUserId)) {
+            avatarUserIdSet.add(holderUserId);
+            avatarUserIds.push(holderUserId);
+          }
+        }
+      }
+    }
+
+    const avatarUsers = avatarUserIds.length > 0 ? await this.userRepository.findByIds(avatarUserIds) : [];
+    const userById = new Map(avatarUsers.map((item) => [item._id.toString(), item]));
+    const avatars = (
+      await Promise.all(
+        avatarUserIds.map(async (userId) => {
+          const avatarUser = userById.get(userId);
+
+          return avatarUser ? this.toEventAttendanceSummaryAvatar(avatarUser) : null;
+        }),
+      )
+    ).filter((avatar): avatar is EventAttendanceSummaryAvatarResponse => Boolean(avatar));
+
+    return {
+      going,
+      attended,
+      canceled,
+      noShow,
+      avatars,
+    };
   }
 
   public async getMyTicketWallet(user: AuthUser): Promise<TicketWalletItem[]> {
@@ -1664,16 +1810,79 @@ export class CheckoutPaymentService {
   private getTicketStatItemStatus(
     order: ICheckoutOrder,
     usage: ITicketUsage | null,
+    eventEnded = false,
+    useActiveClassification = false,
   ): EventTicketStatItemStatus {
-    return usage ? "checked_in" : order.paymentStatus;
+    if (order.paymentStatus === "refunded") {
+      return "refunded";
+    }
+
+    if (usage) {
+      return "checked_in";
+    }
+
+    if (order.paymentStatus === "paid") {
+      if (!useActiveClassification) {
+        return "paid";
+      }
+
+      return eventEnded ? "no_show" : "active";
+    }
+
+    return order.paymentStatus;
   }
 
-  private toTicketStatUser(user: IUser): EventTicketStatUserResponse {
+  private isEventTicketStatFilter(value: string | undefined): value is EventTicketStatFilter {
+    return value === "going" || value === "attended" || value === "canceled" || value === "noShow";
+  }
+
+  private shouldIncludeTicketStatItem(
+    status: EventTicketStatItemStatus,
+    filter: EventTicketStatFilter | undefined,
+  ): boolean {
+    if (!filter) {
+      return true;
+    }
+
+    if (filter === "going") {
+      return status === "checked_in" || status === "active" || status === "no_show" || status === "refunded";
+    }
+
+    if (filter === "attended") {
+      return status === "checked_in";
+    }
+
+    if (filter === "canceled") {
+      return status === "refunded";
+    }
+
+    return status === "no_show";
+  }
+
+  private toTicketStatUser(
+    user: IUser,
+    viewerFollowingIds?: Set<string>,
+  ): EventTicketStatUserResponse {
+    const userId = user._id.toString();
+
     return {
-      id: user._id.toString(),
+      id: userId,
       name: user.name,
       username: user.username,
       avatarKey: user.avatarKey ?? null,
+      ...(viewerFollowingIds ? { isFollowing: viewerFollowingIds.has(userId) } : {}),
+    };
+  }
+
+  private async toEventAttendanceSummaryAvatar(user: IUser): Promise<EventAttendanceSummaryAvatarResponse> {
+    const avatarUrl = user.avatarKey
+      ? await this.storageService.createDownloadUrl(user.avatarKey).then((download) => download.url).catch(() => null)
+      : null;
+
+    return {
+      userId: user._id.toString(),
+      name: user.name,
+      avatarUrl,
     };
   }
 

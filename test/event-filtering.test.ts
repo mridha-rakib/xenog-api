@@ -51,10 +51,17 @@ const withMockedEventFind = async <T>(events: unknown[], run: (captured: { query
 
   EventModel.find = ((query: unknown) => {
     captured.query = query;
-
-    return {
-      sort: () => Promise.resolve(events),
+    const queryResult = {
+      sort: () => queryResult,
+      limit: (limit: number) => Promise.resolve(events.slice(0, limit)),
+      then: (
+        resolve: (value: unknown[]) => unknown,
+        reject?: (reason: unknown) => unknown,
+      ) => Promise.resolve(events).then(resolve, reject),
+      catch: (reject: (reason: unknown) => unknown) => Promise.resolve(events).catch(reject),
     };
+
+    return queryResult;
   }) as typeof EventModel.find;
 
   try {
@@ -96,6 +103,21 @@ test("map validation remains compatible with geo-only requests and accepts new f
     query: { category: "Drinks", latitude: "40", longitude: "-73" },
   });
   assert.equal(invalidCategory.success, false);
+
+  const viewport = eventValidation.mapEvents.safeParse({
+    query: { north: "45", south: "40", west: "170", east: "-170", limit: "100" },
+  });
+  assert.equal(viewport.success, true);
+
+  const partialViewport = eventValidation.mapEvents.safeParse({
+    query: { north: "45", south: "40", west: "170" },
+  });
+  assert.equal(partialViewport.success, false);
+
+  const invertedLatitude = eventValidation.mapEvents.safeParse({
+    query: { north: "39", south: "40", west: "-75", east: "-70" },
+  });
+  assert.equal(invertedLatitude.success, false);
 });
 
 test("date and late-night filters build an inclusive-start exclusive-end UTC range", async () => {
@@ -181,6 +203,72 @@ test("combined filters are added on top of existing visibility query", async () 
     assert.match(queryText, /music/);
     assert.match(queryText, /summer/);
     assert.match(queryText, /tickets/);
+  });
+});
+
+test("map viewport bounds are added when nearby coordinates are absent", async () => {
+  const repository = new EventRepository();
+
+  await withMockedEventFind([], async (captured) => {
+    await repository.findMapEvents({
+      activeSince: new Date("2026-07-01T00:00:00.000Z"),
+      north: 42,
+      south: 39,
+      west: -75,
+      east: -70,
+      limit: 100,
+    });
+
+    const queryText = JSON.stringify(captured.query);
+    assert.match(queryText, /location.latitude/);
+    assert.match(queryText, /42/);
+    assert.match(queryText, /39/);
+    assert.match(queryText, /-75/);
+    assert.match(queryText, /-70/);
+  });
+});
+
+test("map viewport bounds support antimeridian crossing", async () => {
+  const repository = new EventRepository();
+
+  await withMockedEventFind([], async (captured) => {
+    await repository.findMapEvents({
+      activeSince: new Date("2026-07-01T00:00:00.000Z"),
+      north: 15,
+      south: -15,
+      west: 170,
+      east: -170,
+      limit: 100,
+    });
+
+    const queryText = JSON.stringify(captured.query);
+    assert.match(queryText, /170/);
+    assert.match(queryText, /180/);
+    assert.match(queryText, /-180/);
+    assert.match(queryText, /-170/);
+  });
+});
+
+test("explicit nearby coordinates take precedence over viewport bounds", async () => {
+  const repository = new EventRepository();
+
+  await withMockedEventFind([], async (captured) => {
+    await repository.findMapEvents({
+      activeSince: new Date("2026-07-01T00:00:00.000Z"),
+      latitude: 40,
+      longitude: -73,
+      radiusKm: 2,
+      north: 50,
+      south: 20,
+      west: 100,
+      east: 120,
+      limit: 100,
+    });
+
+    const queryText = JSON.stringify(captured.query);
+    assert.match(queryText, /-73/);
+    assert.doesNotMatch(queryText, /100/);
+    assert.doesNotMatch(queryText, /120/);
   });
 });
 

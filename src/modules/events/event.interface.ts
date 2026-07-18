@@ -269,6 +269,11 @@ export interface EventMapQuery {
   latitude?: number;
   longitude?: number;
   radiusKm?: number;
+  north?: number;
+  south?: number;
+  east?: number;
+  west?: number;
+  cursor?: string;
   limit?: number;
   ageRestriction?: EventAgeRestriction;
   priceFilter?: EventPriceFilter;
@@ -276,6 +281,17 @@ export interface EventMapQuery {
   timePeriod?: EventTimePeriod;
   timezoneOffsetMinutes?: number;
   hashtags?: string[];
+}
+
+export interface EventMapPaginationCursor {
+  scheduledAt: Date;
+  publishedAt: Date;
+  id: string;
+}
+
+export interface EventMapListResponse {
+  events: EventResponse[];
+  nextCursor?: string | null;
 }
 
 export type AdminMapEventStatus = "upcoming" | "live" | "active";

@@ -352,6 +352,11 @@ const mapQuery = z
     latitude: queryNumber(z.number().min(-90).max(90)),
     longitude: queryNumber(z.number().min(-180).max(180)),
     radiusKm: queryNumber(z.number().min(1).max(250)),
+    north: queryNumber(z.number().min(-90).max(90)),
+    south: queryNumber(z.number().min(-90).max(90)),
+    east: queryNumber(z.number().min(-180).max(180)),
+    west: queryNumber(z.number().min(-180).max(180)),
+    cursor: z.string().min(1).optional(),
     limit: queryNumber(z.number().int().min(1).max(200)),
     ageRestriction: z.enum(eventAgeRestrictions).optional(),
     priceFilter: z.enum(eventPriceFilters).optional(),
@@ -364,6 +369,21 @@ const mapQuery = z
   .refine((query) => (query.latitude === undefined) === (query.longitude === undefined), {
     message: "Latitude and longitude must be provided together",
     path: ["longitude"],
+  })
+  .refine((query) => {
+    const boundValues = [query.north, query.south, query.east, query.west];
+    return boundValues.every((value) => value === undefined) || boundValues.every((value) => value !== undefined);
+  }, {
+    message: "Viewport bounds must include north, south, east, and west",
+    path: ["north"],
+  })
+  .refine((query) => (
+    query.north === undefined ||
+    query.south === undefined ||
+    query.north >= query.south
+  ), {
+    message: "North must be greater than or equal to south",
+    path: ["north"],
   });
 
 const feedQuery = z

@@ -184,9 +184,9 @@ test("private event appears in feed and map only for added private members", asy
   const nonMemberMap = await service.listMapEvents(nonMember as never, {});
 
   assert.ok(memberFeed.some((event) => event.id === privateEventId.toString()));
-  assert.ok(memberMap.some((event) => event.id === privateEventId.toString()));
+  assert.ok(memberMap.events.some((event) => event.id === privateEventId.toString()));
   assert.equal(nonMemberFeed.some((event) => event.id === privateEventId.toString()), false);
-  assert.equal(nonMemberMap.some((event) => event.id === privateEventId.toString()), false);
+  assert.equal(nonMemberMap.events.some((event) => event.id === privateEventId.toString()), false);
 });
 
 test("private event details are blocked for non-members", async () => {

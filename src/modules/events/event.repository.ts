@@ -1,8 +1,9 @@
-import type { FilterQuery, SortOrder, Types, UpdateQuery } from "mongoose";
+import { Types, type FilterQuery, type SortOrder, type UpdateQuery } from "mongoose";
 import { EventModel } from "./event.model.js";
 import type {
   EventAgeRestriction,
   EventCategory,
+  EventMapPaginationCursor,
   EventMapQuery,
   EventPriceFilter,
   EventTimePeriod,
@@ -42,7 +43,19 @@ type LocationFilter = {
   radiusKm: number;
 };
 
-type EventFilterOptions = PublicFeedEventOptions | (EventMapQuery & { activeSince?: Date });
+type ViewportBounds = {
+  north: number;
+  south: number;
+  east: number;
+  west: number;
+};
+
+type MapEventQueryOptions = EventMapQuery & {
+  activeSince: Date;
+  paginationCursor?: EventMapPaginationCursor;
+};
+
+type EventFilterOptions = PublicFeedEventOptions | (MapEventQueryOptions & { activeSince?: Date });
 
 const EXACT_RADIUS_EPSILON_KM = 0.000001;
 const MINUTES_PER_DAY = 24 * 60;
@@ -86,6 +99,116 @@ const getLocationFilter = (options: EventFilterOptions): LocationFilter | null =
         radiusKm: options.radiusKm,
       }
     : null;
+
+const getViewportBounds = (options: EventMapQuery): ViewportBounds | null =>
+  isFiniteCoordinate(options.north) &&
+  isFiniteCoordinate(options.south) &&
+  isFiniteCoordinate(options.east) &&
+  isFiniteCoordinate(options.west) &&
+  options.north >= options.south
+    ? {
+        north: options.north,
+        south: options.south,
+        east: options.east,
+        west: options.west,
+      }
+    : null;
+
+const addLongitudeBoundsFilter = (
+  filters: FilterQuery<IEvent>[],
+  bounds: ViewportBounds,
+): void => {
+  const standardLongitudeFilter = {
+    "location.longitude": {
+      $type: "number",
+      $gte: bounds.west,
+      $lte: bounds.east,
+    },
+  };
+
+  filters.push({
+    "location.latitude": {
+      $type: "number",
+      $gte: bounds.south,
+      $lte: bounds.north,
+    },
+    ...(bounds.west <= bounds.east
+      ? standardLongitudeFilter
+      : {
+          $or: [
+            {
+              "location.longitude": {
+                $type: "number",
+                $gte: bounds.west,
+                $lte: 180,
+              },
+            },
+            {
+              "location.longitude": {
+                $type: "number",
+                $gte: -180,
+                $lte: bounds.east,
+              },
+            },
+          ],
+        }),
+  });
+};
+
+const addMapSpatialFilter = (
+  filters: FilterQuery<IEvent>[],
+  query: EventMapQuery,
+  locationFilter: LocationFilter | null,
+): void => {
+  if (locationFilter) {
+    const latitudeDelta = locationFilter.radiusKm / 111.32;
+    const longitudeDelta = locationFilter.radiusKm / (111.32 * Math.max(Math.cos((locationFilter.latitude * Math.PI) / 180), 0.01));
+
+    filters.push({
+      "location.latitude": {
+        $type: "number",
+        $gte: locationFilter.latitude - latitudeDelta,
+        $lte: locationFilter.latitude + latitudeDelta,
+      },
+      "location.longitude": {
+        $type: "number",
+        $gte: locationFilter.longitude - longitudeDelta,
+        $lte: locationFilter.longitude + longitudeDelta,
+      },
+    });
+    return;
+  }
+
+  const viewportBounds = getViewportBounds(query);
+  if (viewportBounds) {
+    addLongitudeBoundsFilter(filters, viewportBounds);
+  }
+};
+
+const addMapCursorFilter = (
+  filters: FilterQuery<IEvent>[],
+  cursor?: EventMapPaginationCursor,
+): void => {
+  if (!cursor || !Types.ObjectId.isValid(cursor.id)) {
+    return;
+  }
+
+  const cursorObjectId = new Types.ObjectId(cursor.id);
+  filters.push({
+    $or: [
+      { scheduledAt: { $gt: cursor.scheduledAt } },
+      {
+        scheduledAt: cursor.scheduledAt,
+        publishedAt: { $lt: cursor.publishedAt },
+      },
+      {
+        scheduledAt: cursor.scheduledAt,
+        publishedAt: cursor.publishedAt,
+        _id: { $lt: cursorObjectId },
+      },
+    ],
+  });
+};
 
 const getTimezoneOffsetMinutes = (options: EventFilterOptions): number =>
   typeof options.timezoneOffsetMinutes === "number" && Number.isFinite(options.timezoneOffsetMinutes)
@@ -225,7 +348,7 @@ const matchesPriceFilter = (event: IEvent, priceFilter?: EventPriceFilter): bool
 };
 
 const addPriceCandidateFilter = (filters: FilterQuery<IEvent>[], priceFilter?: EventPriceFilter): void => {
-  if (!priceFilter || priceFilter === "gte_100") {
+  if (!priceFilter) {
     return;
   }
 
@@ -236,7 +359,9 @@ const addPriceCandidateFilter = (filters: FilterQuery<IEvent>[], priceFilter?: E
   const priceQuery =
     priceFilter === "free"
       ? { $or: [{ type: "free" }, { price: 0 }] }
-      : { price: { $lt: priceFilter === "lt_10" ? 10 : priceFilter === "lt_50" ? 50 : 100 } };
+      : priceFilter === "gte_100"
+        ? { type: "pay", price: { $gte: 100 } }
+        : { price: { $lt: priceFilter === "lt_10" ? 10 : priceFilter === "lt_50" ? 50 : 100 } };
 
   filters.push({
     tickets: {
@@ -716,7 +841,7 @@ export class EventRepository {
     return { scheduledAt: -1, publishedAt: -1, _id: -1 };
   }
 
-  public async findMapEvents(query: EventMapQuery & { activeSince: Date }): Promise<IEvent[]> {
+  public async findMapEvents(query: MapEventQueryOptions): Promise<IEvent[]> {
     const filters: FilterQuery<IEvent>[] = [{
       status: { $in: ["published", "live"] },
       privacy: { $in: ["public", "locked"] },
@@ -731,34 +856,19 @@ export class EventRepository {
     addCategoryFilter(filters, query.category);
     addSharedEventFilters(filters, query);
     const locationFilter = getLocationFilter(query);
-
-    if (locationFilter) {
-      const latitudeDelta = locationFilter.radiusKm / 111.32;
-      const longitudeDelta = locationFilter.radiusKm / (111.32 * Math.max(Math.cos((locationFilter.latitude * Math.PI) / 180), 0.01));
-
-      filters.push({
-        "location.latitude": {
-          $type: "number",
-          $gte: locationFilter.latitude - latitudeDelta,
-          $lte: locationFilter.latitude + latitudeDelta,
-        },
-        "location.longitude": {
-          $type: "number",
-          $gte: locationFilter.longitude - longitudeDelta,
-          $lte: locationFilter.longitude + longitudeDelta,
-        },
-      });
-    }
+    addMapSpatialFilter(filters, query, locationFilter);
+    addMapCursorFilter(filters, query.paginationCursor);
 
     const eventQuery: FilterQuery<IEvent> = filters.length > 1 ? { $and: filters } : filters[0]!;
-    const events = await EventModel.find(eventQuery).sort({ scheduledAt: 1, publishedAt: -1, _id: -1 });
+    const request = EventModel.find(eventQuery).sort({ scheduledAt: 1, publishedAt: -1, _id: -1 });
+    const events = await (locationFilter ? request : request.limit((query.limit ?? 100) + 1));
 
     return filterAndLimitEvents(events, query, locationFilter);
   }
 
   public async findPrivateMapEventsForUser(
     userId: string,
-    query: EventMapQuery & { activeSince: Date },
+    query: MapEventQueryOptions,
   ): Promise<IEvent[]> {
     const filters: FilterQuery<IEvent>[] = [{
       status: { $in: ["published", "live"] },
@@ -777,27 +887,12 @@ export class EventRepository {
     addCategoryFilter(filters, query.category);
     addSharedEventFilters(filters, query);
     const locationFilter = getLocationFilter(query);
-
-    if (locationFilter) {
-      const latitudeDelta = locationFilter.radiusKm / 111.32;
-      const longitudeDelta = locationFilter.radiusKm / (111.32 * Math.max(Math.cos((locationFilter.latitude * Math.PI) / 180), 0.01));
-
-      filters.push({
-        "location.latitude": {
-          $type: "number",
-          $gte: locationFilter.latitude - latitudeDelta,
-          $lte: locationFilter.latitude + latitudeDelta,
-        },
-        "location.longitude": {
-          $type: "number",
-          $gte: locationFilter.longitude - longitudeDelta,
-          $lte: locationFilter.longitude + longitudeDelta,
-        },
-      });
-    }
+    addMapSpatialFilter(filters, query, locationFilter);
+    addMapCursorFilter(filters, query.paginationCursor);
 
     const eventQuery: FilterQuery<IEvent> = filters.length > 1 ? { $and: filters } : filters[0]!;
-    const events = await EventModel.find(eventQuery).sort({ scheduledAt: 1, publishedAt: -1, _id: -1 });
+    const request = EventModel.find(eventQuery).sort({ scheduledAt: 1, publishedAt: -1, _id: -1 });
+    const events = await (locationFilter ? request : request.limit((query.limit ?? 100) + 1));
 
     return filterAndLimitEvents(events, query, locationFilter);
   }

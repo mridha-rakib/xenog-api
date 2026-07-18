@@ -51,6 +51,8 @@ import type {
   ProfileEventsQuery,
   CreateEventTicketDto,
   EventResponse,
+  EventMapListResponse,
+  EventMapPaginationCursor,
   EventTicket,
   EventTicketInput,
   IEvent,
@@ -68,6 +70,56 @@ import type {
 } from "./event.interface.js";
 
 const ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
+
+type EventMapCursorPayload = {
+  scheduledAt?: unknown;
+  publishedAt?: unknown;
+  id?: unknown;
+};
+
+const encodeMapCursor = (event: IEvent): string | null => {
+  if (
+    !(event.scheduledAt instanceof Date) ||
+    Number.isNaN(event.scheduledAt.getTime()) ||
+    !(event.publishedAt instanceof Date) ||
+    Number.isNaN(event.publishedAt.getTime())
+  ) {
+    return null;
+  }
+
+  return Buffer.from(JSON.stringify({
+    scheduledAt: event.scheduledAt.toISOString(),
+    publishedAt: event.publishedAt.toISOString(),
+    id: event._id.toString(),
+  })).toString("base64url");
+};
+
+const decodeMapCursor = (cursor?: string): EventMapPaginationCursor | undefined => {
+  if (!cursor) {
+    return undefined;
+  }
+
+  try {
+    const payload = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as EventMapCursorPayload;
+    const scheduledAt = typeof payload.scheduledAt === "string" ? new Date(payload.scheduledAt) : null;
+    const publishedAt = typeof payload.publishedAt === "string" ? new Date(payload.publishedAt) : null;
+
+    if (
+      !scheduledAt ||
+      !publishedAt ||
+      Number.isNaN(scheduledAt.getTime()) ||
+      Number.isNaN(publishedAt.getTime()) ||
+      typeof payload.id !== "string" ||
+      !payload.id
+    ) {
+      throw new Error("Invalid cursor payload");
+    }
+
+    return { scheduledAt, publishedAt, id: payload.id };
+  } catch {
+    throw new AppError("Invalid map cursor.", httpStatus.BAD_REQUEST);
+  }
+};
 const NOW_MODE_LOOKAHEAD_MS = 3 * 60 * 60 * 1000;
 const STARTING_SOON_MS = 60 * 60 * 1000;
 const PROFILE_EVENTS_CACHE_VERSION = "v1";
@@ -1082,24 +1134,31 @@ export class EventService {
     return this.toProfileMutatingResponse(event);
   }
 
-  public async listMapEvents(user: AuthUser, query: EventMapQuery): Promise<EventResponse[]> {
+  public async listMapEvents(user: AuthUser, query: EventMapQuery): Promise<EventMapListResponse> {
     const activeSince = new Date(Date.now() - ACTIVE_EVENT_WINDOW_MS);
+    const pageLimit = query.limit ?? 100;
     const mapQuery = {
       ...query,
       radiusKm: query.radiusKm ?? 50,
-      limit: query.limit ?? 100,
+      limit: pageLimit + 1,
       activeSince,
+      paginationCursor: decodeMapCursor(query.cursor),
     };
     const [publicEvents, privateEvents] = await Promise.all([
       this.eventRepository.findMapEvents(mapQuery),
       this.eventRepository.findPrivateMapEventsForUser(user.id, mapQuery),
     ]);
-    const events = this.mergeMapEvents(publicEvents, privateEvents, query.limit ?? 100);
-    const hostById = await this.getHostById(events);
+    const events = this.mergeMapEvents(publicEvents, privateEvents, pageLimit + 1);
+    const pageEvents = events.slice(0, pageLimit);
+    const nextCursor = events.length > pageLimit ? encodeMapCursor(pageEvents[pageEvents.length - 1]!) : null;
+    const hostById = await this.getHostById(pageEvents);
 
-    return events.map((event) =>
-      this.toResponse(event, hostById.get(event.userId.toString()) ?? null),
-    );
+    return {
+      events: pageEvents.map((event) =>
+        this.toResponse(event, hostById.get(event.userId.toString()) ?? null),
+      ),
+      nextCursor,
+    };
   }
 
   public async listAdminMapEvents(): Promise<AdminMapEventResponse[]> {

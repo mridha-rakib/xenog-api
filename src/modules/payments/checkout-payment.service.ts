@@ -507,6 +507,9 @@ export class CheckoutPaymentService {
       this.userFollowRepository.findFollowingIds(user.id),
     ]);
     const eventById = new Map(events.map((event) => [event._id.toString(), event]));
+    const publicGoingSummaries = await this.getPublicEventGoingSummaries(
+      events.map((event) => ({ id: event._id.toString(), status: event.status })),
+    );
     const followingIdSet = new Set(followingIds);
     const userIds = [
       ...new Set([
@@ -550,6 +553,7 @@ export class CheckoutPaymentService {
           event,
           host,
           followingIdSet.has(event.userId.toString()),
+          publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },
         );
         const itemKey = `${lineItem.eventId}:${lineItem.itemId}`;
         for (const ticketPass of walletItem.ticketPasses) {
@@ -616,6 +620,7 @@ export class CheckoutPaymentService {
           owner,
           usage,
           followingIdSet.has(event.userId.toString()),
+          publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },
         );
       })
       .filter((item): item is TicketWalletItem => Boolean(item));
@@ -2156,6 +2161,7 @@ export class CheckoutPaymentService {
     event: IEvent,
     host: IUser | null,
     isFollowing: boolean,
+    publicGoingSummary: PublicEventGoingSummaryResponse,
   ): TicketWalletItem {
     const { paidQuantity, freeQuantity, totalQuantity } = this.getEffectiveTicketQuantities(event, lineItem);
     const ticketPasses = this.buildTicketPasses(order, lineItem, event);
@@ -2183,6 +2189,12 @@ export class CheckoutPaymentService {
         name: event.name ?? null,
         bannerImageKey: event.bannerImageKey ?? null,
         bannerOriginalImageKey: event.bannerOriginalImageKey ?? null,
+        category: event.categories?.[0] ?? event.category ?? null,
+        categories: event.categories?.length
+          ? event.categories
+          : event.category
+            ? [event.category]
+            : [],
         scheduledAt: event.scheduledAt ?? null,
         endAt: event.endAt ?? null,
         location: event.location
@@ -2202,6 +2214,7 @@ export class CheckoutPaymentService {
               isFollowing,
             }
           : null,
+        publicGoingSummary,
       },
     };
   }
@@ -2215,6 +2228,7 @@ export class CheckoutPaymentService {
     owner: IUser | null,
     usage: ITicketUsage | null,
     isFollowing: boolean,
+    publicGoingSummary: PublicEventGoingSummaryResponse,
   ): TicketWalletItem {
     const unitAmount = roundCurrency(ticket.type === "free" ? 0 : ticket.price);
     const ticketIndex = share.ticketIndex ?? 1;
@@ -2257,6 +2271,12 @@ export class CheckoutPaymentService {
         name: event.name ?? null,
         bannerImageKey: event.bannerImageKey ?? null,
         bannerOriginalImageKey: event.bannerOriginalImageKey ?? null,
+        category: event.categories?.[0] ?? event.category ?? null,
+        categories: event.categories?.length
+          ? event.categories
+          : event.category
+            ? [event.category]
+            : [],
         scheduledAt: event.scheduledAt ?? null,
         endAt: event.endAt ?? null,
         location: event.location
@@ -2268,6 +2288,7 @@ export class CheckoutPaymentService {
           : null,
         status: event.status,
         host: host ? { ...this.toWalletUser(host), isFollowing } : null,
+        publicGoingSummary,
       },
     };
   }

@@ -1,4 +1,5 @@
 import type { Types } from "mongoose";
+import type { EventCategory } from "../events/event.interface.js";
 
 export const checkoutOrderKinds = ["ticket", "product", "custom"] as const;
 export type CheckoutOrderKind = (typeof checkoutOrderKinds)[number];
@@ -148,6 +149,8 @@ export interface TicketWalletEvent {
   name?: string | null;
   bannerImageKey?: string | null;
   bannerOriginalImageKey?: string | null;
+  category?: EventCategory | null;
+  categories: EventCategory[];
   scheduledAt?: Date | null;
   endAt?: Date | null;
   location?: {
@@ -157,6 +160,7 @@ export interface TicketWalletEvent {
   } | null;
   status: string;
   host?: TicketWalletEventHost | null;
+  publicGoingSummary?: PublicEventGoingSummaryResponse;
 }
 
 export interface TicketWalletPass {

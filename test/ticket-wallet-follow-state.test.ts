@@ -26,6 +26,8 @@ const makeEvent = (name: string) => {
       name,
       bannerImageKey: "events/banner.jpg",
       bannerOriginalImageKey: "events/banner-original.jpg",
+      category: "Food & Drinks",
+      categories: ["Food & Drinks", "Food Trucks", "Social Meetups"],
       scheduledAt: now,
       endAt: new Date("2026-07-09T12:00:00.000Z"),
       location: { venue: "Test Venue", address: "Test Address" },
@@ -36,23 +38,23 @@ const makeEvent = (name: string) => {
   };
 };
 
-const makeLineItem = (eventId: string, ticketId: string) => ({
+const makeLineItem = (eventId: string, ticketId: string, quantity = 1) => ({
   itemType: "ticket" as const,
   itemId: ticketId,
   eventId,
   name: "Standard",
-  quantity: 1,
-  paidQuantity: 1,
+  quantity,
+  paidQuantity: quantity,
   freeQuantity: 0,
-  totalQuantity: 1,
+  totalQuantity: quantity,
   unitAmount: 20,
-  totalAmount: 20,
+  totalAmount: quantity * 20,
 });
 
 const makeOrder = (
   orderId: Types.ObjectId,
   userId: Types.ObjectId,
-  eventTickets: Array<{ eventId: string; ticketId: string }>,
+  eventTickets: Array<{ eventId: string; ticketId: string; quantity?: number }>,
 ) => ({
   _id: orderId,
   userId,
@@ -61,24 +63,28 @@ const makeOrder = (
   currency: "usd",
   paidAt: now,
   createdAt: now,
-  lineItems: eventTickets.map(({ eventId, ticketId }) => makeLineItem(eventId, ticketId)),
-  ticketPasses: eventTickets.map(({ eventId, ticketId }, index) => ({
-    eventId,
-    ticketId,
-    ticketIndex: 1,
-    checkInCode: `MOM-26-TEST-${String(index + 1).padStart(4, "0")}`,
-  })),
+  lineItems: eventTickets.map(({ eventId, ticketId, quantity }) => makeLineItem(eventId, ticketId, quantity ?? 1)),
+  ticketPasses: eventTickets.flatMap(({ eventId, ticketId, quantity = 1 }, eventIndex) =>
+    Array.from({ length: quantity }, (_, passIndex) => ({
+      eventId,
+      ticketId,
+      ticketIndex: passIndex + 1,
+      checkInCode: `MOM-26-TEST-${String(eventIndex + 1).padStart(2, "0")}-${String(passIndex + 1).padStart(2, "0")}`,
+    })),
+  ),
 });
 
 type WalletFixtureOptions = {
   followedHostIds?: string[];
   ownedEventCount?: number;
+  ownedTicketQuantity?: number;
   includeSharedTicket?: boolean;
 };
 
 const createWalletFixture = async ({
   followedHostIds = [],
   ownedEventCount = 1,
+  ownedTicketQuantity = 1,
   includeSharedTicket = false,
 }: WalletFixtureOptions = {}) => {
   const { CheckoutPaymentService } = await import("../src/modules/payments/checkout-payment.service.js");
@@ -89,7 +95,11 @@ const createWalletFixture = async ({
   const ownedOrder = makeOrder(
     ownedOrderId,
     viewerId,
-    ownedEvents.map(({ event, ticketId }) => ({ eventId: event._id.toString(), ticketId })),
+    ownedEvents.map(({ event, ticketId }) => ({
+      eventId: event._id.toString(),
+      ticketId,
+      quantity: ownedTicketQuantity,
+    })),
   );
   const sharedOrder = sharedEvent
     ? makeOrder(sharedOrderId, ownerId, [{ eventId: sharedEvent.event._id.toString(), ticketId: sharedEvent.ticketId }])
@@ -115,15 +125,25 @@ const createWalletFixture = async ({
   const repository = {
     findTicketWalletOrdersByUserId: async () => ownedEventCount > 0 ? [ownedOrder] : [],
     findByIds: async () => sharedOrder ? [sharedOrder] : [],
+    findIssuedTicketOrdersByEventIds: async (ids: string[]) =>
+      [ownedOrder, sharedOrder]
+        .filter((order): order is ReturnType<typeof makeOrder> => Boolean(order))
+        .filter((order) => order.lineItems.some((item) => item.eventId && ids.includes(item.eventId))),
   };
   const eventRepository = {
     findManyByIds: async () => events,
   };
   const userRepository = {
     findMany: async () => [
+      { _id: viewerId, name: "Wallet Viewer", username: "wallet_viewer", avatarKey: "users/viewer.jpg" },
       { _id: hostId, name: "Event Host", username: "event_host", avatarKey: "users/host.jpg" },
       { _id: ownerId, name: "Ticket Owner", username: "ticket_owner", avatarKey: null },
     ],
+    findByIds: async (ids: string[]) => [
+      { _id: viewerId, name: "Wallet Viewer", username: "wallet_viewer", avatarKey: "users/viewer.jpg" },
+      { _id: hostId, name: "Event Host", username: "event_host", avatarKey: "users/host.jpg" },
+      { _id: ownerId, name: "Ticket Owner", username: "ticket_owner", avatarKey: null },
+    ].filter((user) => ids.includes(user._id.toString())),
   };
   const userFollowRepository = {
     findFollowingIds: async (followerId: string) => {
@@ -135,6 +155,7 @@ const createWalletFixture = async ({
   const ticketShareRepository = {
     findActiveByOwnerId: async () => [],
     findActiveByRecipientId: async () => receivedShares,
+    findActiveByEventIds: async (ids: string[]) => receivedShares.filter((share) => ids.includes(share.eventId)),
   };
   const ticketUsageRepository = {
     findByEventIdsAndOrderIds: async () => [],
@@ -174,6 +195,23 @@ test("owned wallet events include followed host state with one batched relations
   assert.ok(wallet.every((item) => item.ticketPasses.length === 1));
 });
 
+test("owned wallet event includes canonical categories and public going summary for profile cards", async () => {
+  const fixture = await createWalletFixture({
+    ownedEventCount: 1,
+    ownedTicketQuantity: 2,
+  });
+  const [walletItem] = await fixture.service.getMyTicketWallet({ id: viewerId.toString() } as never);
+
+  assert.deepEqual(walletItem?.event.categories, ["Food & Drinks", "Food Trucks", "Social Meetups"]);
+  assert.equal(walletItem?.event.category, "Food & Drinks");
+  assert.equal(walletItem?.event.publicGoingSummary?.going, 2);
+  assert.deepEqual(walletItem?.event.publicGoingSummary?.avatars, [{
+    userId: viewerId.toString(),
+    name: "Wallet Viewer",
+    avatarKey: "users/viewer.jpg",
+  }]);
+});
+
 test("owned wallet events include false when the viewer does not follow the host", async () => {
   const fixture = await createWalletFixture({ followedHostIds: [] });
   const [walletItem] = await fixture.service.getMyTicketWallet({ id: viewerId.toString() } as never);
@@ -196,4 +234,20 @@ test("shared-ticket wallet events include the viewer relationship to the event h
   assert.equal(walletItem?.sharedBy?.id, ownerId.toString());
   assert.equal(walletItem?.event.name, "Shared Event");
   assert.equal(walletItem?.paymentStatus, "paid");
+});
+
+test("shared-ticket wallet event uses active recipient in public going summary", async () => {
+  const fixture = await createWalletFixture({
+    ownedEventCount: 0,
+    includeSharedTicket: true,
+  });
+  const [walletItem] = await fixture.service.getMyTicketWallet({ id: viewerId.toString() } as never);
+
+  assert.deepEqual(walletItem?.event.categories, ["Food & Drinks", "Food Trucks", "Social Meetups"]);
+  assert.equal(walletItem?.event.publicGoingSummary?.going, 1);
+  assert.deepEqual(walletItem?.event.publicGoingSummary?.avatars, [{
+    userId: viewerId.toString(),
+    name: "Wallet Viewer",
+    avatarKey: "users/viewer.jpg",
+  }]);
 });

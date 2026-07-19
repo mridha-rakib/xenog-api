@@ -36,6 +36,7 @@ type PublicFeedEventOptions = {
   timePeriod?: EventTimePeriod;
   timezoneOffsetMinutes?: number;
   hashtags?: string[];
+  hostUserIds?: string[];
 };
 
 type LocationFilter = {
@@ -579,6 +580,14 @@ export class EventRepository {
       filters.push({ userId: { $nin: excludeUserIds } });
     }
 
+    if (options.hostUserIds) {
+      if (options.hostUserIds.length === 0) {
+        return [];
+      }
+
+      filters.push({ userId: { $in: options.hostUserIds } });
+    }
+
     if (options.category) {
       filters.push({ $or: [{ categories: options.category }, { category: options.category }] });
     }
@@ -640,6 +649,14 @@ export class EventRepository {
 
     if (excludeUserIds.length > 0) {
       filters.push({ userId: { $nin: excludeUserIds } });
+    }
+
+    if (options.hostUserIds) {
+      if (options.hostUserIds.length === 0) {
+        return [];
+      }
+
+      filters.push({ userId: { $in: options.hostUserIds } });
     }
 
     if (options.category) {

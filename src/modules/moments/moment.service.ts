@@ -183,8 +183,19 @@ export class MomentService {
 
   public async listFeedMoments(user: AuthUser, query: MomentFeedQuery = {}): Promise<MomentResponse[]> {
     const hashtags = query.hashtags?.map(normalizeHashtag).filter(Boolean);
-    const excludeUserIds = await this.userBlockRepository.findBlockedIds(user.id);
-    const candidateEventIds = await this.momentRepository.findFeedCandidateEventIds({ ...query, hashtags, excludeUserIds });
+    const [excludeUserIds, friendIds] = await Promise.all([
+      this.userBlockRepository.findBlockedIds(user.id),
+      query.audience === "friends"
+        ? this.userFollowRepository.findMutualFriendIds(user.id)
+        : Promise.resolve([]),
+    ]);
+    const authorUserIds = query.audience === "friends" ? friendIds : undefined;
+    const candidateEventIds = await this.momentRepository.findFeedCandidateEventIds({
+      ...query,
+      hashtags,
+      excludeUserIds,
+      authorUserIds,
+    });
     const visibleEvents = await this.eventRepository.findFeedVisibleByIdsForUser(
       candidateEventIds,
       user.id,
@@ -196,6 +207,7 @@ export class MomentService {
       hashtags,
       excludeUserIds,
       visibleEventIds,
+      authorUserIds,
     });
     const uniqueUserIds = [...new Set(moments.map((m) => m.userId.toString()))];
     const [authors, viewerFollowingIds, interactionContext] = await Promise.all([
@@ -293,12 +305,20 @@ export class MomentService {
     return this.toShareResponse(share, moment, user, viewerFollowingIds, interactionContext);
   }
 
-  public async listFeedShares(user: AuthUser, limit = 50): Promise<MomentTimelineItemResponse[]> {
-    const [shares, blockedIds] = await Promise.all([
+  public async listFeedShares(
+    user: AuthUser,
+    limit = 50,
+    audience?: "discover" | "friends",
+  ): Promise<MomentTimelineItemResponse[]> {
+    const [shares, blockedIds, friendIds] = await Promise.all([
       this.momentShareRepository.findRecent(limit),
       this.userBlockRepository.findBlockedIds(user.id),
+      audience === "friends"
+        ? this.userFollowRepository.findMutualFriendIds(user.id)
+        : Promise.resolve([]),
     ]);
     const blocked = new Set(blockedIds);
+    const friendIdSet = new Set(friendIds);
     const moments = await this.momentRepository.findByIds(shares.map((share) => share.momentId.toString()));
     const momentById = new Map(moments.map((moment) => [moment._id.toString(), moment]));
     const candidates = shares
@@ -307,7 +327,8 @@ export class MomentService {
         entry.moment
         && entry.moment.audience === "public"
         && !blocked.has(entry.share.userId.toString())
-        && !blocked.has(entry.moment.userId.toString()),
+        && !blocked.has(entry.moment.userId.toString())
+        && (audience !== "friends" || friendIdSet.has(entry.share.userId.toString())),
       ));
     const visibility = await Promise.all(candidates.map(async (entry) => {
       if (!entry.moment.isEventAnnouncement) return true;

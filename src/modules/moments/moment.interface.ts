@@ -144,8 +144,10 @@ export interface MomentResponse {
 export interface MomentFeedQuery {
   hashtags?: string[];
   limit?: number;
+  audience?: "discover" | "friends";
   excludeUserIds?: string[];
   visibleEventIds?: string[];
+  authorUserIds?: string[];
 }
 
 export interface MomentTimelineItemResponse {

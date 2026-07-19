@@ -148,6 +148,16 @@ export class MomentRepository {
     const hashtags = query.hashtags?.filter(Boolean) ?? [];
     const excludeUserIds = query.excludeUserIds ?? [];
     const visibleEventIds = query.visibleEventIds?.filter(Boolean) ?? [];
+    const authorUserIds = query.authorUserIds;
+
+    if (authorUserIds && authorUserIds.length === 0) {
+      return [];
+    }
+
+    const userIdFilter = {
+      ...(excludeUserIds.length > 0 ? { $nin: excludeUserIds } : {}),
+      ...(authorUserIds ? { $in: authorUserIds } : {}),
+    };
     const visibilityFilter = visibleEventIds.length > 0
       ? {
           $or: [
@@ -165,7 +175,7 @@ export class MomentRepository {
       ...visibilityFilter,
       audience: "public",
       ...(hashtags.length > 0 ? { hashtags: { $all: hashtags } } : {}),
-      ...(excludeUserIds.length > 0 ? { userId: { $nin: excludeUserIds } } : {}),
+      ...(Object.keys(userIdFilter).length > 0 ? { userId: userIdFilter } : {}),
     })
       .sort({ createdAt: -1 })
       .limit(query.limit ?? 50);
@@ -174,13 +184,24 @@ export class MomentRepository {
   public async findFeedCandidateEventIds(query: MomentFeedQuery = {}): Promise<string[]> {
     const hashtags = query.hashtags?.filter(Boolean) ?? [];
     const excludeUserIds = query.excludeUserIds ?? [];
+    const authorUserIds = query.authorUserIds;
+
+    if (authorUserIds && authorUserIds.length === 0) {
+      return [];
+    }
+
+    const userIdFilter = {
+      ...(excludeUserIds.length > 0 ? { $nin: excludeUserIds } : {}),
+      ...(authorUserIds ? { $in: authorUserIds } : {}),
+    };
+
     const eventIds = await MomentModel.find({
       mode: "event",
       audience: "public",
       eventId: { $ne: null },
       isEventAnnouncement: { $ne: true },
       ...(hashtags.length > 0 ? { hashtags: { $all: hashtags } } : {}),
-      ...(excludeUserIds.length > 0 ? { userId: { $nin: excludeUserIds } } : {}),
+      ...(Object.keys(userIdFilter).length > 0 ? { userId: userIdFilter } : {}),
     }).distinct("eventId");
 
     return eventIds.map((eventId) => eventId.toString());

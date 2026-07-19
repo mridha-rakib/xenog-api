@@ -77,7 +77,10 @@ const mediaItem = z
 
 export const momentValidation = {
   feedShares: z.object({
-    query: z.object({ limit: z.coerce.number().int().min(1).max(100).default(50) }).strict(),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(100).default(50),
+      audience: z.enum(["discover", "friends"]).optional(),
+    }).strict(),
   }),
   feedQuery: z.object({
     query: z.object({
@@ -89,6 +92,7 @@ export const momentValidation = {
           ? [...new Set(value.split(",").map((tag) => tag.trim()).filter(Boolean))].slice(0, 20)
           : []),
       limit: z.coerce.number().int().min(1).max(100).default(50),
+      audience: z.enum(["discover", "friends"]).optional(),
     }).strict(),
   }),
   hashtagMoments: z.object({

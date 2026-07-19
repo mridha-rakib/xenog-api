@@ -965,12 +965,16 @@ export class EventService {
     user?: AuthUser,
     query: EventFeedQuery = {},
   ): Promise<EventResponse[]> {
-    const [excludeUserIds, followingIds] = await Promise.all([
+    const [excludeUserIds, followingIds, friendIds] = await Promise.all([
       user ? this.userBlockRepository.findBlockedIds(user.id) : Promise.resolve([]),
       user ? this.userFollowRepository.findFollowingIds(user.id) : Promise.resolve([]),
+      user && query.audience === "friends"
+        ? this.userFollowRepository.findMutualFriendIds(user.id)
+        : Promise.resolve([]),
     ]);
 
     const followingSet = new Set(followingIds);
+    const hostUserIds = query.audience === "friends" ? friendIds : undefined;
     const hasNearbyFilter =
       typeof query.latitude === "number" && typeof query.longitude === "number";
     const feedOptions = {
@@ -985,6 +989,7 @@ export class EventService {
       timePeriod: query.timePeriod,
       timezoneOffsetMinutes: query.timezoneOffsetMinutes,
       hashtags: query.hashtags,
+      hostUserIds,
     };
     const [publicEvents, privateEvents] = await Promise.all([
       this.eventRepository.findPublicFeedEvents(excludeUserIds, feedOptions),

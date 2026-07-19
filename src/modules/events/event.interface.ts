@@ -391,6 +391,7 @@ export interface EventFeedQuery {
   timePeriod?: EventTimePeriod;
   timezoneOffsetMinutes?: number;
   hashtags?: string[];
+  audience?: "discover" | "friends";
 }
 
 export interface RewardClaimResponse {

@@ -118,6 +118,19 @@ test("map validation remains compatible with geo-only requests and accepts new f
     query: { north: "39", south: "40", west: "-75", east: "-70" },
   });
   assert.equal(invertedLatitude.success, false);
+
+  const feedAudience = eventValidation.feedEvents.safeParse({
+    query: { audience: "friends", limit: "100" },
+  });
+  assert.equal(feedAudience.success, true);
+  if (feedAudience.success) {
+    assert.equal(feedAudience.data.query.audience, "friends");
+  }
+
+  const mapAudience = eventValidation.mapEvents.safeParse({
+    query: { latitude: "40", longitude: "-73", audience: "friends" },
+  });
+  assert.equal(mapAudience.success, false);
 });
 
 test("date and late-night filters build an inclusive-start exclusive-end UTC range", async () => {
@@ -203,6 +216,33 @@ test("combined filters are added on top of existing visibility query", async () 
     assert.match(queryText, /music/);
     assert.match(queryText, /summer/);
     assert.match(queryText, /tickets/);
+  });
+});
+
+test("feed host filtering is added on top of public and private event visibility", async () => {
+  const repository = new EventRepository();
+  const userId = new Types.ObjectId().toString();
+  const friendHostId = new Types.ObjectId().toString();
+
+  await withMockedEventFind([], async (captured) => {
+    await repository.findPublicFeedEvents([], { hostUserIds: [friendHostId] });
+
+    const queryText = JSON.stringify(captured.query);
+    assert.match(queryText, /published/);
+    assert.match(queryText, /live/);
+    assert.match(queryText, /public/);
+    assert.match(queryText, /locked/);
+    assert.match(queryText, new RegExp(friendHostId));
+  });
+
+  await withMockedEventFind([], async (captured) => {
+    await repository.findPrivateFeedEventsForUser(userId, [], { hostUserIds: [friendHostId] });
+
+    const queryText = JSON.stringify(captured.query);
+    assert.match(queryText, /private/);
+    assert.match(queryText, new RegExp(userId));
+    assert.match(queryText, /memberUserIds/);
+    assert.match(queryText, new RegExp(friendHostId));
   });
 });
 

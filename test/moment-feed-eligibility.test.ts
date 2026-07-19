@@ -49,6 +49,7 @@ type EventFixture = {
 
 const viewerId = new Types.ObjectId();
 const authorId = new Types.ObjectId();
+const otherAuthorId = new Types.ObjectId();
 const blockedAuthorId = new Types.ObjectId();
 const publicEventId = new Types.ObjectId();
 const privateEventId = new Types.ObjectId();
@@ -147,6 +148,7 @@ const matchesFilter = (moment: MomentFixture, filter: Record<string, unknown>): 
 
   const userFilter = filter.userId as { $nin?: unknown[] } | undefined;
   if (userFilter?.$nin?.map(getId).includes(moment.userId.toString())) return false;
+  if (userFilter?.$in && !userFilter.$in.map(getId).includes(moment.userId.toString())) return false;
 
   const hashtagFilter = filter.hashtags as { $all?: string[] } | undefined;
   if (hashtagFilter?.$all?.some((hashtag) => !moment.hashtags.includes(hashtag))) return false;
@@ -397,6 +399,86 @@ test("feed service resolves event-tagged post visibility from candidate moment e
   );
 });
 
+test("friends feed moments use mutual friend authors for normal and event-tagged posts", async () => {
+  const friendFeedPost = makeMoment({
+    userId: authorId,
+    caption: "Friend feed post",
+    createdAt: new Date("2026-07-16T12:03:00.000Z"),
+  });
+  const friendEventPost = makeMoment({
+    userId: authorId,
+    mode: "event",
+    eventId: publicEventId,
+    eventTitle: "Public friend event",
+    caption: "Friend event post",
+    createdAt: new Date("2026-07-16T12:02:00.000Z"),
+  });
+  const discoverAuthorPost = makeMoment({
+    userId: otherAuthorId,
+    caption: "Discover-only author post",
+    createdAt: new Date("2026-07-16T12:04:00.000Z"),
+  });
+  const service = createMomentService({
+    momentRepository: new MomentRepository() as never,
+    eventRepository: new EventRepository() as never,
+    friendUserIds: [authorId.toString()],
+  });
+
+  await withMockedMomentFind(
+    [discoverAuthorPost, friendFeedPost, friendEventPost],
+    async () => {
+      await withMockedEventFind([makeEvent(publicEventId, "public")], async () => {
+        const moments = await service.listFeedMoments(viewer as never, { audience: "friends" });
+
+        assert.deepEqual(moments.map((moment) => moment.id), [
+          friendFeedPost._id.toString(),
+          friendEventPost._id.toString(),
+        ]);
+      });
+    },
+  );
+});
+
+test("friends feed shares keep only reposts created by mutual friends", async () => {
+  const friendMoment = makeMoment({ caption: "Friend shared moment" });
+  const discoverMoment = makeMoment({ userId: otherAuthorId, caption: "Discover shared moment" });
+  const friendShare = {
+    _id: new Types.ObjectId(),
+    userId: authorId,
+    momentId: friendMoment._id,
+    caption: null,
+    taggedFriendIds: [],
+    originalType: "post",
+    originalId: friendMoment._id,
+    createdAt: new Date("2026-07-16T12:03:00.000Z"),
+    updatedAt: new Date("2026-07-16T12:03:00.000Z"),
+  };
+  const discoverShare = {
+    _id: new Types.ObjectId(),
+    userId: otherAuthorId,
+    momentId: discoverMoment._id,
+    caption: null,
+    taggedFriendIds: [],
+    originalType: "post",
+    originalId: discoverMoment._id,
+    createdAt: new Date("2026-07-16T12:04:00.000Z"),
+    updatedAt: new Date("2026-07-16T12:04:00.000Z"),
+  };
+  const service = createMomentService({
+    momentRepository: {
+      findByIds: async () => [friendMoment, discoverMoment],
+    },
+    momentShareRepository: {
+      findRecent: async () => [discoverShare, friendShare],
+    },
+    friendUserIds: [authorId.toString()],
+  });
+
+  const shares = await service.listFeedShares(viewer as never, 50, "friends");
+
+  assert.deepEqual(shares.map((share) => share.id), [friendShare._id.toString()]);
+});
+
 test("profile timeline keeps authored event-tagged posts", async () => {
   const eventPost = makeMoment({
     mode: "event",
@@ -429,6 +511,7 @@ function createMomentService(overrides: {
   momentShareRepository?: Record<string, unknown>;
   eventRepository?: Record<string, unknown>;
   blockedUserIds?: string[];
+  friendUserIds?: string[];
 } = {}): MomentService {
   const momentShareRepository = {
     findByUserId: async () => [],
@@ -445,7 +528,10 @@ function createMomentService(overrides: {
       findById: async () => author,
     } as never,
     momentShareRepository as never,
-    { findFollowingIds: async () => [] } as never,
+    {
+      findFollowingIds: async () => [],
+      findMutualFriendIds: async () => overrides.friendUserIds ?? [],
+    } as never,
     { findBlockedIds: async () => overrides.blockedUserIds ?? [] } as never,
     {
       countByMomentIds: async () => new Map<string, number>(),

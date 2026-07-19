@@ -33,7 +33,7 @@ export class MomentController {
   public listFeedMoments = async (req: Request, res: Response): Promise<void> => {
     const moments = await this.momentService.listFeedMoments(
       req.authUser as AuthUser,
-      req.query as { hashtags?: string[]; limit?: number },
+      req.query as { hashtags?: string[]; limit?: number; audience?: "discover" | "friends" },
     );
 
     ApiResponse.success(res, {
@@ -72,6 +72,7 @@ export class MomentController {
     const shares = await this.momentService.listFeedShares(
       req.authUser as AuthUser,
       Number(req.query.limit ?? 50),
+      req.query.audience as "discover" | "friends" | undefined,
     );
     ApiResponse.success(res, { message: "Feed reposts retrieved", data: { shares } });
   };

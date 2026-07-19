@@ -473,6 +473,7 @@ const feedQuery = z
     timePeriod: z.enum(eventTimePeriods).optional(),
     timezoneOffsetMinutes: queryNumber(z.number().int().min(-840).max(840)),
     hashtags: hashtagList,
+    audience: z.enum(["discover", "friends"]).optional(),
   })
   .refine((query) => (query.latitude === undefined) === (query.longitude === undefined), {
     message: "Latitude and longitude must be provided together",

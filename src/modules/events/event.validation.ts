@@ -2,6 +2,9 @@ import { z } from "zod";
 import {
   eventAgeRestrictions,
   eventCategories,
+  eventMediaTypes,
+  MAX_EVENT_MEDIA_BATCH_ITEMS,
+  MAX_EVENT_MEDIA_VIDEO_DURATION_SECONDS,
   eventPriceFilters,
   eventPrivacyOptions,
   eventRewardTypes,
@@ -11,6 +14,7 @@ import {
 
 const objectId = z.string().trim().regex(/^[a-f\d]{24}$/i, "Invalid MongoDB ObjectId");
 const ticketId = z.string().trim().min(1, "Ticket ID is required").max(80, "Ticket ID cannot exceed 80 characters");
+const eventMediaId = z.string().trim().min(1, "Media ID is required").max(80, "Media ID cannot exceed 80 characters");
 
 const optionalText = (label: string, maxLength: number) =>
   z
@@ -111,6 +115,76 @@ const eventCategory = z.preprocess(
 );
 
 const optionalEventCategory = eventCategory.optional().nullable().transform((value) => (value === undefined ? undefined : (value ?? null)));
+
+const eventMediaItem = z
+  .object({
+    type: z.enum(eventMediaTypes),
+    storageKey: optionalText("Storage key", 300),
+    contentType: optionalText("Content type", 100),
+    fileSize: z
+      .number({ invalid_type_error: "File size must be a number" })
+      .int("File size must be an integer")
+      .positive("File size is required")
+      .optional()
+      .nullable()
+      .transform((value) => value ?? null),
+    width: z
+      .number({ invalid_type_error: "Media width must be a number" })
+      .finite("Media width must be finite")
+      .min(0, "Media width cannot be negative")
+      .optional()
+      .nullable()
+      .transform((value) => value ?? null),
+    height: z
+      .number({ invalid_type_error: "Media height must be a number" })
+      .finite("Media height must be finite")
+      .min(0, "Media height cannot be negative")
+      .optional()
+      .nullable()
+      .transform((value) => value ?? null),
+    durationSeconds: z
+      .number({ invalid_type_error: "Video duration must be a number" })
+      .finite("Video duration must be finite")
+      .min(0, "Video duration cannot be negative")
+      .max(MAX_EVENT_MEDIA_VIDEO_DURATION_SECONDS, "Video duration cannot exceed 10 minutes")
+      .optional()
+      .nullable()
+      .transform((value) => value ?? null),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (!value.storageKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["storageKey"],
+        message: "Event media storage key is required",
+      });
+    }
+
+    if (!value.contentType) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["contentType"],
+        message: "Event media content type is required",
+      });
+    }
+
+    if (value.type === "image" && value.durationSeconds != null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["durationSeconds"],
+        message: "Image media cannot include video duration",
+      });
+    }
+
+    if (value.type === "video" && value.durationSeconds == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["durationSeconds"],
+        message: "Video duration is required",
+      });
+    }
+  });
 
 const eventCategoryList = z
   .array(eventCategory, {
@@ -456,6 +530,25 @@ export const eventValidation = {
     params: z.object({
       id: objectId,
       ticketId,
+    }),
+  }),
+  eventMediaParams: z.object({
+    params: z.object({
+      id: objectId,
+      mediaId: eventMediaId,
+    }),
+  }),
+  addEventMedia: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+    body: z.object({
+      mediaItems: z
+        .array(eventMediaItem, {
+          invalid_type_error: "Event media must be a list",
+        })
+        .min(1, "Select at least one media item")
+        .max(MAX_EVENT_MEDIA_BATCH_ITEMS, `You can upload up to ${MAX_EVENT_MEDIA_BATCH_ITEMS} media items at a time`),
     }),
   }),
   eventRewardParams: z.object({

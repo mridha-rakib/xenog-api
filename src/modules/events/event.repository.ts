@@ -5,6 +5,7 @@ import type {
   EventCategory,
   EventMapPaginationCursor,
   EventMapQuery,
+  EventMediaItem,
   EventPriceFilter,
   EventTimePeriod,
   ProfileEventFilter,
@@ -484,6 +485,37 @@ export class EventRepository {
 
   public async findManyByIds(ids: string[]): Promise<IEvent[]> {
     return EventModel.find({ _id: { $in: ids } });
+  }
+
+  public async appendEventMediaItem(id: string, userId: string, mediaItem: EventMediaItem): Promise<IEvent | null> {
+    return EventModel.findOneAndUpdate(
+      {
+        _id: id,
+        userId,
+        status: { $in: ["draft", "published", "live", "completed"] },
+        "eventMedia.29": { $exists: false },
+        "eventMedia.storageKey": { $ne: mediaItem.storageKey },
+      },
+      { $push: { eventMedia: mediaItem } },
+      { new: true, runValidators: true },
+    );
+  }
+
+  public async findByIdWithEventMedia(id: string): Promise<IEvent | null> {
+    return EventModel.findById(id);
+  }
+
+  public async removeEventMediaItem(id: string, userId: string, mediaId: string): Promise<IEvent | null> {
+    return EventModel.findOneAndUpdate(
+      {
+        _id: id,
+        userId,
+        status: { $in: ["draft", "published", "live", "completed"] },
+        "eventMedia.id": mediaId,
+      },
+      { $pull: { eventMedia: { id: mediaId } } },
+      { new: true, runValidators: true },
+    );
   }
 
   public async updateByIdForUser(id: string, userId: string, payload: SaveEventDraftDto): Promise<IEvent | null> {

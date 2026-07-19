@@ -1,8 +1,13 @@
 import type { Request, Response } from "express";
 import httpStatus from "http-status";
+import type { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { AppError } from "../../core/errors/app-error.js";
 import { ApiResponse } from "../../core/http/api-response.js";
 import type { AuthUser } from "../auth/auth.interface.js";
+import { StorageService } from "../storage/storage.service.js";
 import type {
+  AddEventMediaDto,
   CreateEventTicketDto,
   CreateEventRewardDto,
   EventFeedQuery,
@@ -16,8 +21,25 @@ import type {
 import type { SubmitEventHostReviewDto as SubmitHostReviewDto } from "./event-host-review.interface.js";
 import { EventService } from "./event.service.js";
 
+const getSupportedRangeHeader = (rangeHeader: Request["headers"]["range"]): string | undefined => {
+  if (typeof rangeHeader !== "string") {
+    return undefined;
+  }
+
+  if (!/^bytes=(\d+-\d*|\d*-\d+)$/.test(rangeHeader)) {
+    throw new AppError("Invalid Range header", 416);
+  }
+
+  return rangeHeader;
+};
+
+const escapeHeaderFilename = (filename: string): string => filename.replace(/["\\]/g, "_");
+
 export class EventController {
-  public constructor(private readonly eventService = new EventService()) {}
+  public constructor(
+    private readonly eventService = new EventService(),
+    private readonly storageService = new StorageService(),
+  ) {}
 
   public saveDraft = async (req: Request, res: Response): Promise<void> => {
     const event = await this.eventService.saveDraft(req.authUser as AuthUser, req.body as SaveEventDraftDto);
@@ -440,6 +462,99 @@ export class EventController {
         events: result.events,
         nextCursor: result.nextCursor ?? null,
       },
+    });
+  };
+
+  public addEventMedia = async (req: Request, res: Response): Promise<void> => {
+    const result = await this.eventService.addEventMedia(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.body as AddEventMediaDto,
+    );
+
+    ApiResponse.success(res, {
+      statusCode: httpStatus.CREATED,
+      message: "Event media uploaded",
+      data: result,
+    });
+  };
+
+  public streamEventMedia = async (req: Request, res: Response): Promise<void> => {
+    const media = await this.eventService.getAuthorizedEventMedia(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.mediaId as string,
+    );
+    const range = getSupportedRangeHeader(req.headers.range);
+    const abortController = new AbortController();
+    const bodyRef: { current?: Readable } = {};
+    let streamFinished = false;
+
+    const cleanupBody = (reason?: Error): void => {
+      const body = bodyRef.current;
+
+      if (body && !body.destroyed) {
+        body.destroy(reason);
+      }
+    };
+
+    const abortStreaming = (): void => {
+      if (streamFinished || abortController.signal.aborted) {
+        return;
+      }
+
+      abortController.abort();
+      cleanupBody(new Error("Client disconnected during event media stream"));
+    };
+
+    const abortOnEarlyClose = (): void => {
+      if (!res.writableEnded) {
+        abortStreaming();
+      }
+    };
+
+    req.on("aborted", abortStreaming);
+    res.on("close", abortOnEarlyClose);
+    res.on("error", abortStreaming);
+
+    const file = await this.storageService.getObject(media.key, range, abortController.signal);
+    const body = file.body;
+    bodyRef.current = body;
+
+    if (abortController.signal.aborted || req.aborted || res.destroyed) {
+      cleanupBody(new Error("Client disconnected before event media stream started"));
+      return;
+    }
+
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Content-Type", media.contentType || file.contentType || "application/octet-stream");
+
+    if (file.contentRange) {
+      res.status(httpStatus.PARTIAL_CONTENT);
+      res.setHeader("Content-Range", file.contentRange);
+    }
+
+    if (file.contentLength !== undefined) {
+      res.setHeader("Content-Length", file.contentLength);
+    }
+
+    res.setHeader("Content-Disposition", `inline; filename="${escapeHeaderFilename(media.filename)}"`);
+    res.setHeader("Cache-Control", "private, max-age=300");
+
+    await pipeline(body, res);
+    streamFinished = true;
+  };
+
+  public deleteEventMedia = async (req: Request, res: Response): Promise<void> => {
+    const result = await this.eventService.deleteEventMedia(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      req.params.mediaId as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Event media deleted",
+      data: result,
     });
   };
 

@@ -26,6 +26,20 @@ export type EventRewardType = (typeof eventRewardTypes)[number];
 export const eventJoinRequestStatuses = ["pending", "accepted", "declined"] as const;
 export type EventJoinRequestStatus = (typeof eventJoinRequestStatuses)[number];
 
+export const eventMediaTypes = ["image", "video"] as const;
+export type EventMediaType = (typeof eventMediaTypes)[number];
+
+export const MAX_EVENT_MEDIA_ITEMS = 30;
+export const MAX_EVENT_MEDIA_BATCH_ITEMS = 5;
+export const MAX_EVENT_MEDIA_VIDEO_DURATION_SECONDS = 10 * 60;
+export const EVENT_MEDIA_LIMITS_BYTES = {
+  image: 15 * 1024 * 1024,
+  video: 300 * 1024 * 1024,
+} as const satisfies Record<EventMediaType, number>;
+
+export const supportedEventImageContentTypes = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"] as const;
+export const supportedEventVideoContentTypes = ["video/mp4", "video/quicktime"] as const;
+
 export interface EventJoinRequest {
   userId: Types.ObjectId;
   status: EventJoinRequestStatus;
@@ -99,6 +113,59 @@ export type EventRewardInput = Omit<EventReward, "id" | "productId"> & {
   productId?: Types.ObjectId | string | null;
 };
 
+export interface EventMediaItem {
+  id: string;
+  storageKey: string;
+  type: EventMediaType;
+  contentType: string;
+  fileSize: number;
+  width?: number | null;
+  height?: number | null;
+  durationSeconds?: number | null;
+  uploaderId: Types.ObjectId;
+  displayOrder: number;
+  createdAt: Date;
+}
+
+export type EventMediaInput = Omit<EventMediaItem, "id" | "uploaderId" | "displayOrder" | "createdAt"> & {
+  id?: string;
+  fileSize?: number | null;
+};
+
+export interface EventMediaResponse {
+  id: string;
+  url: string;
+  type: EventMediaType;
+  contentType: string;
+  fileSize: number;
+  width?: number | null;
+  height?: number | null;
+  durationSeconds?: number | null;
+  uploaderId: string;
+  displayOrder: number;
+  createdAt: Date;
+}
+
+export interface AddEventMediaDto {
+  mediaItems: EventMediaInput[];
+}
+
+export type AddEventMediaFailure = {
+  index: number;
+  message: string;
+};
+
+export interface AddEventMediaResponse {
+  event: EventResponse;
+  mediaItems: EventMediaResponse[];
+  failures: AddEventMediaFailure[];
+}
+
+export interface DeleteEventMediaResponse {
+  event: EventResponse;
+  mediaItem: EventMediaResponse;
+}
+
 export interface EventImageDisplay {
   crop?: {
     x: number;
@@ -158,6 +225,7 @@ export interface IEvent {
   location?: EventLocation | null;
   tickets: EventTicket[];
   rewards: EventReward[];
+  eventMedia: EventMediaItem[];
   privacy: EventPrivacy;
   memberUserIds: Types.ObjectId[];
   joinRequests: EventJoinRequest[];
@@ -231,6 +299,7 @@ export interface EventResponse {
   location?: EventLocation | null;
   tickets: EventTicket[];
   rewards: EventReward[];
+  eventMedia?: EventMediaResponse[];
   privacy: EventPrivacy;
   memberCount?: number;
   isMember?: boolean;

@@ -73,6 +73,9 @@ router.patch(
   catchAsync(controller.updateEventReward),
 );
 router.delete("/:id/rewards/:rewardId", validate(eventValidation.eventRewardParams), catchAsync(controller.deleteEventReward));
+router.post("/:id/media", validate(eventValidation.addEventMedia), catchAsync(controller.addEventMedia));
+router.get("/:id/media/:mediaId", validate(eventValidation.eventMediaParams), catchAsync(controller.streamEventMedia));
+router.delete("/:id/media/:mediaId", validate(eventValidation.eventMediaParams), catchAsync(controller.deleteEventMedia));
 router.post("/:id/save", validate(eventValidation.eventParams), catchAsync(controller.saveEvent));
 router.post("/:id/host-reviews", validate(eventValidation.submitHostReview), catchAsync(controller.submitHostReview));
 router.post("/:id/start", validate(eventValidation.eventParams), catchAsync(controller.startEvent));

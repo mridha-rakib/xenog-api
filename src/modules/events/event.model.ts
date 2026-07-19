@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { Schema, model } from "mongoose";
-import type { EventJoinRequest, EventLocation, EventReward, EventTicket, IEvent } from "./event.interface.js";
+import type { EventJoinRequest, EventLocation, EventMediaItem, EventReward, EventTicket, IEvent } from "./event.interface.js";
 import {
   eventAgeRestrictions,
   eventCategories,
+  eventMediaTypes,
+  MAX_EVENT_MEDIA_ITEMS,
   eventPrivacyOptions,
   eventRewardTypes,
   eventStatuses,
@@ -196,6 +198,71 @@ const eventRewardSchema = new Schema<EventReward>(
   { _id: false },
 );
 
+const eventMediaSchema = new Schema<EventMediaItem>(
+  {
+    id: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 80,
+      default: randomUUID,
+    },
+    storageKey: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 300,
+    },
+    type: {
+      type: String,
+      enum: eventMediaTypes,
+      required: true,
+    },
+    contentType: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 100,
+    },
+    fileSize: {
+      type: Number,
+      required: true,
+      min: 1,
+    },
+    width: {
+      type: Number,
+      min: 0,
+      default: null,
+    },
+    height: {
+      type: Number,
+      min: 0,
+      default: null,
+    },
+    durationSeconds: {
+      type: Number,
+      min: 0,
+      default: null,
+    },
+    uploaderId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    displayOrder: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now,
+      required: true,
+    },
+  },
+  { _id: false },
+);
+
 const eventImageDisplaySchema = new Schema(
   {
     crop: {
@@ -330,6 +397,14 @@ const eventSchema = new Schema<IEvent>(
     rewards: {
       type: [eventRewardSchema],
       default: [],
+    },
+    eventMedia: {
+      type: [eventMediaSchema],
+      default: [],
+      validate: {
+        validator: (value: EventMediaItem[]) => value.length <= MAX_EVENT_MEDIA_ITEMS,
+        message: `Event gallery cannot include more than ${MAX_EVENT_MEDIA_ITEMS} media items`,
+      },
     },
     privacy: {
       type: String,

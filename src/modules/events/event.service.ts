@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import httpStatus from "http-status";
+import { Types } from "mongoose";
 import { RedisClient } from "../../config/redis.js";
 import { AppError } from "../../core/errors/app-error.js";
 import { logger } from "../../core/logger/logger.js";
@@ -30,6 +31,12 @@ import { TicketUsageRepository } from "../payments/ticket-usage.repository.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
 import { EventHostReviewRepository } from "./event-host-review.repository.js";
 import { EventWindowRepository } from "../event-windows/event-window.repository.js";
+import {
+  EVENT_MEDIA_LIMITS_BYTES,
+  MAX_EVENT_MEDIA_VIDEO_DURATION_SECONDS,
+  supportedEventImageContentTypes,
+  supportedEventVideoContentTypes,
+} from "./event.interface.js";
 import type {
   EventHostReviewEligibilityResponse,
   EventHostReviewResponse,
@@ -38,12 +45,19 @@ import type {
 } from "./event-host-review.interface.js";
 import type {
   AdminMapEventResponse,
+  AddEventMediaDto,
+  AddEventMediaResponse,
   CreateEventRewardDto,
+  DeleteEventMediaResponse,
   EventFeedQuery,
   EventHostResponse,
   EventJoinRequestStatus,
   EventMapQuery,
   EventMemberResponse,
+  EventMediaInput,
+  EventMediaItem,
+  EventMediaResponse,
+  EventMediaType,
   EventReward,
   EventRewardInput,
   JoinRequestResponse,
@@ -70,6 +84,7 @@ import type {
 } from "./event.interface.js";
 
 const ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
+const EVENT_MEDIA_STORAGE_PREFIX = "events/gallery/";
 
 type EventMapCursorPayload = {
   scheduledAt?: unknown;
@@ -332,6 +347,124 @@ export class EventService {
     }
 
     return this.toProfileMutatingResponse(event);
+  }
+
+  public async addEventMedia(
+    user: AuthUser,
+    eventId: string,
+    payload: AddEventMediaDto,
+  ): Promise<AddEventMediaResponse> {
+    const existingEvent = await this.getEventForOwner(user, eventId);
+
+    if (existingEvent.status === "cancelled") {
+      throw new AppError("Event gallery uploads are disabled for cancelled events.", httpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    const mediaItems = payload.mediaItems ?? [];
+    const failures: AddEventMediaResponse["failures"] = [];
+    const persisted: EventMediaResponse[] = [];
+    let latestEvent = existingEvent;
+
+    for (const [index, mediaInput] of mediaItems.entries()) {
+      try {
+        const mediaItem = await this.prepareEventMediaItem(eventId, user.id, mediaInput, index);
+        const updatedEvent = await this.eventRepository.appendEventMediaItem(eventId, user.id, mediaItem);
+
+        if (!updatedEvent) {
+          failures.push({
+            index,
+            message: "Event gallery is full or no longer accepts uploads.",
+          });
+          continue;
+        }
+
+        latestEvent = updatedEvent;
+        const savedMedia = updatedEvent.eventMedia.find((item) => item.id === mediaItem.id);
+        if (savedMedia) {
+          persisted.push(this.toEventMediaResponse(eventId, savedMedia));
+        }
+      } catch (error) {
+        failures.push({
+          index,
+          message: error instanceof AppError ? error.message : "Unable to upload this media item.",
+        });
+      }
+    }
+
+    const host = await this.userRepository.findById(latestEvent.userId.toString());
+
+    return {
+      event: this.toResponse(latestEvent, host, undefined, undefined, { includeEventMedia: true }),
+      mediaItems: persisted,
+      failures,
+    };
+  }
+
+  public async getAuthorizedEventMedia(
+    user: AuthUser,
+    eventId: string,
+    mediaId: string,
+  ): Promise<{ key: string; contentType: string; filename: string }> {
+    const event = await this.eventRepository.findByIdWithEventMedia(eventId);
+
+    if (!event) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    const isOwner = event.userId.toString() === user.id;
+
+    if (event.status === "draft" && !isOwner) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    if (event.privacy === "private" && !isOwner) {
+      const isMember = event.memberUserIds.some((id) => id.toString() === user.id);
+      if (!isMember) {
+        throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+      }
+    }
+
+    const media = event.eventMedia.find((item) => item.id === mediaId);
+    if (!media) {
+      throw new AppError("Event media not found.", httpStatus.NOT_FOUND);
+    }
+
+    return {
+      key: media.storageKey,
+      contentType: media.contentType,
+      filename: media.storageKey.split("/").pop() || "media",
+    };
+  }
+
+  public async deleteEventMedia(
+    user: AuthUser,
+    eventId: string,
+    mediaId: string,
+  ): Promise<DeleteEventMediaResponse> {
+    const existingEvent = await this.getEventForOwner(user, eventId);
+
+    if (existingEvent.status === "cancelled") {
+      throw new AppError("Event gallery deletion is disabled for cancelled events.", httpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    const media = existingEvent.eventMedia.find((item) => item.id === mediaId);
+
+    if (!media) {
+      throw new AppError("Event media not found.", httpStatus.NOT_FOUND);
+    }
+
+    const updatedEvent = await this.eventRepository.removeEventMediaItem(eventId, user.id, mediaId);
+
+    if (!updatedEvent) {
+      throw new AppError("Event media not found.", httpStatus.NOT_FOUND);
+    }
+
+    const host = await this.userRepository.findById(updatedEvent.userId.toString());
+
+    return {
+      event: this.toResponse(updatedEvent, host, undefined, undefined, { includeEventMedia: true }),
+      mediaItem: this.toEventMediaResponse(eventId, media),
+    };
   }
 
   public async deleteEvent(user: AuthUser, eventId: string): Promise<EventResponse> {
@@ -1289,7 +1422,7 @@ export class EventService {
       ]);
 
       return {
-        ...this.toResponse(event, host, { avatarUrl, followersCount, eventsCount, isFollowing: false }),
+        ...this.toResponse(event, host, { avatarUrl, followersCount, eventsCount, isFollowing: false }, undefined, { includeEventMedia: true }),
         likesCount: 0,
         commentsCount: 0,
         sharesCount: 0,
@@ -1355,6 +1488,7 @@ export class EventService {
         host,
         { avatarUrl, followersCount, eventsCount, isFollowing },
         myJoinRequestStatus,
+        { includeEventMedia: true },
       ),
       interactionMomentId,
       likesCount: likeCounts.get(interactionMomentId) ?? 0,
@@ -2168,6 +2302,97 @@ export class EventService {
     return value instanceof Date && !Number.isNaN(value.getTime()) ? value : null;
   }
 
+  private async prepareEventMediaItem(
+    eventId: string,
+    userId: string,
+    mediaInput: EventMediaInput,
+    batchIndex: number,
+  ): Promise<EventMediaItem> {
+    const storageKey = mediaInput.storageKey?.trim();
+    const contentType = this.normalizeMediaContentType(mediaInput.contentType);
+
+    if (!storageKey) {
+      throw new AppError("Event media storage key is required.", httpStatus.BAD_REQUEST);
+    }
+
+    const expectedPrefix = `${EVENT_MEDIA_STORAGE_PREFIX}${eventId}/${userId}/`;
+    if (!storageKey.startsWith(expectedPrefix)) {
+      throw new AppError("Event media storage key is invalid.", httpStatus.BAD_REQUEST);
+    }
+
+    if (!contentType || !this.isSupportedEventMediaContentType(mediaInput.type, contentType)) {
+      throw new AppError("Event media content type is not supported.", httpStatus.BAD_REQUEST);
+    }
+
+    if (!this.mediaContentTypeMatchesType(mediaInput.type, contentType)) {
+      throw new AppError("Event media content type does not match the media type.", httpStatus.BAD_REQUEST);
+    }
+
+    if (mediaInput.type === "video") {
+      const durationSeconds = mediaInput.durationSeconds;
+      if (durationSeconds == null || durationSeconds > MAX_EVENT_MEDIA_VIDEO_DURATION_SECONDS) {
+        throw new AppError("Video duration cannot exceed 10 minutes.", httpStatus.BAD_REQUEST);
+      }
+    }
+
+    let metadata: Awaited<ReturnType<StorageService["getObjectMetadata"]>>;
+    try {
+      metadata = await this.storageService.getObjectMetadata(storageKey);
+    } catch {
+      throw new AppError("Event media file was not found in storage.", httpStatus.BAD_REQUEST);
+    }
+
+    if (!metadata.contentLength || metadata.contentLength <= 0) {
+      throw new AppError("Event media file is empty.", httpStatus.BAD_REQUEST);
+    }
+
+    if (metadata.contentLength > EVENT_MEDIA_LIMITS_BYTES[mediaInput.type]) {
+      throw new AppError("Event media file is too large.", httpStatus.BAD_REQUEST);
+    }
+
+    const storedContentType = this.normalizeMediaContentType(metadata.contentType);
+    if (!storedContentType || storedContentType !== contentType || !this.mediaContentTypeMatchesType(mediaInput.type, storedContentType)) {
+      throw new AppError("Stored event media content type does not match the submitted media.", httpStatus.BAD_REQUEST);
+    }
+
+    return {
+      id: mediaInput.id?.trim() || randomUUID(),
+      storageKey,
+      type: mediaInput.type,
+      contentType,
+      fileSize: metadata.contentLength,
+      width: this.normalizeNullableNonNegativeNumber(mediaInput.width),
+      height: this.normalizeNullableNonNegativeNumber(mediaInput.height),
+      durationSeconds: mediaInput.type === "video" ? this.normalizeNullableNonNegativeNumber(mediaInput.durationSeconds) : null,
+      uploaderId: new Types.ObjectId(userId),
+      displayOrder: Date.now() * 100 + batchIndex,
+      createdAt: new Date(),
+    };
+  }
+
+  private normalizeMediaContentType(contentType?: string | null): string | null {
+    const normalized = contentType?.trim().toLowerCase();
+    if (!normalized) return null;
+    if (normalized === "image/jpg") return "image/jpeg";
+    if (normalized === "image/heic-sequence") return "image/heic";
+    if (normalized === "image/heif-sequence") return "image/heif";
+    if (normalized === "video/mov") return "video/quicktime";
+    return normalized;
+  }
+
+  private normalizeNullableNonNegativeNumber(value?: number | null): number | null {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  }
+
+  private mediaContentTypeMatchesType(type: EventMediaType, contentType: string): boolean {
+    return contentType.startsWith(`${type}/`);
+  }
+
+  private isSupportedEventMediaContentType(type: EventMediaType, contentType: string): boolean {
+    const supported = type === "image" ? supportedEventImageContentTypes : supportedEventVideoContentTypes;
+    return (supported as readonly string[]).includes(contentType);
+  }
+
   private async getDraftForUser(user: AuthUser, eventId: string): Promise<IEvent> {
     const event = await this.eventRepository.findByIdForUser(eventId, user.id);
 
@@ -2542,6 +2767,7 @@ export class EventService {
       isFollowing?: boolean;
     },
     myJoinRequestStatus?: EventJoinRequestStatus | null,
+    options: { includeEventMedia?: boolean } = {},
   ): EventResponse {
     return {
       id: event._id.toString(),
@@ -2566,6 +2792,9 @@ export class EventService {
       location: event.location ?? null,
       tickets: event.tickets,
       rewards: this.normalizeExistingRewards(event.rewards),
+      ...(options.includeEventMedia
+        ? { eventMedia: (event.eventMedia ?? []).map((mediaItem) => this.toEventMediaResponse(event._id.toString(), mediaItem)) }
+        : {}),
       privacy: event.privacy,
       memberCount: event.memberUserIds.length,
       ...(myJoinRequestStatus !== undefined
@@ -2577,6 +2806,22 @@ export class EventService {
       cancelledAt: event.cancelledAt ?? null,
       createdAt: event.createdAt,
       updatedAt: event.updatedAt,
+    };
+  }
+
+  private toEventMediaResponse(eventId: string, mediaItem: EventMediaItem): EventMediaResponse {
+    return {
+      id: mediaItem.id,
+      url: `/events/${eventId}/media/${encodeURIComponent(mediaItem.id)}`,
+      type: mediaItem.type,
+      contentType: mediaItem.contentType,
+      fileSize: mediaItem.fileSize,
+      width: mediaItem.width ?? null,
+      height: mediaItem.height ?? null,
+      durationSeconds: mediaItem.durationSeconds ?? null,
+      uploaderId: mediaItem.uploaderId.toString(),
+      displayOrder: mediaItem.displayOrder,
+      createdAt: mediaItem.createdAt,
     };
   }
 }

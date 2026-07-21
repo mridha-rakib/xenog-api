@@ -628,12 +628,13 @@ export class EventController {
   };
 
   public cancelEvent = async (req: Request, res: Response): Promise<void> => {
-    const event = await this.eventService.cancelEvent(req.authUser as AuthUser, req.params.id as string);
+    const result = await this.eventService.cancelEvent(req.authUser as AuthUser, req.params.id as string, req.body);
 
     ApiResponse.success(res, {
-      message: "Event cancelled and refunds issued",
+      message: "Event cancelled. Refunds are being processed.",
       data: {
-        event,
+        event: result.event,
+        refundBatch: result.refundBatch,
       },
     });
   };

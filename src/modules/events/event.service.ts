@@ -26,6 +26,8 @@ import type { IRewardClaim } from "./reward-claim.model.js";
 import { CheckoutPaymentRepository } from "../payments/checkout-payment.repository.js";
 import { CheckoutPaymentService } from "../payments/checkout-payment.service.js";
 import { CreatorEarningRepository } from "../payments/creator-earning.repository.js";
+import { EventCancellationRefundService } from "../payments/event-cancellation-refund.service.js";
+import type { CancelEventDto, CancellationBatchResponse } from "../payments/event-cancellation-refund.interface.js";
 import { TicketShareRepository } from "../payments/ticket-share.repository.js";
 import { TicketUsageRepository } from "../payments/ticket-usage.repository.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
@@ -85,6 +87,21 @@ import type {
 
 const ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
 const EVENT_MEDIA_STORAGE_PREFIX = "events/gallery/";
+const TICKET_CREATION_CUTOFF_MS = 30 * 60 * 1000;
+const TICKET_CREATION_CUTOFF_MESSAGE = "New tickets can’t be created within 30 minutes of the event end time.";
+const TICKET_PRICE_EDIT_CUTOFF_MESSAGE = "Ticket price can’t be changed within 30 minutes of the event end time.";
+const TICKET_SALES_END_DATE_AFTER_EVENT_END_MESSAGE = "Ticket sales end date must be before the event end date.";
+const TICKET_SALES_END_TIME_NOT_BEFORE_EVENT_END_MESSAGE = "Ticket sales end time must be before the event end time.";
+
+type TicketValidationCode =
+  | "EVENT_END_REQUIRED_FOR_TICKET_MANAGEMENT"
+  | "TICKET_MANAGEMENT_STATUS_NOT_ALLOWED"
+  | "TICKET_CREATION_CUTOFF"
+  | "TICKET_PRICE_EDIT_CUTOFF"
+  | "TICKET_SALES_END_DATE_AFTER_EVENT_END"
+  | "TICKET_SALES_END_TIME_NOT_BEFORE_EVENT_END";
+
+type TicketValidationField = "endAt" | "salesEndAt" | "price";
 
 type EventMapCursorPayload = {
   scheduledAt?: unknown;
@@ -200,6 +217,8 @@ export class EventService {
     private readonly ticketUsageRepository = new TicketUsageRepository(),
     private readonly eventHostReviewRepository = new EventHostReviewRepository(),
     private readonly eventWindowRepository = new EventWindowRepository(),
+    private readonly getServerNow = () => new Date(Date.now()),
+    private readonly eventCancellationRefundService = new EventCancellationRefundService(),
   ) {}
 
   public async saveDraft(
@@ -212,7 +231,10 @@ export class EventService {
     if (eventId) {
       const draft = await this.getDraftForUser(user, eventId);
       await this.assertPostingWindowsFitSchedule(draft, normalizedPayload);
-      this.assertTicketAndRewardDatesFitEventSchedule(this.getEventScheduleCandidate(draft, normalizedPayload));
+      const scheduleCandidate = this.getEventScheduleCandidate(draft, normalizedPayload);
+      this.assertEndAtChangeDoesNotEnterTicketCreationCutoff(draft, normalizedPayload);
+      this.assertNewTicketsRespectCreationCutoff(draft, scheduleCandidate.tickets, scheduleCandidate.endAt);
+      this.assertTicketAndRewardDatesFitEventSchedule(scheduleCandidate);
 
       const event = await this.eventRepository.updateDraftByIdForUser(
         eventId,
@@ -225,6 +247,13 @@ export class EventService {
       }
 
       return this.toResponse(event);
+    }
+
+    if ((normalizedPayload.tickets ?? []).length > 0) {
+      this.assertTicketCreationAvailable({
+        status: "draft",
+        endAt: normalizedPayload.endAt ?? null,
+      });
     }
 
     this.assertTicketAndRewardDatesFitEventSchedule({
@@ -262,7 +291,10 @@ export class EventService {
         }
 
         await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
-        this.assertTicketAndRewardDatesFitEventSchedule(this.getEventScheduleCandidate(existingEvent, normalizedPayload));
+        const scheduleCandidate = this.getEventScheduleCandidate(existingEvent, normalizedPayload);
+        this.assertEndAtChangeDoesNotEnterTicketCreationCutoff(existingEvent, normalizedPayload);
+        this.assertBulkTicketMutationsRespectCutoffs(existingEvent, scheduleCandidate.tickets, scheduleCandidate.endAt);
+        this.assertTicketAndRewardDatesFitEventSchedule(scheduleCandidate);
 
         // Preserve the atomic availableCount counter — do NOT reset it to capacity on re-publish.
         // For new tickets added in the payload, start fully available.
@@ -293,7 +325,10 @@ export class EventService {
 
       if (existingEvent) {
         await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
-        this.assertTicketAndRewardDatesFitEventSchedule(this.getEventScheduleCandidate(existingEvent, normalizedPayload));
+        const scheduleCandidate = this.getEventScheduleCandidate(existingEvent, normalizedPayload);
+        this.assertEndAtChangeDoesNotEnterTicketCreationCutoff(existingEvent, normalizedPayload);
+        this.assertNewTicketsRespectCreationCutoff(existingEvent, scheduleCandidate.tickets, scheduleCandidate.endAt);
+        this.assertTicketAndRewardDatesFitEventSchedule(scheduleCandidate);
       }
 
       const event = await this.eventRepository.publishDraftByIdForUser(
@@ -307,6 +342,13 @@ export class EventService {
       }
 
       return this.toProfileMutatingResponse(event);
+    }
+
+    if (normalizedPayload.tickets.length > 0) {
+      this.assertTicketCreationAvailable({
+        status: "published",
+        endAt: normalizedPayload.endAt,
+      });
     }
 
     this.assertTicketAndRewardDatesFitEventSchedule({
@@ -334,7 +376,10 @@ export class EventService {
     const existingEvent = await this.getModifiableEventForOwner(user, eventId);
     const normalizedPayload = this.normalizeDraftPayload(payload);
     await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
-    this.assertTicketAndRewardDatesFitEventSchedule(this.getEventScheduleCandidate(existingEvent, normalizedPayload));
+    const scheduleCandidate = this.getEventScheduleCandidate(existingEvent, normalizedPayload);
+    this.assertEndAtChangeDoesNotEnterTicketCreationCutoff(existingEvent, normalizedPayload);
+    this.assertBulkTicketMutationsRespectCutoffs(existingEvent, scheduleCandidate.tickets, scheduleCandidate.endAt);
+    this.assertTicketAndRewardDatesFitEventSchedule(scheduleCandidate);
 
     const event = await this.eventRepository.updateByIdForUser(
       eventId,
@@ -524,6 +569,7 @@ export class EventService {
     payload: CreateEventTicketDto,
   ): Promise<EventResponse> {
     const event = await this.getEventForTicketOwner(user, eventId);
+    this.assertTicketCreationAvailable(event);
     // New published tickets start fully available — availableCount is set here, not by normalizeTicket.
     const ticket: EventTicket = {
       ...this.normalizeTicket(payload),
@@ -580,6 +626,7 @@ export class EventService {
       id: existingTicket.id,
       type: payload.type ?? existingTicket.type,
     });
+    this.assertTicketPriceChangeAvailable(event, existingTicket, merged);
     this.assertTicketDatesFitEventSchedule(event, [merged]);
 
     const updatedEvent = await this.eventRepository.updateTicketFields(eventId, user.id, ticketId, {
@@ -638,6 +685,7 @@ export class EventService {
     payload: CreateEventTicketDto,
   ): Promise<EventResponse> {
     const event = await this.getDraftForUser(user, eventId);
+    this.assertTicketCreationAvailable(event);
     const ticket = this.normalizeTicket(payload);
     this.assertTicketDatesFitEventSchedule(event, [ticket]);
     const updatedEvent = await this.eventRepository.updateDraftByIdForUser(eventId, user.id, {
@@ -659,6 +707,8 @@ export class EventService {
   ): Promise<EventResponse> {
     const event = await this.getDraftForUser(user, eventId);
     let foundTicket = false;
+    let existingTicket: EventTicket | null = null;
+    let mergedTicket: EventTicket | null = null;
     const tickets = event.tickets.map((ticket) => {
       const normalizedTicket = this.normalizeTicket(ticket);
 
@@ -667,17 +717,23 @@ export class EventService {
       }
 
       foundTicket = true;
+      existingTicket = normalizedTicket;
 
-      return this.normalizeTicket({
+      mergedTicket = this.normalizeTicket({
         ...normalizedTicket,
         ...payload,
         id: normalizedTicket.id,
         type: payload.type ?? normalizedTicket.type,
       });
+
+      return mergedTicket;
     });
 
     if (!foundTicket) {
       throw new AppError("Event draft ticket not found.", httpStatus.NOT_FOUND);
+    }
+    if (existingTicket && mergedTicket) {
+      this.assertTicketPriceChangeAvailable(event, existingTicket, mergedTicket);
     }
     this.assertTicketDatesFitEventSchedule(event, tickets);
 
@@ -1251,25 +1307,17 @@ export class EventService {
     return expired.length;
   }
 
-  public async cancelEvent(user: AuthUser, eventId: string): Promise<EventResponse> {
-    const event = await this.eventRepository.cancelById(eventId, user.id);
+  public async cancelEvent(
+    user: AuthUser,
+    eventId: string,
+    dto: CancelEventDto,
+  ): Promise<{ event: EventResponse; refundBatch: CancellationBatchResponse }> {
+    const result = await this.eventCancellationRefundService.cancelPublishedEvent(user, eventId, dto);
 
-    if (!event) {
-      throw new AppError(
-        "Published event not found or event has already started.",
-        httpStatus.NOT_FOUND,
-      );
-    }
-
-    const paidOrders = await this.checkoutPaymentRepository.findPaidTicketOrdersByEventId(eventId);
-
-    for (const order of paidOrders) {
-      await this.checkoutPaymentService.processRefundForCancelledEvent(order._id.toString());
-    }
-
-    await this.creatorEarningRepository.markRefundedByEventId(eventId);
-
-    return this.toProfileMutatingResponse(event);
+    return {
+      event: await this.toProfileMutatingResponse(result.event),
+      refundBatch: result.batch,
+    };
   }
 
   public async listMapEvents(user: AuthUser, query: EventMapQuery): Promise<EventMapListResponse> {
@@ -2224,13 +2272,15 @@ export class EventService {
   private getEventScheduleCandidate(event: IEvent, payload: SaveEventDraftDto): {
     scheduledAt?: Date | null;
     endAt?: Date | null;
-    tickets: Array<Pick<EventTicket, "name" | "salesEndAt">>;
+    tickets: EventTicket[];
     rewards: Array<Pick<EventReward, "name" | "expiresAt">>;
   } {
     return {
       scheduledAt: payload.scheduledAt !== undefined ? payload.scheduledAt : event.scheduledAt ?? null,
       endAt: payload.endAt !== undefined ? payload.endAt : event.endAt ?? null,
-      tickets: payload.tickets !== undefined ? payload.tickets : event.tickets,
+      tickets: payload.tickets !== undefined
+        ? payload.tickets.map((ticket) => this.normalizeTicket(ticket))
+        : event.tickets.map((ticket) => this.normalizeTicket(ticket)),
       rewards: payload.rewards !== undefined ? payload.rewards : this.normalizeExistingRewards(event.rewards),
     };
   }
@@ -2245,11 +2295,174 @@ export class EventService {
     this.assertRewardDatesFitEventSchedule(event, event.rewards ?? []);
   }
 
+  private assertEndAtChangeDoesNotEnterTicketCreationCutoff(
+    event: Pick<IEvent, "endAt">,
+    payload: Pick<SaveEventDraftDto, "endAt">,
+  ): void {
+    if (payload.endAt === undefined) {
+      return;
+    }
+
+    const nextEndAt = this.getValidDateOrNull(payload.endAt);
+
+    if (!nextEndAt) {
+      return;
+    }
+
+    const currentEndAt = this.getValidDateOrNull(event.endAt);
+    const nowMs = this.getServerNow().getTime();
+    const wasAlreadyInCutoff = Boolean(
+      currentEndAt && nowMs >= currentEndAt.getTime() - TICKET_CREATION_CUTOFF_MS,
+    );
+    const entersCutoff = nowMs >= nextEndAt.getTime() - TICKET_CREATION_CUTOFF_MS;
+
+    if (!wasAlreadyInCutoff && entersCutoff) {
+      throw new AppError(
+        TICKET_CREATION_CUTOFF_MESSAGE,
+        httpStatus.UNPROCESSABLE_ENTITY,
+        this.getTicketValidationDetails("TICKET_CREATION_CUTOFF", "endAt", TICKET_CREATION_CUTOFF_MESSAGE),
+      );
+    }
+  }
+
+  private assertNewTicketsRespectCreationCutoff(
+    event: Pick<IEvent, "tickets" | "status" | "endAt">,
+    nextTickets: Array<Pick<EventTicket, "id">>,
+    nextEndAt: Date | null | undefined,
+  ): void {
+    const existingTicketIds = new Set(event.tickets.map((ticket) => ticket.id).filter(Boolean));
+    const hasNewTicket = nextTickets.some((ticket) => !ticket.id || !existingTicketIds.has(ticket.id));
+
+    if (!hasNewTicket) {
+      return;
+    }
+
+    this.assertTicketCreationAvailable({
+      status: event.status,
+      endAt: nextEndAt ?? null,
+    });
+  }
+
+  private assertBulkTicketMutationsRespectCutoffs(
+    event: Pick<IEvent, "tickets" | "status" | "endAt">,
+    nextTickets: EventTicket[],
+    nextEndAt: Date | null | undefined,
+  ): void {
+    this.assertNewTicketsRespectCreationCutoff(event, nextTickets, nextEndAt);
+
+    const existingTicketById = new Map(event.tickets.map((ticket) => [ticket.id, ticket]));
+    const hasPriceChange = nextTickets.some((ticket) => {
+      const existingTicket = ticket.id ? existingTicketById.get(ticket.id) : undefined;
+
+      return Boolean(existingTicket && this.hasTicketPriceChanged(existingTicket, ticket));
+    });
+
+    if (!hasPriceChange) {
+      return;
+    }
+
+    this.assertTicketPriceEditingWindowOpen({
+      endAt: nextEndAt ?? null,
+    });
+  }
+
+  private assertTicketCreationAvailable(event: { status?: string | null; endAt?: Date | null }): void {
+    this.assertTicketManagementStatus(event.status);
+    this.assertTicketCreationWindowOpen(event);
+  }
+
+  private assertTicketPriceChangeAvailable(
+    event: { status?: string | null; endAt?: Date | null },
+    existingTicket: Pick<EventTicket, "type" | "price">,
+    nextTicket: Pick<EventTicket, "type" | "price">,
+  ): void {
+    if (!this.hasTicketPriceChanged(existingTicket, nextTicket)) {
+      return;
+    }
+
+    this.assertTicketManagementStatus(event.status);
+    this.assertTicketPriceEditingWindowOpen(event);
+  }
+
+  private assertTicketManagementStatus(status?: string | null): void {
+    if (status === "draft" || status === "published" || status === "live") {
+      return;
+    }
+
+    throw new AppError(
+      "Tickets cannot be managed for this event status.",
+      httpStatus.UNPROCESSABLE_ENTITY,
+      this.getTicketValidationDetails(
+        "TICKET_MANAGEMENT_STATUS_NOT_ALLOWED",
+        "endAt",
+        "Tickets cannot be managed for this event status.",
+      ),
+    );
+  }
+
+  private assertTicketCreationWindowOpen(event: { endAt?: Date | null }): void {
+    const eventEndsAt = this.getValidDateOrNull(event.endAt);
+
+    if (!eventEndsAt) {
+      throw new AppError(
+        "Event end date and time is required before tickets can be created.",
+        httpStatus.UNPROCESSABLE_ENTITY,
+        this.getTicketValidationDetails(
+          "EVENT_END_REQUIRED_FOR_TICKET_MANAGEMENT",
+          "endAt",
+          "Event end date and time is required before tickets can be created.",
+        ),
+      );
+    }
+
+    if (this.getServerNow().getTime() >= eventEndsAt.getTime() - TICKET_CREATION_CUTOFF_MS) {
+      throw new AppError(
+        TICKET_CREATION_CUTOFF_MESSAGE,
+        httpStatus.UNPROCESSABLE_ENTITY,
+        this.getTicketValidationDetails("TICKET_CREATION_CUTOFF", "endAt", TICKET_CREATION_CUTOFF_MESSAGE),
+      );
+    }
+  }
+
+  private assertTicketPriceEditingWindowOpen(event: { endAt?: Date | null }): void {
+    const eventEndsAt = this.getValidDateOrNull(event.endAt);
+
+    if (!eventEndsAt) {
+      throw new AppError(
+        "Event end date and time is required before ticket prices can be changed.",
+        httpStatus.UNPROCESSABLE_ENTITY,
+        this.getTicketValidationDetails(
+          "EVENT_END_REQUIRED_FOR_TICKET_MANAGEMENT",
+          "endAt",
+          "Event end date and time is required before ticket prices can be changed.",
+        ),
+      );
+    }
+
+    if (this.getServerNow().getTime() >= eventEndsAt.getTime() - TICKET_CREATION_CUTOFF_MS) {
+      throw new AppError(
+        TICKET_PRICE_EDIT_CUTOFF_MESSAGE,
+        httpStatus.UNPROCESSABLE_ENTITY,
+        this.getTicketValidationDetails("TICKET_PRICE_EDIT_CUTOFF", "price", TICKET_PRICE_EDIT_CUTOFF_MESSAGE),
+      );
+    }
+  }
+
+  private hasTicketPriceChanged(
+    existingTicket: Pick<EventTicket, "type" | "price">,
+    nextTicket: Pick<EventTicket, "type" | "price">,
+  ): boolean {
+    return existingTicket.type !== nextTicket.type || this.normalizeTicketPrice(existingTicket.price) !== this.normalizeTicketPrice(nextTicket.price);
+  }
+
+  private normalizeTicketPrice(value: number): number {
+    return Number.isFinite(value) ? value : 0;
+  }
+
   private assertTicketDatesFitEventSchedule(
     event: { scheduledAt?: Date | null; endAt?: Date | null },
     tickets: Array<Pick<EventTicket, "name" | "salesEndAt">>,
   ): void {
-    const eventStartsAt = this.getValidDateOrNull(event.scheduledAt);
     const eventEndsAt = this.getValidDateOrNull(event.endAt);
 
     tickets.forEach((ticket) => {
@@ -2259,22 +2472,49 @@ export class EventService {
         return;
       }
 
-      const ticketName = ticket.name?.trim() || "Ticket";
+      if (eventEndsAt && salesEndAt >= eventEndsAt) {
+        const isLaterCalendarDate = this.getUtcCalendarKey(salesEndAt) > this.getUtcCalendarKey(eventEndsAt);
+        const message = isLaterCalendarDate
+          ? TICKET_SALES_END_DATE_AFTER_EVENT_END_MESSAGE
+          : TICKET_SALES_END_TIME_NOT_BEFORE_EVENT_END_MESSAGE;
+        const code: TicketValidationCode = isLaterCalendarDate
+          ? "TICKET_SALES_END_DATE_AFTER_EVENT_END"
+          : "TICKET_SALES_END_TIME_NOT_BEFORE_EVENT_END";
 
-      if (eventEndsAt && salesEndAt > eventEndsAt) {
         throw new AppError(
-          `Ticket "${ticketName}" sales end date must not be after the event end date and time.`,
+          message,
           httpStatus.UNPROCESSABLE_ENTITY,
-        );
-      }
-
-      if (eventStartsAt && salesEndAt > eventStartsAt) {
-        throw new AppError(
-          `Ticket "${ticketName}" sales end date must not be after the event start date and time.`,
-          httpStatus.UNPROCESSABLE_ENTITY,
+          this.getTicketValidationDetails(code, "salesEndAt", message),
         );
       }
     });
+  }
+
+  private getUtcCalendarKey(date: Date): number {
+    return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+  }
+
+  private getTicketValidationDetails(
+    code: TicketValidationCode,
+    field: TicketValidationField,
+    message: string,
+  ): {
+    code: TicketValidationCode;
+    fields: Record<string, string[]>;
+    issues: { code: TicketValidationCode; field: TicketValidationField; path: TicketValidationField; message: string }[];
+  } {
+    return {
+      code,
+      fields: {
+        [field]: [message],
+      },
+      issues: [{
+        code,
+        field,
+        path: field,
+        message,
+      }],
+    };
   }
 
   private assertRewardDatesFitEventSchedule(
@@ -2809,6 +3049,12 @@ export class EventService {
       startedAt: event.startedAt ?? null,
       completedAt: event.completedAt ?? null,
       cancelledAt: event.cancelledAt ?? null,
+      cancellationReasonType: event.cancellationReasonType ?? null,
+      cancellationCustomReason: event.cancellationCustomReason ?? null,
+      cancellationDisplayReason: event.cancellationDisplayReason ?? null,
+      refundBatchId: event.refundBatchId?.toString() ?? null,
+      cancellationOperationId: event.cancellationOperationId ?? null,
+      cancellationWorkflowVersion: event.cancellationWorkflowVersion ?? null,
       createdAt: event.createdAt,
       updatedAt: event.updatedAt,
     };

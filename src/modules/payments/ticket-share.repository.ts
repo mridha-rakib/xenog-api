@@ -142,4 +142,13 @@ export class TicketShareRepository {
       },
     );
   }
+
+  public async cancelActiveByEventId(eventId: string): Promise<number> {
+    const result = await TicketShareModel.updateMany(
+      { eventId, status: "active" },
+      { $set: { status: "cancelled", cancelledAt: new Date() } },
+    );
+
+    return result.modifiedCount;
+  }
 }

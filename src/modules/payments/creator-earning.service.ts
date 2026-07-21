@@ -2,6 +2,7 @@ import httpStatus from "http-status";
 import { AppError } from "../../core/errors/app-error.js";
 import { env } from "../../config/env.js";
 import type { AuthUser } from "../auth/auth.interface.js";
+import { EventRepository } from "../events/event.repository.js";
 import { NotificationService } from "../notifications/notification.service.js";
 import { UserRepository } from "../user/user.repository.js";
 import { CreatorEarningRepository } from "./creator-earning.repository.js";
@@ -24,6 +25,7 @@ export class CreatorEarningService {
     private readonly stripeConnectService = new StripeConnectService(),
     private readonly userRepository = new UserRepository(),
     private readonly notificationService = new NotificationService(),
+    private readonly eventRepository = new EventRepository(),
   ) {}
 
   public async getMyEarnings(user: AuthUser): Promise<CreatorEarningsSummaryResponse> {
@@ -98,6 +100,8 @@ export class CreatorEarningService {
     if (eligible.length === 0) {
       throw new AppError("No eligible earnings available for withdrawal", httpStatus.BAD_REQUEST);
     }
+
+    await this.assertEarningsAreStillWithdrawable(eligible);
 
     const eligibleTotal = round2(eligible.reduce((s, e) => s + e.netAmount, 0));
 
@@ -196,6 +200,33 @@ export class CreatorEarningService {
     ).catch(() => {/* already logged inside NotificationService */});
 
     return this.toPayoutResponse(payout);
+  }
+
+  private async assertEarningsAreStillWithdrawable(earnings: ICreatorEarning[]): Promise<void> {
+    const eventIds = [
+      ...new Set(
+        earnings
+          .map((earning) => earning.eventId?.toString())
+          .filter((eventId): eventId is string => Boolean(eventId)),
+      ),
+    ];
+
+    if (eventIds.length === 0) return;
+
+    const events = await this.eventRepository.findManyByIds(eventIds);
+    const eventStatusById = new Map(events.map((event) => [event._id.toString(), event.status]));
+    const invalidEarning = earnings.find((earning) => {
+      const eventId = earning.eventId?.toString();
+      return eventId ? eventStatusById.get(eventId) !== "completed" : false;
+    });
+
+    if (invalidEarning) {
+      throw new AppError(
+        "Some earnings are no longer eligible for withdrawal because their event is not completed.",
+        httpStatus.CONFLICT,
+        { code: "EVENT_EARNING_NOT_WITHDRAWABLE" },
+      );
+    }
   }
 
   public async getEarningsByEvent(user: AuthUser, eventId: string): Promise<EventEarningsSummaryResponse> {

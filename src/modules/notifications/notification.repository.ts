@@ -11,6 +11,13 @@ export class NotificationRepository {
       actorUsername: data.actorUsername ?? null,
       actorAvatarKey: data.actorAvatarKey ?? null,
       eventId: data.eventId ?? null,
+      orderId: data.orderId ?? null,
+      refundId: data.refundId ?? null,
+      refundStatus: data.refundStatus ?? null,
+      cancellationReason: data.cancellationReason ?? null,
+      title: data.title ?? null,
+      deepLink: data.deepLink ?? null,
+      sourceKey: data.sourceKey ?? null,
       eventName: data.eventName ?? null,
       ticketName: data.ticketName ?? null,
       message: data.message ?? null,
@@ -18,6 +25,18 @@ export class NotificationRepository {
     });
 
     return notification.save();
+  }
+
+  public async createOnce(data: CreateNotificationDto): Promise<INotification | null> {
+    try {
+      return await this.create(data);
+    } catch (error) {
+      if ((error as { code?: number }).code === 11000) {
+        return null;
+      }
+
+      throw error;
+    }
   }
 
   public async findByRecipientId(recipientUserId: string, limit = 50): Promise<INotification[]> {

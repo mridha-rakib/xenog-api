@@ -170,6 +170,8 @@ const createWalletFixture = async ({
     ticketShareRepository as never,
     ticketUsageRepository as never,
     {} as never,
+    {} as never,
+    { findRefundItemsByOrderIds: async () => [] } as never,
   );
 
   return {

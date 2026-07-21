@@ -11,10 +11,13 @@ import {
   eventTimePeriods,
   eventTicketTypes,
 } from "./event.interface.js";
+import { eventCancellationReasonTypes } from "../payments/event-cancellation-refund.interface.js";
 
 const objectId = z.string().trim().regex(/^[a-f\d]{24}$/i, "Invalid MongoDB ObjectId");
 const ticketId = z.string().trim().min(1, "Ticket ID is required").max(80, "Ticket ID cannot exceed 80 characters");
 const eventMediaId = z.string().trim().min(1, "Media ID is required").max(80, "Media ID cannot exceed 80 characters");
+const TICKET_SALES_END_DATE_AFTER_EVENT_END_MESSAGE = "Ticket sales end date must be before the event end date.";
+const TICKET_SALES_END_TIME_NOT_BEFORE_EVENT_END_MESSAGE = "Ticket sales end time must be before the event end time.";
 
 const optionalText = (label: string, maxLength: number) =>
   z
@@ -54,6 +57,26 @@ const hashtagList = z.preprocess(
 );
 
 const eventDateKey = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional();
+const cancellationReasonBody = z
+  .object({
+    reasonType: z.enum(eventCancellationReasonTypes),
+    customReason: z
+      .string({ invalid_type_error: "Custom reason must be a string" })
+      .trim()
+      .max(500, "Custom reason cannot exceed 500 characters")
+      .optional()
+      .nullable(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.reasonType === "Other" && !value.customReason?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["customReason"],
+        message: "Custom reason is required when Other is selected",
+      });
+    }
+  });
 
 const dateTime = (label: string) =>
   z.preprocess(
@@ -376,10 +399,10 @@ const validateEventDateRange = (event: { scheduledAt?: Date | null; endAt?: Date
 };
 
 const validateTicketSalesEndDates = (
-  event: { scheduledAt?: Date | null; tickets?: { name?: string; salesEndAt?: Date | null }[] },
+  event: { endAt?: Date | null; tickets?: { name?: string; salesEndAt?: Date | null }[] },
   ctx: z.RefinementCtx,
 ) => {
-  if (!event.scheduledAt || !event.tickets?.length) return;
+  if (!event.endAt || !event.tickets?.length) return;
 
   const now = new Date();
 
@@ -392,10 +415,23 @@ const validateTicketSalesEndDates = (
         message: `Ticket "${ticket.name}" has a sales end date in the past. Update it or remove the sales end date before publishing.`,
         path: ["tickets", index, "salesEndAt"],
       });
-    } else if (ticket.salesEndAt > event.scheduledAt!) {
+    } else if (ticket.salesEndAt >= event.endAt!) {
+      const ticketSalesEndDate = Date.UTC(
+        ticket.salesEndAt.getUTCFullYear(),
+        ticket.salesEndAt.getUTCMonth(),
+        ticket.salesEndAt.getUTCDate(),
+      );
+      const eventEndDate = Date.UTC(
+        event.endAt!.getUTCFullYear(),
+        event.endAt!.getUTCMonth(),
+        event.endAt!.getUTCDate(),
+      );
+
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `Ticket "${ticket.name}" sales end date must not be after the event start date and time.`,
+        message: ticketSalesEndDate > eventEndDate
+          ? TICKET_SALES_END_DATE_AFTER_EVENT_END_MESSAGE
+          : TICKET_SALES_END_TIME_NOT_BEFORE_EVENT_END_MESSAGE,
         path: ["tickets", index, "salesEndAt"],
       });
     }
@@ -497,6 +533,12 @@ export const eventValidation = {
     params: z.object({
       id: objectId,
     }),
+  }),
+  cancelEvent: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+    body: cancellationReasonBody,
   }),
   saveDraft: z.object({
     body: draftBody,

@@ -78,9 +78,7 @@ router.get("/:id/media/:mediaId", validate(eventValidation.eventMediaParams), ca
 router.delete("/:id/media/:mediaId", validate(eventValidation.eventMediaParams), catchAsync(controller.deleteEventMedia));
 router.post("/:id/save", validate(eventValidation.eventParams), catchAsync(controller.saveEvent));
 router.post("/:id/host-reviews", validate(eventValidation.submitHostReview), catchAsync(controller.submitHostReview));
-router.post("/:id/start", validate(eventValidation.eventParams), catchAsync(controller.startEvent));
-router.post("/:id/complete", validate(eventValidation.eventParams), catchAsync(controller.completeEvent));
-router.post("/:id/cancel", validate(eventValidation.eventParams), catchAsync(controller.cancelEvent));
+router.post("/:id/cancel", validate(eventValidation.cancelEvent), catchAsync(controller.cancelEvent));
 router.get("/:id/members", validate(eventValidation.listEventMembers), catchAsync(controller.listEventMembers));
 router.post("/:id/members", validate(eventValidation.addEventMember), catchAsync(controller.addEventMember));
 router.delete("/:id/members/:userId", validate(eventValidation.removeEventMember), catchAsync(controller.removeEventMember));

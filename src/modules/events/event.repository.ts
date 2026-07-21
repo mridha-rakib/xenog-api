@@ -16,6 +16,11 @@ import type {
   PublishEventDto,
   SaveEventDraftDto,
 } from "./event.interface.js";
+import {
+  CANCELLATION_WORKFLOW_VERSION,
+  type EventCancellationReasonType,
+} from "../payments/event-cancellation-refund.interface.js";
+import { EventCancellationBatchModel } from "../payments/event-cancellation-refund.model.js";
 
 interface CreateEventRecord extends SaveEventDraftDto {
   userId: string;
@@ -1024,6 +1029,100 @@ export class EventRepository {
     );
   }
 
+  public async cancelPublishedBeforeStartById(
+    id: string,
+    userId: string,
+    reason: {
+      reasonType: EventCancellationReasonType;
+      customReason?: string | null;
+      displayReason: string;
+    },
+    workflowOrNow?: {
+      refundBatchId: string;
+      cancellationOperationId: string;
+      cancellationWorkflowVersion: number;
+    } | Date,
+    maybeNow?: Date,
+  ): Promise<IEvent | null> {
+    const workflow = workflowOrNow instanceof Date ? undefined : workflowOrNow;
+    const now = workflowOrNow instanceof Date ? workflowOrNow : maybeNow ?? new Date();
+
+    return EventModel.findOneAndUpdate(
+      {
+        _id: id,
+        userId,
+        status: "published",
+        scheduledAt: { $ne: null, $gt: now },
+      },
+      {
+        $set: {
+          status: "cancelled",
+          cancelledAt: now,
+          cancellationReasonType: reason.reasonType,
+          cancellationCustomReason: reason.customReason ?? null,
+          cancellationDisplayReason: reason.displayReason,
+          ...(workflow
+            ? {
+                refundBatchId: workflow.refundBatchId,
+                cancellationOperationId: workflow.cancellationOperationId,
+                cancellationWorkflowVersion: workflow.cancellationWorkflowVersion,
+              }
+            : {}),
+        },
+      },
+      { new: true, runValidators: true },
+    );
+  }
+
+  public async findRecoverableNewSystemCancelled(limit = 50): Promise<IEvent[]> {
+    const markerIncomplete = await EventModel.find({
+      status: "cancelled",
+      cancellationWorkflowVersion: { $gte: CANCELLATION_WORKFLOW_VERSION },
+      $or: [
+        { refundBatchId: null },
+        { refundBatchId: { $exists: false } },
+        { cancellationOperationId: null },
+        { cancellationOperationId: { $exists: false } },
+      ],
+    })
+      .sort({ cancelledAt: 1, _id: 1 })
+      .limit(limit);
+    if (markerIncomplete.length >= limit) return markerIncomplete;
+
+    const missingBatch = await EventModel.aggregate<IEvent>([
+      {
+        $match: {
+          status: "cancelled",
+          cancellationWorkflowVersion: { $gte: CANCELLATION_WORKFLOW_VERSION },
+          refundBatchId: { $ne: null },
+        },
+      },
+      {
+        $lookup: {
+          from: EventCancellationBatchModel.collection.name,
+          localField: "refundBatchId",
+          foreignField: "_id",
+          as: "refundBatch",
+        },
+      },
+      { $match: { refundBatch: { $size: 0 } } },
+      { $sort: { cancelledAt: 1, _id: 1 } },
+      { $limit: limit - markerIncomplete.length },
+      { $project: { refundBatch: 0 } },
+    ]);
+
+    const seen = new Set(markerIncomplete.map((event) => event._id.toString()));
+    return [
+      ...markerIncomplete,
+      ...missingBatch.filter((event) => {
+        const key = event._id.toString();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }),
+    ];
+  }
+
   public async countByUserId(userId: string, status?: string | string[]): Promise<number> {
     const filter: FilterQuery<IEvent> = { userId };
 
@@ -1160,6 +1259,8 @@ export class EventRepository {
     return EventModel.findOneAndUpdate(
       {
         _id: eventId,
+        status: "published",
+        scheduledAt: { $ne: null, $gt: new Date() },
         tickets: { $elemMatch: { id: ticketId, availableCount: { $gte: quantity } } },
       },
       { $inc: { "tickets.$.availableCount": -quantity } },

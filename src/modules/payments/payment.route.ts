@@ -2,7 +2,7 @@ import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { catchAsync } from "../../core/http/catch-async.js";
 import { ApiResponse } from "../../core/http/api-response.js";
-import { authenticate } from "../../core/middlewares/auth.middleware.js";
+import { authenticate, authorizeRoles } from "../../core/middlewares/auth.middleware.js";
 import { validate } from "../../core/middlewares/validate.middleware.js";
 import { CheckoutPaymentController } from "./checkout-payment.controller.js";
 import { checkoutPaymentValidation } from "./checkout-payment.validation.js";
@@ -12,12 +12,14 @@ import { CreatorEarningController } from "./creator-earning.controller.js";
 import { creatorEarningValidation } from "./creator-earning.validation.js";
 import { PayoutSettingsController } from "./payout-settings.controller.js";
 import { payoutSettingsValidation } from "./payout-settings.validation.js";
+import { EventCancellationRefundController } from "./event-cancellation-refund.controller.js";
 
 const router = Router();
 const stripeConnectController = new StripeConnectController();
 const checkoutPaymentController = new CheckoutPaymentController();
 const creatorEarningController = new CreatorEarningController();
 const payoutSettingsController = new PayoutSettingsController();
+const eventCancellationRefundController = new EventCancellationRefundController();
 const ticketScanRateLimit = rateLimit({
   windowMs: 60_000,
   limit: 120,
@@ -87,6 +89,48 @@ router.get(
   catchAsync(checkoutPaymentController.getPublicEventGoingItems),
 );
 router.get("/ticket-wallet", catchAsync(checkoutPaymentController.getMyTicketWallet));
+
+router.get(
+  "/admin/refund-batches",
+  authorizeRoles("admin"),
+  catchAsync(eventCancellationRefundController.listBatches),
+);
+router.get(
+  "/admin/refund-batches/:batchId",
+  authorizeRoles("admin"),
+  validate(checkoutPaymentValidation.refundBatchParams),
+  catchAsync(eventCancellationRefundController.getBatchDetails),
+);
+router.post(
+  "/admin/refund-batches/:batchId/retry",
+  authorizeRoles("admin"),
+  validate(checkoutPaymentValidation.refundBatchParams),
+  catchAsync(eventCancellationRefundController.retryBatch),
+);
+router.post(
+  "/admin/refund-batches/:batchId/reconcile",
+  authorizeRoles("admin"),
+  validate(checkoutPaymentValidation.refundBatchParams),
+  catchAsync(eventCancellationRefundController.reconcileBatch),
+);
+router.post(
+  "/admin/refund-batches/:batchId/resume",
+  authorizeRoles("admin"),
+  validate(checkoutPaymentValidation.refundBatchParams),
+  catchAsync(eventCancellationRefundController.resumeBatch),
+);
+router.post(
+  "/admin/refunds/:refundId/retry",
+  authorizeRoles("admin"),
+  validate(checkoutPaymentValidation.refundItemParams),
+  catchAsync(eventCancellationRefundController.retryRefund),
+);
+router.post(
+  "/admin/refunds/:refundId/reconcile",
+  authorizeRoles("admin"),
+  validate(checkoutPaymentValidation.refundItemParams),
+  catchAsync(eventCancellationRefundController.reconcileRefund),
+);
 router.post(
   "/ticket-shares",
   validate(checkoutPaymentValidation.shareTicket),

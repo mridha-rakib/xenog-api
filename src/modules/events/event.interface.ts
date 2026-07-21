@@ -1,6 +1,7 @@
 import type { Types } from "mongoose";
 import type { EventHostReviewEligibilityResponse } from "./event-host-review.interface.js";
 import type { PublicEventGoingSummaryResponse } from "../payments/checkout-payment.interface.js";
+import type { EventCancellationReasonType } from "../payments/event-cancellation-refund.interface.js";
 
 export const eventStatuses = ["draft", "published", "live", "completed", "cancelled"] as const;
 export type EventStatus = (typeof eventStatuses)[number];
@@ -233,6 +234,12 @@ export interface IEvent {
   startedAt?: Date | null;
   completedAt?: Date | null;
   cancelledAt?: Date | null;
+  cancellationReasonType?: EventCancellationReasonType | null;
+  cancellationCustomReason?: string | null;
+  cancellationDisplayReason?: string | null;
+  refundBatchId?: Types.ObjectId | null;
+  cancellationOperationId?: string | null;
+  cancellationWorkflowVersion?: number | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -310,6 +317,12 @@ export interface EventResponse {
   startedAt?: Date | null;
   completedAt?: Date | null;
   cancelledAt?: Date | null;
+  cancellationReasonType?: EventCancellationReasonType | null;
+  cancellationCustomReason?: string | null;
+  cancellationDisplayReason?: string | null;
+  refundBatchId?: string | null;
+  cancellationOperationId?: string | null;
+  cancellationWorkflowVersion?: number | null;
   createdAt: Date;
   updatedAt: Date;
 }

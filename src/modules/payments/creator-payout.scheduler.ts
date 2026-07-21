@@ -1,4 +1,5 @@
 import { logger } from "../../core/logger/logger.js";
+import { EventRepository } from "../events/event.repository.js";
 import { NotificationService } from "../notifications/notification.service.js";
 import { CreatorEarningRepository } from "./creator-earning.repository.js";
 import type { ICreatorPayout } from "./creator-payout.interface.js";
@@ -9,6 +10,7 @@ const TICK_INTERVAL_MS = 60_000;
 
 const payoutRepository = new CreatorPayoutRepository();
 const earningRepository = new CreatorEarningRepository();
+const eventRepository = new EventRepository();
 const stripeConnectService = new StripeConnectService();
 const notificationService = new NotificationService();
 
@@ -48,6 +50,25 @@ const processPayout = async (payout: ICreatorPayout): Promise<void> => {
   );
 
   try {
+    const earnings = await earningRepository.findByIds(earningIds);
+    const eventIds = [
+      ...new Set(
+        earnings
+          .map((earning) => earning.eventId?.toString())
+          .filter((eventId): eventId is string => Boolean(eventId)),
+      ),
+    ];
+    const events = await eventRepository.findManyByIds(eventIds);
+    const eventStatusById = new Map(events.map((event) => [event._id.toString(), event.status]));
+    const blockedEarning = earnings.find((earning) => {
+      const eventId = earning.eventId?.toString();
+      return eventId ? eventStatusById.get(eventId) !== "completed" : false;
+    });
+
+    if (blockedEarning) {
+      throw new Error("Payout contains event earnings that are no longer withdrawable.");
+    }
+
     // Validate that Stripe is still ready (onboarding or debit card could have changed since request)
     const stripeAccountId = await stripeConnectService.validateReadyForPayout(creatorUserId, payout.payoutType);
 

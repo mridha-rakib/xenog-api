@@ -11,6 +11,7 @@ import {
   eventStatuses,
   eventTicketTypes,
 } from "./event.interface.js";
+import { eventCancellationReasonTypes } from "../payments/event-cancellation-refund.interface.js";
 
 const eventLocationSchema = new Schema<EventLocation>(
   {
@@ -435,6 +436,40 @@ const eventSchema = new Schema<IEvent>(
     cancelledAt: {
       type: Date,
       default: null,
+    },
+    cancellationReasonType: {
+      type: String,
+      enum: eventCancellationReasonTypes,
+      default: null,
+    },
+    cancellationCustomReason: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: null,
+    },
+    cancellationDisplayReason: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: null,
+    },
+    refundBatchId: {
+      type: Schema.Types.ObjectId,
+      ref: "EventCancellationBatch",
+      default: null,
+      index: true,
+    },
+    cancellationOperationId: {
+      type: String,
+      trim: true,
+      default: null,
+      index: true,
+    },
+    cancellationWorkflowVersion: {
+      type: Number,
+      default: null,
+      index: true,
     },
   },
   {

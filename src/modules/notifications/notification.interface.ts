@@ -12,7 +12,11 @@ export type NotificationType =
   | "payout_requested"
   | "payout_processing"
   | "payout_completed"
-  | "payout_failed";
+  | "payout_failed"
+  | "event_cancelled"
+  | "refund_processing"
+  | "refund_completed"
+  | "refund_needs_attention";
 
 export interface INotification {
   _id: Types.ObjectId;
@@ -23,6 +27,13 @@ export interface INotification {
   actorUsername?: string | null;
   actorAvatarKey?: string | null;
   eventId?: string | null;
+  orderId?: string | null;
+  refundId?: string | null;
+  refundStatus?: string | null;
+  cancellationReason?: string | null;
+  title?: string | null;
+  deepLink?: string | null;
+  sourceKey?: string | null;
   eventName?: string | null;
   ticketName?: string | null;
   message?: string | null;
@@ -39,6 +50,13 @@ export interface CreateNotificationDto {
   actorUsername?: string | null;
   actorAvatarKey?: string | null;
   eventId?: string | null;
+  orderId?: string | null;
+  refundId?: string | null;
+  refundStatus?: string | null;
+  cancellationReason?: string | null;
+  title?: string | null;
+  deepLink?: string | null;
+  sourceKey?: string | null;
   eventName?: string | null;
   ticketName?: string | null;
   message?: string | null;
@@ -53,6 +71,12 @@ export interface NotificationResponse {
   actorAvatarUrl?: string | null;
   isFollowing?: boolean | null;
   eventId?: string | null;
+  orderId?: string | null;
+  refundId?: string | null;
+  refundStatus?: string | null;
+  cancellationReason?: string | null;
+  title?: string | null;
+  deepLink?: string | null;
   eventName?: string | null;
   ticketName?: string | null;
   message?: string | null;

@@ -7,6 +7,7 @@ import type { NotificationResponse, NotificationType } from "./notification.inte
 import { NotificationRepository } from "./notification.repository.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
 import { realtimeGateway } from "../realtime/realtime.gateway.js";
+import { sendPushNotifications } from "./fcm.service.js";
 
 export class NotificationService {
   public constructor(
@@ -65,8 +66,34 @@ export class NotificationService {
     recipientUserId: string,
     type: NotificationType,
     message: string,
+    options: {
+      title?: string | null;
+      eventId?: string | null;
+      orderId?: string | null;
+      refundId?: string | null;
+      refundStatus?: string | null;
+      cancellationReason?: string | null;
+      deepLink?: string | null;
+      sourceKey?: string | null;
+      push?: boolean;
+    } = {},
   ): Promise<void> {
-    const notification = await this.repository.create({ recipientUserId, type, message });
+    const notification = await this.repository.createOnce({
+      recipientUserId,
+      type,
+      message,
+      title: options.title ?? null,
+      eventId: options.eventId ?? null,
+      orderId: options.orderId ?? null,
+      refundId: options.refundId ?? null,
+      refundStatus: options.refundStatus ?? null,
+      cancellationReason: options.cancellationReason ?? null,
+      deepLink: options.deepLink ?? null,
+      sourceKey: options.sourceKey ?? null,
+    });
+    if (!notification) {
+      return;
+    }
     const unreadCount = await this.repository.countUnreadByRecipientId(recipientUserId);
 
     realtimeGateway.notifyUser(recipientUserId, {
@@ -74,12 +101,33 @@ export class NotificationService {
       notification: {
         id: notification._id.toString(),
         type: notification.type,
+        title: notification.title ?? null,
         message: notification.message ?? null,
+        eventId: notification.eventId ?? null,
+        orderId: notification.orderId ?? null,
+        refundId: notification.refundId ?? null,
+        refundStatus: notification.refundStatus ?? null,
+        cancellationReason: notification.cancellationReason ?? null,
+        deepLink: notification.deepLink ?? null,
         isRead: false,
         createdAt: notification.createdAt.toISOString(),
       },
       unreadCount,
     });
+
+    if (options.push !== false) {
+      await sendPushNotifications([recipientUserId], {
+        title: options.title ?? "Mooment",
+        body: message,
+        data: {
+          type,
+          ...(options.eventId ? { eventId: options.eventId } : {}),
+          ...(options.orderId ? { orderId: options.orderId } : {}),
+          ...(options.refundId ? { refundId: options.refundId } : {}),
+          ...(options.deepLink ? { deepLink: options.deepLink } : {}),
+        },
+      });
+    }
   }
 
   private async toResponse(
@@ -91,6 +139,12 @@ export class NotificationService {
       actorUsername?: string | null;
       actorAvatarKey?: string | null;
       eventId?: string | null;
+      orderId?: string | null;
+      refundId?: string | null;
+      refundStatus?: string | null;
+      cancellationReason?: string | null;
+      title?: string | null;
+      deepLink?: string | null;
       eventName?: string | null;
       ticketName?: string | null;
       message?: string | null;
@@ -114,6 +168,12 @@ export class NotificationService {
       actorAvatarUrl,
       isFollowing: actorId ? viewerFollowingSet.has(actorId) : null,
       eventId: n.eventId ?? null,
+      orderId: n.orderId ?? null,
+      refundId: n.refundId ?? null,
+      refundStatus: n.refundStatus ?? null,
+      cancellationReason: n.cancellationReason ?? null,
+      title: n.title ?? null,
+      deepLink: n.deepLink ?? null,
       eventName: n.eventName ?? null,
       ticketName: n.ticketName ?? null,
       message: n.message ?? null,

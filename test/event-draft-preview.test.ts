@@ -133,6 +133,7 @@ const createEventService = (overrides: {
   (overrides.eventWindowRepository ?? {
     findConflictingForEventSchedule: async () => [],
   }) as never,
+  () => now,
 );
 
 test("saving a new event through draft API stores draft status", async () => {
@@ -856,10 +857,7 @@ test("auto-start scheduler only queries and updates published events", async () 
     capturedFindQuery = query;
     return Promise.resolve([publishedEvent]);
   }) as typeof EventModel.find;
-  EventModel.updateMany = ((
-    filter: Record<string, unknown>,
-    _update: Record<string, unknown>,
-  ) => {
+  EventModel.updateMany = ((filter: Record<string, unknown>) => {
     capturedUpdateFilter = filter;
     return Promise.resolve({ acknowledged: true, matchedCount: 1, modifiedCount: 1 });
   }) as typeof EventModel.updateMany;

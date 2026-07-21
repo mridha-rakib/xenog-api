@@ -75,6 +75,14 @@ export class CreatorEarningRepository {
     return CreatorEarningModel.find({ creatorUserId, eventId }).sort({ createdAt: -1 });
   }
 
+  public async findByIds(ids: string[]): Promise<ICreatorEarning[]> {
+    return ids.length > 0 ? CreatorEarningModel.find({ _id: { $in: ids } }) : [];
+  }
+
+  public async countWithdrawnByEventId(eventId: string): Promise<number> {
+    return CreatorEarningModel.countDocuments({ eventId, status: "withdrawn" });
+  }
+
   public async findEligibleByCreatorUserId(creatorUserId: string): Promise<ICreatorEarning[]> {
     const now = new Date();
 

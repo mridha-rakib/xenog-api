@@ -110,6 +110,16 @@ export const checkoutPaymentValidation = {
       id: objectId,
     }),
   }),
+  refundBatchParams: z.object({
+    params: z.object({
+      batchId: objectId,
+    }),
+  }),
+  refundItemParams: z.object({
+    params: z.object({
+      refundId: objectId,
+    }),
+  }),
   ticketStatItems: z.object({
     params: z.object({
       id: objectId,

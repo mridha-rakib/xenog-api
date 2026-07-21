@@ -79,6 +79,7 @@ test("manual withdrawal can reserve an exact partial dollar amount", async () =>
     { validateReadyForPayout: async () => "acct_test" } as never,
     { findById: async () => ({ businessProfile: { withdrawalMethod: "bank_transfer" } }) } as never,
     { sendSystemNotification: async () => undefined } as never,
+    { findManyByIds: async (eventIds: string[]) => eventIds.map((id) => ({ _id: new Types.ObjectId(id), status: "completed" })) } as never,
   );
 
   const payout = await service.requestWithdrawal(user as never, { amount: 10 });
@@ -104,6 +105,7 @@ test("manual withdrawal duplicate create returns a clean in-progress error", asy
     { validateReadyForPayout: async () => "acct_test" } as never,
     { findById: async () => ({ businessProfile: { withdrawalMethod: "bank_transfer" } }) } as never,
     { sendSystemNotification: async () => undefined } as never,
+    { findManyByIds: async (eventIds: string[]) => eventIds.map((id) => ({ _id: new Types.ObjectId(id), status: "completed" })) } as never,
   );
 
   await assert.rejects(

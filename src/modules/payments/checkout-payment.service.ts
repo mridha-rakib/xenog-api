@@ -43,6 +43,9 @@ import { CheckoutPaymentRepository } from "./checkout-payment.repository.js";
 import { CreatorEarningRepository } from "./creator-earning.repository.js";
 import { TicketShareRepository } from "./ticket-share.repository.js";
 import { TicketUsageRepository } from "./ticket-usage.repository.js";
+import { EventCancellationRefundRepository } from "./event-cancellation-refund.repository.js";
+import { EventCancellationRefundService } from "./event-cancellation-refund.service.js";
+import type { IEventCancellationRefund } from "./event-cancellation-refund.interface.js";
 import { createCheckoutTicketPasses, generateTicketCheckInCode } from "./ticket-check-in-code.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
 import { realtimeGateway } from "../realtime/realtime.gateway.js";
@@ -81,6 +84,8 @@ export class CheckoutPaymentService {
     private readonly ticketUsageRepository = new TicketUsageRepository(),
     private readonly notificationRepository = new NotificationRepository(),
     private readonly storageService = new StorageService(),
+    private readonly eventCancellationRefundRepository = new EventCancellationRefundRepository(),
+    private readonly eventCancellationRefundService = new EventCancellationRefundService(),
   ) {}
 
   public async getMyTicketPurchaseCounts(
@@ -501,10 +506,11 @@ export class CheckoutPaymentService {
         ...receivedShares.map((share) => share.orderId.toString()),
       ]),
     ];
-    const [events, usages, followingIds] = await Promise.all([
+    const [events, usages, followingIds, refundItems] = await Promise.all([
       this.eventRepository.findManyByIds(eventIds),
       this.ticketUsageRepository.findByEventIdsAndOrderIds(eventIds, orderIds),
       this.userFollowRepository.findFollowingIds(user.id),
+      this.eventCancellationRefundRepository.findRefundItemsByOrderIds(orderIds),
     ]);
     const eventById = new Map(events.map((event) => [event._id.toString(), event]));
     const publicGoingSummaries = await this.getPublicEventGoingSummaries(
@@ -532,6 +538,7 @@ export class CheckoutPaymentService {
         usage,
       ]),
     );
+    const refundByOrderId = new Map(refundItems.map((refund) => [refund.checkoutOrderId.toString(), refund]));
     const walletItemByTicket = new Map<string, TicketWalletItem>();
 
     for (const order of orders) {
@@ -573,6 +580,7 @@ export class CheckoutPaymentService {
         walletItem.ticketNo = walletItem.ticketPasses.find((pass) => !pass.currentShare)?.ticketNo ?? "";
         walletItem.currentShare = walletItem.ticketPasses.find((pass) => pass.currentShare)?.currentShare ?? null;
         walletItem.walletStatus = this.getWalletStatus(order, event, walletItem.ticketPasses);
+        walletItem.refund = this.toTicketWalletRefund(refundByOrderId.get(order._id.toString()));
         const existingItem = walletItemByTicket.get(itemKey);
 
         if (existingItem) {
@@ -584,6 +592,7 @@ export class CheckoutPaymentService {
           existingItem.ticketPasses.push(...walletItem.ticketPasses);
           existingItem.currentShare = existingItem.currentShare ?? walletItem.currentShare;
           existingItem.walletStatus = this.getWalletStatus(order, event, existingItem.ticketPasses);
+          existingItem.refund = existingItem.refund ?? walletItem.refund;
         } else {
           walletItemByTicket.set(itemKey, walletItem);
         }
@@ -611,7 +620,7 @@ export class CheckoutPaymentService {
           this.getTicketPassKey(share.eventId, share.ticketId, share.orderId.toString(), share.ticketIndex ?? 1),
         ) ?? null;
 
-        return this.toSharedTicketWalletItem(
+        const sharedItem = this.toSharedTicketWalletItem(
           share,
           order,
           event,
@@ -622,6 +631,8 @@ export class CheckoutPaymentService {
           followingIdSet.has(event.userId.toString()),
           publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },
         );
+        sharedItem.refund = this.toTicketWalletRefund(refundByOrderId.get(order._id.toString()));
+        return sharedItem;
       })
       .filter((item): item is TicketWalletItem => Boolean(item));
 
@@ -1220,6 +1231,15 @@ export class CheckoutPaymentService {
       event.type === "payment_intent.processing"
     ) {
       await this.applyPaymentIntentEvent(event.data.object as StripePaymentIntent);
+      return;
+    }
+
+    if (
+      event.type === "refund.created" ||
+      event.type === "refund.updated" ||
+      event.type === "charge.refunded"
+    ) {
+      await this.eventCancellationRefundService.handleStripeWebhook(event);
     }
   }
 
@@ -1823,6 +1843,12 @@ export class CheckoutPaymentService {
       });
 
       if (!alreadyPaid && updatedOrder) {
+        const ticketEvent = await this.getSingleTicketEvent(updatedOrder);
+        if (ticketEvent?.status === "cancelled") {
+          await this.eventCancellationRefundService.ensureLatePaymentRefund(updatedOrder, ticketEvent);
+          return updatedOrder;
+        }
+
         await this.recordCreatorEarnings(updatedOrder);
         void this.dispatchTicketNotifications(updatedOrder);
       }
@@ -1930,6 +1956,30 @@ export class CheckoutPaymentService {
     }
 
     return "active";
+  }
+
+  private toTicketWalletRefund(item?: IEventCancellationRefund | null): TicketWalletItem["refund"] {
+    if (!item) return null;
+
+    return {
+      id: item._id.toString(),
+      status: item.status,
+      requestedAmountMinor: item.requestedAmountMinor,
+      completedAmountMinor: item.completedAmountMinor,
+      remainingRefundableAmountMinor: item.remainingRefundableAmountMinor,
+      currency: item.currency,
+      providerStatus: item.providerStatus ?? null,
+      safeLastErrorMessage: item.safeLastErrorMessage ?? null,
+      updatedAt: item.updatedAt,
+      completedAt: item.completedAt ?? null,
+    };
+  }
+
+  private async getSingleTicketEvent(order: ICheckoutOrder): Promise<IEvent | null> {
+    if (order.kind !== "ticket") return null;
+
+    const eventId = order.lineItems.find((item) => item.itemType === "ticket" && item.eventId)?.eventId;
+    return eventId ? this.eventRepository.findById(eventId) : null;
   }
 
   private async getPublicGoingPasses(eventIds: string[]): Promise<PublicGoingPass[]> {
@@ -2205,6 +2255,7 @@ export class CheckoutPaymentService {
             }
           : null,
         status: event.status,
+        cancellationDisplayReason: event.cancellationDisplayReason ?? null,
         host: host
           ? {
               id: host._id.toString(),
@@ -2287,6 +2338,7 @@ export class CheckoutPaymentService {
             }
           : null,
         status: event.status,
+        cancellationDisplayReason: event.cancellationDisplayReason ?? null,
         host: host ? { ...this.toWalletUser(host), isFollowing } : null,
         publicGoingSummary,
       },

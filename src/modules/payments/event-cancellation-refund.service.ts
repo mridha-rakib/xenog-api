@@ -27,7 +27,8 @@ import {
 import { EventCancellationRefundRepository } from "./event-cancellation-refund.repository.js";
 
 type StripeClient = InstanceType<typeof Stripe>;
-type StripeRefund = Stripe.Refund;
+type StripeWebhookEvent = ReturnType<StripeClient["webhooks"]["constructEvent"]>;
+type StripeRefund = Extract<StripeWebhookEvent, { type: "refund.created" | "refund.updated" }>["data"]["object"];
 
 const MAX_ATTEMPTS = 6;
 const LOCK_MS = 2 * 60 * 1000;
@@ -438,7 +439,7 @@ export class EventCancellationRefundService {
     };
   }
 
-  public async handleStripeWebhook(event: Stripe.Event): Promise<void> {
+  public async handleStripeWebhook(event: StripeWebhookEvent): Promise<void> {
     const firstSeen = await this.repository.markWebhookProcessed(event.id, event.type);
 
     if (!firstSeen) {
@@ -449,12 +450,12 @@ export class EventCancellationRefundService {
     logger.info({ stripeEventId: event.id, eventType: event.type }, "Stripe webhook received");
 
     if (event.type === "refund.created" || event.type === "refund.updated") {
-      await this.applyRefundWebhook(event.data.object as StripeRefund);
+      await this.applyRefundWebhook(event.data.object);
       return;
     }
 
     if (event.type === "charge.refunded") {
-      const charge = event.data.object as Stripe.Charge;
+      const charge = event.data.object;
       const paymentIntentId = typeof charge.payment_intent === "string" ? charge.payment_intent : null;
       if (!paymentIntentId) return;
 

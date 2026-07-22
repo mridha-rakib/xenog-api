@@ -86,6 +86,20 @@ export class CheckoutPaymentController {
     });
   };
 
+  public quoteCheckout = async (req: Request, res: Response): Promise<void> => {
+    const quote = await this.service.quoteCheckout(req.authUser as AuthUser, {
+      ...req.body,
+      acceptedTerms: true,
+    });
+
+    ApiResponse.success(res, {
+      message: "Checkout quote retrieved",
+      data: {
+        quote,
+      },
+    });
+  };
+
   public getEventAttendanceSummary = async (req: Request, res: Response): Promise<void> => {
     const { eventId } = req.params as { eventId: string };
     const summary = await this.service.getEventAttendanceSummary(req.authUser as AuthUser, eventId);

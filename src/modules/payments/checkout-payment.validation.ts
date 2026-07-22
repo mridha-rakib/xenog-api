@@ -63,7 +63,14 @@ const customIntent = z
   })
   .strict();
 
+const ticketQuote = ticketIntent.omit({ acceptedTerms: true });
+const productQuote = productIntent.omit({ acceptedTerms: true });
+const customQuote = customIntent.omit({ acceptedTerms: true });
+
 export const checkoutPaymentValidation = {
+  quoteCheckout: z.object({
+    body: z.discriminatedUnion("kind", [ticketQuote, productQuote, customQuote]),
+  }),
   createIntent: z.object({
     body: z.discriminatedUnion("kind", [ticketIntent, productIntent, customIntent]),
   }),

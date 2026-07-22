@@ -18,6 +18,9 @@ import type {
   CheckoutIntentResponse,
   CheckoutOrderLineItem,
   CheckoutOrderResponse,
+  CheckoutPolicySnapshot,
+  CheckoutQuoteResponse,
+  CheckoutTaxSnapshot,
   CreateCheckoutIntentDto,
   EventAttendanceSummaryAvatarResponse,
   EventAttendanceSummaryResponse,
@@ -40,6 +43,8 @@ import type {
   TicketWalletStatus,
 } from "./checkout-payment.interface.js";
 import { CheckoutPaymentRepository } from "./checkout-payment.repository.js";
+import { CheckoutTaxService } from "./checkout-tax.service.js";
+import { CheckoutInvoiceService } from "./checkout-invoice.service.js";
 import { CreatorEarningRepository } from "./creator-earning.repository.js";
 import { TicketShareRepository } from "./ticket-share.repository.js";
 import { TicketUsageRepository } from "./ticket-usage.repository.js";
@@ -62,9 +67,24 @@ type PublicGoingPass = {
   eventId: string;
   holderUserId: string;
 };
+type CheckoutAmounts = {
+  currency: string;
+  subtotalAmount: number;
+  platformFeeAmount: number;
+  taxAmount: number;
+  discountAmount: number;
+  totalAmount: number;
+  taxSnapshot: CheckoutTaxSnapshot;
+  policySnapshot: CheckoutPolicySnapshot;
+  event?: IEvent | null;
+};
 
 const BUYER_FEE_STRIPE = 0.10;
 const CREATOR_PLATFORM_FEE = 0.05;
+const CURRENT_CHECKOUT_POLICY = {
+  termsVersion: "terms-2026-07-22",
+  refundEscrowVersion: "refund-escrow-72h-2026-07-22",
+} as const;
 
 const roundCurrency = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
@@ -86,6 +106,8 @@ export class CheckoutPaymentService {
     private readonly storageService = new StorageService(),
     private readonly eventCancellationRefundRepository = new EventCancellationRefundRepository(),
     private readonly eventCancellationRefundService = new EventCancellationRefundService(),
+    private readonly taxService = new CheckoutTaxService(() => this.getStripe()),
+    private readonly invoiceService = new CheckoutInvoiceService(),
   ) {}
 
   public async getMyTicketPurchaseCounts(
@@ -609,8 +631,11 @@ export class CheckoutPaymentService {
         }
 
         const ticket = event.tickets.find((item) => item.id === share.ticketId);
+        const lineItem = order.lineItems.find(
+          (item) => item.itemType === "ticket" && item.eventId === share.eventId && item.itemId === share.ticketId,
+        );
 
-        if (!ticket) {
+        if (!ticket || !lineItem) {
           return null;
         }
 
@@ -625,6 +650,7 @@ export class CheckoutPaymentService {
           order,
           event,
           ticket,
+          lineItem,
           host,
           owner,
           usage,
@@ -1017,6 +1043,36 @@ export class CheckoutPaymentService {
     };
   }
 
+  public async quoteCheckout(user: AuthUser, payload: CreateCheckoutIntentDto): Promise<CheckoutQuoteResponse> {
+    const lineItems = await this.resolveLineItems(user, payload);
+    const amounts = await this.calculateCheckoutAmounts(lineItems, new Date());
+
+    return {
+      currency: amounts.currency,
+      subtotalAmount: amounts.subtotalAmount,
+      platformFeeAmount: amounts.platformFeeAmount,
+      taxAmount: amounts.taxAmount,
+      discountAmount: amounts.discountAmount,
+      totalAmount: amounts.totalAmount,
+      taxSnapshot: amounts.taxSnapshot,
+      policySnapshot: amounts.policySnapshot,
+      lineItems: lineItems.map((item) => ({
+        itemType: item.itemType,
+        itemId: item.itemId ?? null,
+        eventId: item.eventId ?? null,
+        sellerUserId: item.sellerUserId?.toString() ?? null,
+        name: item.name,
+        quantity: item.quantity,
+        paidQuantity: item.paidQuantity ?? item.quantity,
+        freeQuantity: item.freeQuantity ?? 0,
+        totalQuantity: item.totalQuantity ?? item.quantity,
+        rewardId: item.rewardId ?? null,
+        unitAmount: item.unitAmount,
+        totalAmount: item.totalAmount,
+      })),
+    };
+  }
+
   public async createIntent(user: AuthUser, payload: CreateCheckoutIntentDto): Promise<CheckoutIntentResponse> {
     if (!payload.acceptedTerms) {
       throw new AppError("Terms must be accepted before payment", httpStatus.BAD_REQUEST);
@@ -1111,15 +1167,11 @@ export class CheckoutPaymentService {
         }
       }
 
-      const currency = env.STRIPE_CURRENCY.toLowerCase();
       const lineItems = await this.resolveLineItems(user, payload);
-      const subtotalAmount = roundCurrency(lineItems.reduce((sum, item) => sum + item.totalAmount, 0));
-      const platformFeeAmount = roundCurrency(subtotalAmount * BUYER_FEE_STRIPE);
-      const totalAmount = roundCurrency(subtotalAmount + platformFeeAmount);
-      const amounts = { currency, subtotalAmount, platformFeeAmount, totalAmount };
+      const amounts = await this.calculateCheckoutAmounts(lineItems, new Date());
 
       if (!isTicket) {
-        if (totalAmount === 0) {
+        if (amounts.totalAmount === 0) {
           return this.createFreeOrder(user, payload, lineItems, amounts);
         }
 
@@ -1129,10 +1181,13 @@ export class CheckoutPaymentService {
       // Atomic ticket capacity reservation — single MongoDB round-trip, prevents oversell
       const ticketLineItem = lineItems[0];
       const reserveQty = ticketLineItem?.totalQuantity ?? payload.quantity;
-      const reserved = await this.eventRepository.reserveTicketCapacity(
+      const rewardReservation = await this.prepareRewardReservation(amounts.event ?? null, ticketLineItem);
+      const reserved = await this.eventRepository.reserveTicketAndRewardCapacity(
         payload.eventId,
         payload.ticketId,
         reserveQty,
+        rewardReservation.rewardId,
+        rewardReservation.quantity,
       );
 
       if (!reserved) {
@@ -1144,13 +1199,19 @@ export class CheckoutPaymentService {
 
       // Create the order; compensate on any failure
       try {
-        if (totalAmount === 0) {
+        if (amounts.totalAmount === 0) {
           return await this.createFreeOrder(user, payload, lineItems, amounts);
         }
 
         return await this.createStripeOrder(user, payload, lineItems, amounts);
       } catch (error) {
-        await this.eventRepository.releaseTicketCapacity(payload.eventId, payload.ticketId, reserveQty).catch(
+        await this.eventRepository.releaseTicketAndRewardCapacity(
+          payload.eventId,
+          payload.ticketId,
+          reserveQty,
+          rewardReservation.rewardId,
+          rewardReservation.quantity,
+        ).catch(
           (releaseError) => {
             logger.error({ releaseError, eventId: payload.eventId, ticketId: payload.ticketId }, "Failed to release ticket capacity after order creation failure");
           },
@@ -1230,6 +1291,10 @@ export class CheckoutPaymentService {
       event.type === "payment_intent.canceled" ||
       event.type === "payment_intent.processing"
     ) {
+      const firstProcess = await this.eventCancellationRefundRepository.markWebhookProcessed(event.id, event.type);
+      if (!firstProcess) {
+        return;
+      }
       await this.applyPaymentIntentEvent(event.data.object as StripePaymentIntent);
       return;
     }
@@ -1257,9 +1322,9 @@ export class CheckoutPaymentService {
     user: AuthUser,
     payload: CreateCheckoutIntentDto,
     lineItems: CheckoutOrderLineItem[],
-    amounts: { currency: string; subtotalAmount: number; platformFeeAmount: number; totalAmount: number },
+    amounts: CheckoutAmounts,
   ): Promise<CheckoutIntentResponse> {
-    const { currency, subtotalAmount, platformFeeAmount, totalAmount } = amounts;
+    const { currency, subtotalAmount, platformFeeAmount, taxAmount, discountAmount, totalAmount, taxSnapshot, policySnapshot } = amounts;
     const now = new Date();
 
     const order = await this.createOrderWithUniqueCheckInCodes({
@@ -1271,9 +1336,12 @@ export class CheckoutPaymentService {
       currency,
       subtotalAmount,
       platformFeeAmount,
-      taxAmount: 0,
+      taxAmount,
+      discountAmount,
       totalAmount,
       amountMinor: 0,
+      taxSnapshot,
+      policySnapshot,
       lineItems,
       stripePaymentIntentId: null,
       stripeClientSecret: null,
@@ -1282,6 +1350,7 @@ export class CheckoutPaymentService {
       paidAt: now,
     }, now);
 
+    await this.finalizePaidSideEffects(order);
     void this.dispatchTicketNotifications(order);
 
     return {
@@ -1297,9 +1366,9 @@ export class CheckoutPaymentService {
     user: AuthUser,
     payload: CreateCheckoutIntentDto,
     lineItems: CheckoutOrderLineItem[],
-    amounts: { currency: string; subtotalAmount: number; platformFeeAmount: number; totalAmount: number },
+    amounts: CheckoutAmounts,
   ): Promise<CheckoutIntentResponse> {
-    const { currency, subtotalAmount, platformFeeAmount, totalAmount } = amounts;
+    const { currency, subtotalAmount, platformFeeAmount, taxAmount, discountAmount, totalAmount, taxSnapshot, policySnapshot } = amounts;
     const amountMinor = toMinorAmount(totalAmount);
 
     if (amountMinor < 1) {
@@ -1349,9 +1418,12 @@ export class CheckoutPaymentService {
         currency,
         subtotalAmount,
         platformFeeAmount,
-        taxAmount: 0,
+        taxAmount,
+        discountAmount,
         totalAmount,
         amountMinor,
+        taxSnapshot,
+        policySnapshot,
         lineItems,
         stripePaymentIntentId: paymentIntent.id,
         stripeClientSecret: paymentIntent.client_secret,
@@ -1515,13 +1587,90 @@ export class CheckoutPaymentService {
 
     for (const item of ticketItems) {
       const qty = item.totalQuantity ?? item.quantity;
-      await this.eventRepository.releaseTicketCapacity(item.eventId!, item.itemId!, qty).catch((error) => {
+      await this.eventRepository.releaseTicketAndRewardCapacity(
+        item.eventId!,
+        item.itemId!,
+        qty,
+        item.rewardId,
+        item.freeQuantity ?? 0,
+      ).catch((error) => {
         logger.error(
           { error, eventId: item.eventId, ticketId: item.itemId, orderId: order._id.toString() },
           "Failed to release ticket capacity",
         );
       });
     }
+  }
+
+  private async calculateCheckoutAmounts(
+    lineItems: CheckoutOrderLineItem[],
+    acceptedAt: Date,
+  ): Promise<CheckoutAmounts> {
+    const currency = env.STRIPE_CURRENCY.toLowerCase();
+    const eventId = lineItems.find((item) => item.eventId)?.eventId;
+    const event = eventId ? await this.eventRepository.findById(eventId) : null;
+    const subtotalAmount = roundCurrency(lineItems.reduce((sum, item) => sum + item.totalAmount, 0));
+    const platformFeeAmount = roundCurrency(subtotalAmount * BUYER_FEE_STRIPE);
+    const discountAmount = 0;
+    const taxSnapshot = await this.taxService.calculate({
+      currency,
+      lineItems,
+      platformFeeAmount,
+      event,
+    });
+    const taxAmount = roundCurrency(taxSnapshot.amount);
+    const totalAmount = roundCurrency(subtotalAmount + platformFeeAmount + taxAmount - discountAmount);
+
+    return {
+      currency,
+      subtotalAmount,
+      platformFeeAmount,
+      taxAmount,
+      discountAmount,
+      totalAmount,
+      taxSnapshot: { ...taxSnapshot, amount: taxAmount },
+      policySnapshot: {
+        ...CURRENT_CHECKOUT_POLICY,
+        acceptedAt,
+      },
+      event,
+    };
+  }
+
+  private async initializeRewardCounterForReservation(event: IEvent | null, rewardId?: string | null): Promise<void> {
+    if (!event || !rewardId) return;
+
+    const reward = event.rewards.find((item) => item.id === rewardId);
+    if (!reward || reward.capacity <= 0 || reward.availableCount !== undefined && reward.availableCount !== null) {
+      return;
+    }
+
+    await this.eventRepository.initializeRewardAvailableCount(
+      event._id.toString(),
+      reward.id,
+      reward.capacity,
+    );
+  }
+
+  private async prepareRewardReservation(
+    event: IEvent | null,
+    lineItem?: CheckoutOrderLineItem,
+  ): Promise<{ rewardId: string | null; quantity: number }> {
+    const rewardId = lineItem?.rewardId ?? null;
+    const freeQuantity = lineItem?.freeQuantity ?? 0;
+
+    if (!event || !rewardId || freeQuantity <= 0) {
+      return { rewardId: null, quantity: 0 };
+    }
+
+    const reward = event.rewards.find((item) => item.id === rewardId);
+    if (!reward || reward.capacity <= 0) {
+      return { rewardId: null, quantity: 0 };
+    }
+
+    await this.initializeRewardCounterForReservation(event, rewardId);
+
+    return { rewardId, quantity: freeQuantity };
   }
 
   private getStripe(): StripeClient {
@@ -1555,6 +1704,13 @@ export class CheckoutPaymentService {
         const isMember = event.memberUserIds.some((id) => id.toString() === user.id);
         if (!isOwner && !isMember) {
           throw new AppError("You are not invited to this private event", httpStatus.FORBIDDEN);
+        }
+      }
+
+      if (event.privacy === "locked" && event.userId.toString() !== user.id) {
+        const joinRequest = await this.eventRepository.findUserJoinRequest(event._id.toString(), user.id);
+        if (joinRequest?.status !== "accepted") {
+          throw new AppError("Your request must be accepted before purchasing tickets for this locked event", httpStatus.FORBIDDEN);
         }
       }
 
@@ -1672,9 +1828,8 @@ export class CheckoutPaymentService {
       paidQuantity,
       this.getTicketRewardForLineItem(event, lineItem),
     );
-    const freeQuantity = Math.max(lineItem.freeQuantity ?? 0, derivedFreeQuantity);
-    const storedTotalQuantity = lineItem.totalQuantity ?? paidQuantity + (lineItem.freeQuantity ?? 0);
-    const totalQuantity = Math.max(storedTotalQuantity, paidQuantity + freeQuantity);
+    const freeQuantity = lineItem.freeQuantity ?? derivedFreeQuantity;
+    const totalQuantity = lineItem.totalQuantity ?? paidQuantity + freeQuantity;
 
     return {
       paidQuantity,
@@ -1798,21 +1953,44 @@ export class CheckoutPaymentService {
       }
 
       const grossAmount = item.totalAmount;
+      if (grossAmount <= 0) {
+        continue;
+      }
+
       const platformFeeAmount = roundCurrency(grossAmount * CREATOR_PLATFORM_FEE);
       const netAmount = roundCurrency(grossAmount - platformFeeAmount);
+      const lineItemKey = [
+        item.itemType,
+        item.eventId ?? "",
+        item.itemId ?? item.name,
+      ].join(":");
 
-      await this.earningRepository.create({
-        creatorUserId: item.sellerUserId!.toString(),
-        orderId: order._id.toString(),
-        eventId: item.eventId ?? null,
-        itemType: item.itemType,
-        grossAmount,
-        platformFeePercent: CREATOR_PLATFORM_FEE * 100,
-        platformFeeAmount,
-        netAmount,
-        status: "held",
-      });
+      try {
+        await this.earningRepository.create({
+          creatorUserId: item.sellerUserId!.toString(),
+          orderId: order._id.toString(),
+          eventId: item.eventId ?? null,
+          itemType: item.itemType,
+          lineItemKey,
+          grossAmount,
+          platformFeePercent: CREATOR_PLATFORM_FEE * 100,
+          platformFeeAmount,
+          netAmount,
+          status: "held",
+        });
+      } catch (error) {
+        if ((error as { code?: number }).code !== 11000) {
+          throw error;
+        }
+      }
     }
+  }
+
+  private async finalizePaidSideEffects(order: ICheckoutOrder): Promise<void> {
+    await this.recordCreatorEarnings(order);
+    await this.invoiceService.enqueueForOrder(order).catch((error) => {
+      logger.error({ error, orderId: order._id.toString() }, "Failed to enqueue checkout invoice");
+    });
   }
 
   private async applyPaymentIntentEvent(paymentIntent: StripePaymentIntent): Promise<void> {
@@ -1833,27 +2011,20 @@ export class CheckoutPaymentService {
     paymentIntent: StripePaymentIntent,
   ): Promise<ICheckoutOrder> {
     if (paymentIntent.status === "succeeded") {
-      const alreadyPaid = order.paymentStatus === "paid";
+      const updatedOrder = await this.repository.markPaidIfFirst(order._id.toString(), order.paidAt ?? new Date());
 
-      const updatedOrder = await this.repository.updatePaymentStatus(order._id.toString(), {
-        paymentStatus: "paid",
-        payoutStatus: "held",
-        paidAt: order.paidAt ?? new Date(),
-        failureMessage: null,
-      });
-
-      if (!alreadyPaid && updatedOrder) {
+      if (updatedOrder) {
         const ticketEvent = await this.getSingleTicketEvent(updatedOrder);
         if (ticketEvent?.status === "cancelled") {
           await this.eventCancellationRefundService.ensureLatePaymentRefund(updatedOrder, ticketEvent);
           return updatedOrder;
         }
 
-        await this.recordCreatorEarnings(updatedOrder);
+        await this.finalizePaidSideEffects(updatedOrder);
         void this.dispatchTicketNotifications(updatedOrder);
       }
 
-      return updatedOrder ?? order;
+      return updatedOrder ?? await this.repository.findById(order._id.toString()) ?? order;
     }
 
     if (paymentIntent.status === "processing") {
@@ -1924,7 +2095,10 @@ export class CheckoutPaymentService {
       subtotalAmount: order.subtotalAmount,
       platformFeeAmount: order.platformFeeAmount,
       taxAmount: order.taxAmount,
+      discountAmount: order.discountAmount ?? 0,
       totalAmount: order.totalAmount,
+      taxSnapshot: order.taxSnapshot ?? null,
+      policySnapshot: order.policySnapshot ?? null,
       lineItems: order.lineItems.map((item) => ({
         itemType: item.itemType,
         itemId: item.itemId ?? null,
@@ -2229,6 +2403,11 @@ export class CheckoutPaymentService {
       totalQuantity,
       unitAmount: lineItem.unitAmount,
       totalAmount: lineItem.totalAmount,
+      orderSubtotalAmount: order.subtotalAmount,
+      orderPlatformFeeAmount: order.platformFeeAmount,
+      orderTaxAmount: order.taxAmount,
+      orderDiscountAmount: order.discountAmount ?? 0,
+      orderTotalAmount: order.totalAmount,
       currency: order.currency,
       paymentStatus: order.paymentStatus,
       walletStatus: this.getWalletStatus(order, event, ticketPasses),
@@ -2252,6 +2431,21 @@ export class CheckoutPaymentService {
               searchLabel: event.location.searchLabel ?? null,
               venue: event.location.venue ?? null,
               address: event.location.address ?? null,
+              formattedAddress: event.location.formattedAddress ?? null,
+              addressLine1: event.location.addressLine1 ?? null,
+              neighborhood: event.location.neighborhood ?? null,
+              district: event.location.district ?? null,
+              city: event.location.city ?? null,
+              region: event.location.region ?? null,
+              regionCode: event.location.regionCode ?? null,
+              postalCode: event.location.postalCode ?? null,
+              country: event.location.country ?? null,
+              countryCode: event.location.countryCode ?? null,
+              latitude: event.location.latitude ?? null,
+              longitude: event.location.longitude ?? null,
+              mapboxPlaceId: event.location.mapboxPlaceId ?? null,
+              locationProvider: event.location.locationProvider ?? null,
+              providerResultType: event.location.providerResultType ?? null,
             }
           : null,
         status: event.status,
@@ -2275,14 +2469,15 @@ export class CheckoutPaymentService {
     order: ICheckoutOrder,
     event: IEvent,
     ticket: EventTicket,
+    lineItem: CheckoutOrderLineItem,
     host: IUser | null,
     owner: IUser | null,
     usage: ITicketUsage | null,
     isFollowing: boolean,
     publicGoingSummary: PublicEventGoingSummaryResponse,
   ): TicketWalletItem {
-    const unitAmount = roundCurrency(ticket.type === "free" ? 0 : ticket.price);
     const ticketIndex = share.ticketIndex ?? 1;
+    const unitAmount = this.getTicketPassAmount(lineItem, ticketIndex);
     const orderId = share.orderId.toString();
     const checkInCode = this.getStoredCheckInCode(order, share.eventId, share.ticketId, ticketIndex);
     const ticketPasses: TicketWalletPass[] = [
@@ -2335,6 +2530,21 @@ export class CheckoutPaymentService {
               searchLabel: event.location.searchLabel ?? null,
               venue: event.location.venue ?? null,
               address: event.location.address ?? null,
+              formattedAddress: event.location.formattedAddress ?? null,
+              addressLine1: event.location.addressLine1 ?? null,
+              neighborhood: event.location.neighborhood ?? null,
+              district: event.location.district ?? null,
+              city: event.location.city ?? null,
+              region: event.location.region ?? null,
+              regionCode: event.location.regionCode ?? null,
+              postalCode: event.location.postalCode ?? null,
+              country: event.location.country ?? null,
+              countryCode: event.location.countryCode ?? null,
+              latitude: event.location.latitude ?? null,
+              longitude: event.location.longitude ?? null,
+              mapboxPlaceId: event.location.mapboxPlaceId ?? null,
+              locationProvider: event.location.locationProvider ?? null,
+              providerResultType: event.location.providerResultType ?? null,
             }
           : null,
         status: event.status,

@@ -73,9 +73,22 @@ export interface EventLocation {
   searchLabel?: string | null;
   venue?: string | null;
   address?: string | null;
+  formattedAddress?: string | null;
+  addressLine1?: string | null;
+  neighborhood?: string | null;
+  district?: string | null;
+  city?: string | null;
+  region?: string | null;
+  regionCode?: string | null;
+  postalCode?: string | null;
+  country?: string | null;
+  countryCode?: string | null;
   additionalInfo?: string | null;
   latitude?: number | null;
   longitude?: number | null;
+  mapboxPlaceId?: string | null;
+  locationProvider?: string | null;
+  providerResultType?: string | null;
 }
 
 export interface EventTicket {
@@ -107,6 +120,7 @@ export interface EventReward {
   buyQuantity: number;
   freeQuantity: number;
   capacity: number;
+  availableCount?: number | null;
 }
 
 export type EventRewardInput = Omit<EventReward, "id" | "productId"> & {

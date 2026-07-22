@@ -516,6 +516,17 @@ export class MomentService {
       throw new AppError("User not found", httpStatus.NOT_FOUND);
     }
 
+    if (viewer?.id && viewer.id !== targetUserId) {
+      const [viewerHasBlockedTarget, targetHasBlockedViewer] = await Promise.all([
+        this.userBlockRepository.isBlocked(viewer.id, targetUserId),
+        this.userBlockRepository.isBlocked(targetUserId, viewer.id),
+      ]);
+
+      if (viewerHasBlockedTarget || targetHasBlockedViewer) {
+        throw new AppError("Profile unavailable", httpStatus.FORBIDDEN);
+      }
+    }
+
     const shouldPaginate = query.page !== undefined || query.limit !== undefined;
     const { page, limit, skip } = getPaginationOptions({ page: query.page, limit: query.limit ?? 10 });
     const candidateLimit = shouldPaginate ? skip + limit : undefined;

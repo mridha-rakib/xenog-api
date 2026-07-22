@@ -1,5 +1,11 @@
 import { Schema, model } from "mongoose";
-import type { CheckoutOrderLineItem, CheckoutOrderTicketPass, ICheckoutOrder } from "./checkout-payment.interface.js";
+import type {
+  CheckoutPolicySnapshot,
+  CheckoutTaxSnapshot,
+  CheckoutOrderLineItem,
+  CheckoutOrderTicketPass,
+  ICheckoutOrder,
+} from "./checkout-payment.interface.js";
 import {
   checkoutOrderKinds,
   checkoutPaymentMethods,
@@ -84,6 +90,41 @@ const checkoutOrderTicketPassSchema = new Schema<CheckoutOrderTicketPass>(
   { _id: false },
 );
 
+const checkoutTaxSnapshotSchema = new Schema<CheckoutTaxSnapshot>(
+  {
+    amount: { type: Number, required: true, min: 0, default: 0 },
+    status: {
+      type: String,
+      enum: [
+        "calculated_non_zero",
+        "calculated_zero",
+        "not_applicable",
+        "configuration_unavailable_zero_fallback",
+        "provider_failure_zero_fallback",
+      ],
+      required: true,
+    },
+    provider: { type: String, enum: ["stripe_tax", "none"], required: true },
+    calculationId: { type: String, trim: true, default: null },
+    transactionId: { type: String, trim: true, default: null },
+    failureCode: { type: String, trim: true, maxlength: 120, default: null },
+    failureReason: { type: String, trim: true, maxlength: 500, default: null },
+    venueSnapshot: { type: Schema.Types.Mixed, default: null },
+    jurisdictionSummary: { type: String, trim: true, maxlength: 240, default: null },
+    calculatedAt: { type: Date, required: true, default: Date.now },
+  },
+  { _id: false },
+);
+
+const checkoutPolicySnapshotSchema = new Schema<CheckoutPolicySnapshot>(
+  {
+    termsVersion: { type: String, required: true, trim: true, maxlength: 80 },
+    refundEscrowVersion: { type: String, required: true, trim: true, maxlength: 80 },
+    acceptedAt: { type: Date, required: true },
+  },
+  { _id: false },
+);
+
 const checkoutOrderSchema = new Schema<ICheckoutOrder>(
   {
     userId: {
@@ -142,6 +183,12 @@ const checkoutOrderSchema = new Schema<ICheckoutOrder>(
       min: 0,
       default: 0,
     },
+    discountAmount: {
+      type: Number,
+      required: true,
+      min: 0,
+      default: 0,
+    },
     totalAmount: {
       type: Number,
       required: true,
@@ -159,6 +206,14 @@ const checkoutOrderSchema = new Schema<ICheckoutOrder>(
         validator: (value: CheckoutOrderLineItem[]) => value.length > 0,
         message: "Checkout order must include at least one line item",
       },
+    },
+    taxSnapshot: {
+      type: checkoutTaxSnapshotSchema,
+      default: null,
+    },
+    policySnapshot: {
+      type: checkoutPolicySnapshotSchema,
+      default: null,
     },
     ticketPasses: {
       type: [checkoutOrderTicketPassSchema],

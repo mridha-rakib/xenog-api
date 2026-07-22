@@ -51,6 +51,12 @@ router.get(
   catchAsync(controller.listFriends),
 );
 router.get(
+  "/me/blocked-users",
+  authenticate,
+  validate(userValidation.blockedUsers),
+  catchAsync(controller.listBlockedUsers),
+);
+router.get(
   "/:id/profile-stats",
   authenticate,
   validate(userValidation.profileResource),

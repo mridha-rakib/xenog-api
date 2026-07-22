@@ -92,6 +92,10 @@ const TICKET_CREATION_CUTOFF_MESSAGE = "New tickets can’t be created within 30
 const TICKET_PRICE_EDIT_CUTOFF_MESSAGE = "Ticket price can’t be changed within 30 minutes of the event end time.";
 const TICKET_SALES_END_DATE_AFTER_EVENT_END_MESSAGE = "Ticket sales end date must be before the event end date.";
 const TICKET_SALES_END_TIME_NOT_BEFORE_EVENT_END_MESSAGE = "Ticket sales end time must be before the event end time.";
+const REWARD_END_DATE_AFTER_TICKET_SALES_END_MESSAGE =
+  "Reward end date cannot be after the ticket sales end date.";
+const REWARD_END_TIME_AFTER_TICKET_SALES_END_MESSAGE =
+  "Reward end time cannot be after the ticket sales end time.";
 
 type TicketValidationCode =
   | "EVENT_END_REQUIRED_FOR_TICKET_MANAGEMENT"
@@ -102,6 +106,12 @@ type TicketValidationCode =
   | "TICKET_SALES_END_TIME_NOT_BEFORE_EVENT_END";
 
 type TicketValidationField = "endAt" | "salesEndAt" | "price";
+
+type RewardValidationCode =
+  | "REWARD_END_DATE_AFTER_TICKET_SALES_END"
+  | "REWARD_END_TIME_AFTER_TICKET_SALES_END";
+
+type RewardValidationField = "expiresAt";
 
 type EventMapCursorPayload = {
   scheduledAt?: unknown;
@@ -780,6 +790,7 @@ export class EventService {
     const event = await this.getModifiableEventForOwner(user, eventId);
     const reward = await this.normalizeReward(payload, event, user.id);
     this.assertRewardDatesFitEventSchedule(event, [reward]);
+    this.assertRewardDatesFitTicketSalesEnd(event, [reward]);
     const rewards = this.normalizeExistingRewards(event.rewards);
     this.assertTicketRewardAvailable(rewards, reward);
     const nextRewards = [...rewards, reward];
@@ -840,6 +851,7 @@ export class EventService {
 
     const updatedReward = nextRewards.find((reward) => reward.id === rewardId)!;
     this.assertRewardDatesFitEventSchedule(event, [updatedReward]);
+    this.assertRewardDatesFitTicketSalesEnd(event, [updatedReward]);
     this.assertTicketRewardAvailable(rewards, updatedReward, rewardId);
     const updatedEvent =
       updatedReward.rewardType === "ticket" && updatedReward.ticketId
@@ -894,6 +906,7 @@ export class EventService {
     const event = await this.getDraftForUser(user, eventId);
     const reward = await this.normalizeReward(payload, event, user.id);
     this.assertRewardDatesFitEventSchedule(event, [reward]);
+    this.assertRewardDatesFitTicketSalesEnd(event, [reward]);
     const rewards = this.normalizeExistingRewards(event.rewards);
     this.assertTicketRewardAvailable(rewards, reward);
     const nextRewards = [...rewards, reward];
@@ -957,6 +970,7 @@ export class EventService {
 
     const updatedReward = nextRewards.find((reward) => reward.id === rewardId)!;
     this.assertRewardDatesFitEventSchedule(event, [updatedReward]);
+    this.assertRewardDatesFitTicketSalesEnd(event, [updatedReward]);
     this.assertTicketRewardAvailable(rewards, updatedReward, rewardId);
     const updatedEvent =
       updatedReward.rewardType === "ticket" && updatedReward.ticketId
@@ -1207,6 +1221,18 @@ export class EventService {
     query: ProfileEventsQuery = {},
   ): Promise<ProfileEventGroupsResponse> {
     const isOwner = user.id.toLowerCase() === userId.toLowerCase();
+
+    if (!isOwner) {
+      const [viewerHasBlockedTarget, targetHasBlockedViewer] = await Promise.all([
+        this.userBlockRepository.isBlocked(user.id, userId),
+        this.userBlockRepository.isBlocked(userId, user.id),
+      ]);
+
+      if (viewerHasBlockedTarget || targetHasBlockedViewer) {
+        throw new AppError("Profile unavailable", httpStatus.FORBIDDEN);
+      }
+    }
+
     return this.listProfileEventsByUserId(userId, isOwner, query);
   }
 
@@ -1984,9 +2010,22 @@ export class EventService {
             searchLabel: payload.location.searchLabel?.trim() || null,
             venue: payload.location.venue?.trim() || null,
             address: payload.location.address?.trim() || null,
+            formattedAddress: payload.location.formattedAddress?.trim() || null,
+            addressLine1: payload.location.addressLine1?.trim() || null,
+            neighborhood: payload.location.neighborhood?.trim() || null,
+            district: payload.location.district?.trim() || null,
+            city: payload.location.city?.trim() || null,
+            region: payload.location.region?.trim() || null,
+            regionCode: payload.location.regionCode?.trim() || null,
+            postalCode: payload.location.postalCode?.trim() || null,
+            country: payload.location.country?.trim() || null,
+            countryCode: payload.location.countryCode?.trim().toUpperCase() || null,
             additionalInfo: payload.location.additionalInfo?.trim() || null,
             latitude: payload.location.latitude ?? null,
             longitude: payload.location.longitude ?? null,
+            mapboxPlaceId: payload.location.mapboxPlaceId?.trim() || null,
+            locationProvider: payload.location.locationProvider?.trim() || null,
+            providerResultType: payload.location.providerResultType?.trim() || null,
           }
         : null;
     }
@@ -2053,6 +2092,7 @@ export class EventService {
       buyQuantity: reward.buyQuantity,
       freeQuantity: reward.freeQuantity,
       capacity: reward.capacity,
+      availableCount: reward.availableCount ?? null,
     }));
 
     const ticketIds = new Set<string>();
@@ -2117,6 +2157,9 @@ export class EventService {
       buyQuantity: reward.buyQuantity,
       freeQuantity: reward.freeQuantity,
       capacity: reward.capacity,
+      availableCount: existingReward
+        ? Math.max(0, (existingReward.availableCount ?? existingReward.capacity) + (reward.capacity - existingReward.capacity))
+        : reward.capacity,
     };
 
     if (rewardType === "ticket") {
@@ -2273,7 +2316,7 @@ export class EventService {
     scheduledAt?: Date | null;
     endAt?: Date | null;
     tickets: EventTicket[];
-    rewards: Array<Pick<EventReward, "name" | "expiresAt">>;
+    rewards: Array<Pick<EventReward, "name" | "rewardType" | "ticketId" | "expiresAt">>;
   } {
     return {
       scheduledAt: payload.scheduledAt !== undefined ? payload.scheduledAt : event.scheduledAt ?? null,
@@ -2288,11 +2331,15 @@ export class EventService {
   private assertTicketAndRewardDatesFitEventSchedule(event: {
     scheduledAt?: Date | null;
     endAt?: Date | null;
-    tickets?: Array<Pick<EventTicket, "name" | "salesEndAt">>;
-    rewards?: Array<Pick<EventReward, "name" | "expiresAt">>;
+    tickets?: Array<Pick<EventTicket, "name" | "salesEndAt"> & { id?: string }>;
+    rewards?: Array<Pick<EventReward, "name" | "rewardType" | "ticketId" | "expiresAt">>;
   }): void {
     this.assertTicketDatesFitEventSchedule(event, event.tickets ?? []);
     this.assertRewardDatesFitEventSchedule(event, event.rewards ?? []);
+    this.assertRewardDatesFitTicketSalesEnd(
+      { tickets: event.tickets ?? [] },
+      event.rewards ?? [],
+    );
   }
 
   private assertEndAtChangeDoesNotEnterTicketCreationCutoff(
@@ -2502,6 +2549,72 @@ export class EventService {
     code: TicketValidationCode;
     fields: Record<string, string[]>;
     issues: { code: TicketValidationCode; field: TicketValidationField; path: TicketValidationField; message: string }[];
+  } {
+    return {
+      code,
+      fields: {
+        [field]: [message],
+      },
+      issues: [{
+        code,
+        field,
+        path: field,
+        message,
+      }],
+    };
+  }
+
+  private assertRewardDatesFitTicketSalesEnd(
+    event: { tickets: Array<Pick<EventTicket, "salesEndAt"> & { id?: string }> },
+    rewards: Array<Pick<EventReward, "name" | "rewardType" | "ticketId" | "expiresAt">>,
+  ): void {
+    rewards.forEach((reward) => {
+      if (reward.rewardType !== "ticket" || !reward.ticketId) {
+        return;
+      }
+
+      const ticket = event.tickets.find((item) => item.id === reward.ticketId);
+
+      if (!ticket) {
+        throw new AppError("Select a valid event ticket for this reward.", httpStatus.BAD_REQUEST);
+      }
+
+      const expiresAt = this.getValidDateOrNull(reward.expiresAt);
+      const salesEndAt = this.getValidDateOrNull(ticket.salesEndAt);
+
+      if (!expiresAt || !salesEndAt || expiresAt <= salesEndAt) {
+        return;
+      }
+
+      const isLaterCalendarDate = this.getUtcCalendarKey(expiresAt) > this.getUtcCalendarKey(salesEndAt);
+      const message = isLaterCalendarDate
+        ? REWARD_END_DATE_AFTER_TICKET_SALES_END_MESSAGE
+        : REWARD_END_TIME_AFTER_TICKET_SALES_END_MESSAGE;
+      const code: RewardValidationCode = isLaterCalendarDate
+        ? "REWARD_END_DATE_AFTER_TICKET_SALES_END"
+        : "REWARD_END_TIME_AFTER_TICKET_SALES_END";
+
+      throw new AppError(
+        message,
+        httpStatus.UNPROCESSABLE_ENTITY,
+        this.getRewardValidationDetails(code, "expiresAt", message),
+      );
+    });
+  }
+
+  private getRewardValidationDetails(
+    code: RewardValidationCode,
+    field: RewardValidationField,
+    message: string,
+  ): {
+    code: RewardValidationCode;
+    fields: Record<string, string[]>;
+    issues: {
+      code: RewardValidationCode;
+      field: RewardValidationField;
+      path: RewardValidationField;
+      message: string;
+    }[];
   } {
     return {
       code,

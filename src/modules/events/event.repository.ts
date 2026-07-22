@@ -1268,6 +1268,64 @@ export class EventRepository {
     );
   }
 
+  public async initializeRewardAvailableCount(
+    eventId: string,
+    rewardId: string,
+    availableCount: number,
+  ): Promise<void> {
+    await EventModel.updateOne(
+      {
+        _id: eventId,
+        rewards: {
+          $elemMatch: {
+            id: rewardId,
+            $or: [
+              { availableCount: null },
+              { availableCount: { $exists: false } },
+            ],
+          },
+        },
+      },
+      { $set: { "rewards.$.availableCount": availableCount } },
+      { runValidators: true },
+    );
+  }
+
+  public async reserveTicketAndRewardCapacity(
+    eventId: string,
+    ticketId: string,
+    ticketQuantity: number,
+    rewardId: string | null,
+    rewardQuantity: number,
+  ): Promise<IEvent | null> {
+    if (!rewardId || rewardQuantity <= 0) {
+      return this.reserveTicketCapacity(eventId, ticketId, ticketQuantity);
+    }
+
+    return EventModel.findOneAndUpdate(
+      {
+        _id: eventId,
+        status: "published",
+        scheduledAt: { $ne: null, $gt: new Date() },
+        tickets: { $elemMatch: { id: ticketId, availableCount: { $gte: ticketQuantity } } },
+        rewards: { $elemMatch: { id: rewardId, availableCount: { $gte: rewardQuantity } } },
+      },
+      {
+        $inc: {
+          "tickets.$[ticket].availableCount": -ticketQuantity,
+          "rewards.$[reward].availableCount": -rewardQuantity,
+        },
+      },
+      {
+        new: true,
+        arrayFilters: [
+          { "ticket.id": ticketId },
+          { "reward.id": rewardId },
+        ],
+      },
+    );
+  }
+
   /**
    * Atomically increments availableCount by quantity.
    * Only operates if availableCount is not null (pre-migration tickets are skipped safely).
@@ -1279,6 +1337,35 @@ export class EventRepository {
         tickets: { $elemMatch: { id: ticketId, availableCount: { $ne: null } } },
       },
       { $inc: { "tickets.$.availableCount": quantity } },
+    );
+  }
+
+  public async releaseTicketAndRewardCapacity(
+    eventId: string,
+    ticketId: string,
+    ticketQuantity: number,
+    rewardId?: string | null,
+    rewardQuantity = 0,
+  ): Promise<void> {
+    if (!rewardId || rewardQuantity <= 0) {
+      await this.releaseTicketCapacity(eventId, ticketId, ticketQuantity);
+      return;
+    }
+
+    await EventModel.updateOne(
+      { _id: eventId },
+      {
+        $inc: {
+          "tickets.$[ticket].availableCount": ticketQuantity,
+          "rewards.$[reward].availableCount": rewardQuantity,
+        },
+      },
+      {
+        arrayFilters: [
+          { "ticket.id": ticketId, "ticket.availableCount": { $ne: null } },
+          { "reward.id": rewardId, "reward.availableCount": { $ne: null } },
+        ],
+      },
     );
   }
 

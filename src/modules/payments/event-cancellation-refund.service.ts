@@ -784,7 +784,13 @@ export class EventCancellationRefundService {
   private async releaseCapacityForOrder(order: ICheckoutOrder): Promise<void> {
     for (const item of order.lineItems.filter((lineItem) => lineItem.itemType === "ticket" && lineItem.eventId && lineItem.itemId)) {
       const qty = item.totalQuantity ?? item.quantity;
-      await this.eventRepository.releaseTicketCapacity(item.eventId!, item.itemId!, qty).catch((error) => {
+      await this.eventRepository.releaseTicketAndRewardCapacity(
+        item.eventId!,
+        item.itemId!,
+        qty,
+        item.rewardId,
+        item.freeQuantity ?? 0,
+      ).catch((error) => {
         logger.error({ error, eventId: item.eventId, ticketId: item.itemId, orderId: order._id.toString() }, "Failed to release cancelled-event ticket capacity");
       });
     }

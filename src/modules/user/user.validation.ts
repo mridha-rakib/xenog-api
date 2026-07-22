@@ -86,6 +86,12 @@ export const userValidation = {
       limit: z.coerce.number().int().min(1).max(200).optional(),
     }),
   }),
+  blockedUsers: z.object({
+    query: z.object({
+      page: z.coerce.number().int().positive().optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+    }),
+  }),
   profileList: z.object({
     params: z.object({
       id: objectId,

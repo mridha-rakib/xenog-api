@@ -63,6 +63,11 @@ const envSchema = z.object({
     .string()
     .optional()
     .transform((value) => (value ? value === "true" : undefined)),
+  STRIPE_TAX_ENABLED: z
+    .string()
+    .optional()
+    .transform((value) => value === "true"),
+  STRIPE_TAX_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
 
   AI_ENGINE_MODE: z.string().default("rules"),
 

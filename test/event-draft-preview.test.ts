@@ -136,6 +136,41 @@ const createEventService = (overrides: {
   () => now,
 );
 
+const createTicket = (overrides: Record<string, unknown> = {}) => ({
+  id: "ticket-1",
+  name: "Early Bird",
+  description: "Ticket",
+  salesEndAt: new Date("2026-07-15T11:00:00.000Z"),
+  type: "free",
+  price: 0,
+  capacity: 10,
+  availableCount: null,
+  ...overrides,
+});
+
+const createTicketRewardPayload = (overrides: Record<string, unknown> = {}) => ({
+  rewardType: "ticket",
+  ticketId: "ticket-1",
+  name: "Ticket Reward",
+  description: "Reward",
+  expiresAt: new Date("2026-07-15T10:30:00.000Z"),
+  discountPercent: 0,
+  buyQuantity: 1,
+  freeQuantity: 1,
+  capacity: 5,
+  ...overrides,
+});
+
+const createExistingTicketReward = (overrides: Record<string, unknown> = {}) => ({
+  id: "reward-1",
+  productId: null,
+  targetName: "Early Bird",
+  imageKeys: [],
+  ...createTicketRewardPayload(),
+  capacity: 10,
+  ...overrides,
+});
+
 test("saving a new event through draft API stores draft status", async () => {
   const draft = createEvent();
   let createdPayload: Record<string, unknown> | null = null;
@@ -341,7 +376,7 @@ test("draft owner can create, update, and delete rewards without changing reward
     id: "ticket-1",
     name: "Early Bird",
     description: "Ticket",
-    salesEndAt: new Date("2026-07-15T09:30:00.000Z"),
+    salesEndAt: new Date("2026-07-15T11:45:00.000Z"),
     type: "free",
     price: 0,
     capacity: 10,
@@ -404,10 +439,13 @@ test("draft owner can create, update, and delete rewards without changing reward
 
 test("non-owner cannot manage draft rewards", async () => {
   let updateCalled = false;
+  const existingReward = createExistingTicketReward();
   const service = createEventService({
     eventRepository: {
       findByIdForUser: async (_requestedEventId: string, requestedUserId: string) =>
-        requestedUserId === owner.id ? createEvent() : null,
+        requestedUserId === owner.id
+          ? createEvent({ tickets: [createTicket()], rewards: [existingReward] })
+          : null,
       updateDraftByIdForUser: async () => {
         updateCalled = true;
         throw new Error("non-owner draft reward mutation should not update");
@@ -429,6 +467,12 @@ test("non-owner cannot manage draft rewards", async () => {
     } as never),
     { statusCode: 404 },
   );
+  await assert.rejects(
+    () => service.updateDraftReward(otherUser as never, eventId.toString(), "reward-1", {
+      expiresAt: new Date("2026-07-15T10:45:00.000Z"),
+    } as never),
+    { statusCode: 404 },
+  );
   assert.equal(updateCalled, false);
 });
 
@@ -437,7 +481,7 @@ test("locked draft owner can manage rewards", async () => {
     id: "ticket-1",
     name: "Early Bird",
     description: "Ticket",
-    salesEndAt: new Date("2026-07-15T09:30:00.000Z"),
+    salesEndAt: new Date("2026-07-15T11:45:00.000Z"),
     type: "free",
     price: 0,
     capacity: 10,
@@ -510,6 +554,258 @@ test("draft reward expiry after event end is rejected", async () => {
   assert.equal(updateCalled, false);
 });
 
+test("draft ticket reward expiry before or equal to ticket sales end is accepted", async () => {
+  const ticket = createTicket();
+  const acceptedExpiries = [
+    "2026-07-14T23:30:00.000Z",
+    "2026-07-15T10:30:00.000Z",
+    "2026-07-15T11:00:00.000Z",
+  ];
+  const savedExpiries: string[] = [];
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () => createEvent({ tickets: [ticket] }),
+      updateRewardsIfTicketAvailable: async (
+        _requestedEventId: string,
+        _requestedUserId: string,
+        rewards: Array<{ expiresAt?: Date | null }>,
+      ) => {
+        savedExpiries.push(rewards[0]?.expiresAt?.toISOString() ?? "");
+        return createEvent({ tickets: [ticket], rewards });
+      },
+    },
+  });
+
+  for (const expiresAt of acceptedExpiries) {
+    const response = await service.createDraftReward(
+      owner as never,
+      eventId.toString(),
+      createTicketRewardPayload({ expiresAt: new Date(expiresAt) }) as never,
+    );
+
+    assert.equal(response.rewards.length, 1);
+  }
+
+  assert.deepEqual(savedExpiries, acceptedExpiries);
+});
+
+test("draft ticket reward expiry on a later calendar date returns the date-specific structured error", async () => {
+  const ticket = createTicket({ salesEndAt: new Date("2026-07-15T11:00:00.000Z") });
+  let updateCalled = false;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () => createEvent({
+        endAt: new Date("2026-07-17T12:00:00.000Z"),
+        tickets: [ticket],
+      }),
+      updateRewardsIfTicketAvailable: async () => {
+        updateCalled = true;
+        throw new Error("invalid reward should not update");
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => service.createDraftReward(
+      owner as never,
+      eventId.toString(),
+      createTicketRewardPayload({ expiresAt: new Date("2026-07-16T01:00:00.000Z") }) as never,
+    ),
+    (error: unknown) => {
+      const appError = error as { statusCode?: number; details?: { code?: string; fields?: Record<string, string[]> } };
+      assert.equal(appError.statusCode, 422);
+      assert.equal(appError.details?.code, "REWARD_END_DATE_AFTER_TICKET_SALES_END");
+      assert.deepEqual(appError.details?.fields?.expiresAt, [
+        "Reward end date cannot be after the ticket sales end date.",
+      ]);
+      return true;
+    },
+  );
+  assert.equal(updateCalled, false);
+});
+
+test("draft ticket reward expiry on the same date with a later time returns the time-specific structured error", async () => {
+  const ticket = createTicket({ salesEndAt: new Date("2026-07-15T11:00:00.000Z") });
+  let updateCalled = false;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () => createEvent({ tickets: [ticket] }),
+      updateRewardsIfTicketAvailable: async () => {
+        updateCalled = true;
+        throw new Error("invalid reward should not update");
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => service.createDraftReward(
+      owner as never,
+      eventId.toString(),
+      createTicketRewardPayload({ expiresAt: new Date("2026-07-15T11:01:00.000Z") }) as never,
+    ),
+    (error: unknown) => {
+      const appError = error as { statusCode?: number; details?: { code?: string; fields?: Record<string, string[]> } };
+      assert.equal(appError.statusCode, 422);
+      assert.equal(appError.details?.code, "REWARD_END_TIME_AFTER_TICKET_SALES_END");
+      assert.deepEqual(appError.details?.fields?.expiresAt, [
+        "Reward end time cannot be after the ticket sales end time.",
+      ]);
+      return true;
+    },
+  );
+  assert.equal(updateCalled, false);
+});
+
+test("draft reward update validates against authoritative ticket data and preserves existing reward id on failure", async () => {
+  const ticket = createTicket({ salesEndAt: new Date("2026-07-15T11:00:00.000Z") });
+  const existingReward = createExistingTicketReward({ expiresAt: new Date("2026-07-15T10:30:00.000Z") });
+  let updateCalled = false;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () => createEvent({ tickets: [ticket], rewards: [existingReward] }),
+      updateRewardsIfTicketAvailable: async () => {
+        updateCalled = true;
+        throw new Error("invalid reward update should not update");
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => service.updateDraftReward(
+      owner as never,
+      eventId.toString(),
+      "reward-1",
+      {
+        expiresAt: new Date("2026-07-15T11:01:00.000Z"),
+        salesEndAt: new Date("2026-07-15T12:00:00.000Z"),
+      } as never,
+    ),
+    { statusCode: 422 },
+  );
+
+  assert.equal(updateCalled, false);
+  assert.equal(existingReward.id, "reward-1");
+});
+
+test("draft reward update keeps the same reward id when ticket sales-end validation passes", async () => {
+  const ticket = createTicket({ salesEndAt: new Date("2026-07-15T11:00:00.000Z") });
+  const existingReward = createExistingTicketReward({ expiresAt: new Date("2026-07-15T10:30:00.000Z") });
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () => createEvent({ tickets: [ticket], rewards: [existingReward] }),
+      updateRewardsIfTicketAvailable: async (
+        _requestedEventId: string,
+        _requestedUserId: string,
+        rewards: unknown[],
+      ) => createEvent({ tickets: [ticket], rewards }),
+    },
+  });
+
+  const response = await service.updateDraftReward(owner as never, eventId.toString(), "reward-1", {
+    expiresAt: new Date("2026-07-15T11:00:00.000Z"),
+  } as never);
+
+  assert.equal(response.rewards[0]?.id, "reward-1");
+  assert.equal(response.rewards[0]?.expiresAt?.toISOString(), "2026-07-15T11:00:00.000Z");
+});
+
+test("ticket reward creation rejects a ticket id that is not part of the loaded event", async () => {
+  let updateCalled = false;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () => createEvent({ tickets: [createTicket({ id: "ticket-1" })] }),
+      updateRewardsIfTicketAvailable: async () => {
+        updateCalled = true;
+        throw new Error("invalid ticket reward should not update");
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => service.createDraftReward(
+      owner as never,
+      eventId.toString(),
+      createTicketRewardPayload({ ticketId: "other-event-ticket" }) as never,
+    ),
+    { statusCode: 400 },
+  );
+  assert.equal(updateCalled, false);
+});
+
+test("published and live ticket reward creation enforce ticket sales end", async () => {
+  for (const status of ["published", "live"]) {
+    const ticket = createTicket({ salesEndAt: new Date("2026-07-15T11:00:00.000Z") });
+    let updateCallCount = 0;
+    const service = createEventService({
+      eventRepository: {
+        findByIdForUser: async (_requestedEventId: string, requestedUserId: string) =>
+          requestedUserId === owner.id ? createEvent({ status, tickets: [ticket] }) : null,
+        updateRewardsIfTicketAvailable: async (
+          _requestedEventId: string,
+          _requestedUserId: string,
+          rewards: unknown[],
+        ) => {
+          updateCallCount += 1;
+          return createEvent({ status, tickets: [ticket], rewards });
+        },
+      },
+    });
+
+    const validResponse = await service.createEventReward(
+      owner as never,
+      eventId.toString(),
+      createTicketRewardPayload({ expiresAt: new Date("2026-07-15T11:00:00.000Z") }) as never,
+    );
+    assert.equal(validResponse.rewards.length, 1);
+    assert.equal(updateCallCount, 1);
+
+    await assert.rejects(
+      () => service.createEventReward(
+        owner as never,
+        eventId.toString(),
+        createTicketRewardPayload({ expiresAt: new Date("2026-07-15T11:01:00.000Z") }) as never,
+      ),
+      { statusCode: 422 },
+    );
+    assert.equal(updateCallCount, 1);
+  }
+});
+
+test("non-owner cannot create or edit published rewards", async () => {
+  const ticket = createTicket();
+  const existingReward = createExistingTicketReward();
+  let updateCalled = false;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async (_requestedEventId: string, requestedUserId: string) =>
+        requestedUserId === owner.id ? createEvent({ status: "published", tickets: [ticket], rewards: [existingReward] }) : null,
+      updateRewardsIfTicketAvailable: async () => {
+        updateCalled = true;
+        throw new Error("non-owner reward mutation should not update");
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => service.createEventReward(
+      otherUser as never,
+      eventId.toString(),
+      createTicketRewardPayload() as never,
+    ),
+    { statusCode: 404 },
+  );
+  await assert.rejects(
+    () => service.updateEventReward(
+      otherUser as never,
+      eventId.toString(),
+      "reward-1",
+      { expiresAt: new Date("2026-07-15T10:45:00.000Z") } as never,
+    ),
+    { statusCode: 404 },
+  );
+  assert.equal(updateCalled, false);
+});
+
 test("event schedule update is blocked when existing ticket or reward dates exceed the new event end", async () => {
   const ticket = {
     id: "ticket-1",
@@ -563,7 +859,7 @@ test("publishing a draft preserves ticket and reward ids without duplicate child
     id: "ticket-1",
     name: "Early Bird",
     description: "Ticket",
-    salesEndAt: new Date("2026-07-15T09:30:00.000Z"),
+    salesEndAt: new Date("2026-07-15T11:45:00.000Z"),
     type: "free",
     price: 0,
     capacity: 10,

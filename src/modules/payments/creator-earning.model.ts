@@ -27,6 +27,11 @@ const creatorEarningSchema = new Schema<ICreatorEarning>(
       enum: ["ticket", "product"],
       required: true,
     },
+    lineItemKey: {
+      type: String,
+      trim: true,
+      default: null,
+    },
     grossAmount: {
       type: Number,
       required: true,
@@ -73,5 +78,13 @@ const creatorEarningSchema = new Schema<ICreatorEarning>(
 
 creatorEarningSchema.index({ creatorUserId: 1, status: 1, createdAt: -1 });
 creatorEarningSchema.index({ eventId: 1, status: 1 });
+creatorEarningSchema.index(
+  { orderId: 1, lineItemKey: 1 },
+  { unique: true, partialFilterExpression: { lineItemKey: { $type: "string" } } },
+);
 
 export const CreatorEarningModel = model<ICreatorEarning>("CreatorEarning", creatorEarningSchema);
+
+export const ensureCreatorEarningIndexes = async (): Promise<void> => {
+  await CreatorEarningModel.syncIndexes();
+};

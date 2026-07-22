@@ -94,7 +94,7 @@ export class UserController {
 
   public getProfileStats = async (req: Request, res: Response): Promise<void> => {
     const { id } = req.params as { id: string };
-    const stats = await this.userService.getProfileStats(id);
+    const stats = await this.userService.getProfileStats(id, req.authUser as AuthUser);
 
     ApiResponse.success(res, {
       message: "Profile stats retrieved",
@@ -140,7 +140,11 @@ export class UserController {
 
   public listReviews = async (req: Request, res: Response): Promise<void> => {
     const { id } = req.params as { id: string };
-    const result = await this.userService.listReviews(id, req.query as { limit?: number; page?: number });
+    const result = await this.userService.listReviews(
+      id,
+      req.authUser as AuthUser,
+      req.query as { limit?: number; page?: number },
+    );
 
     ApiResponse.success(res, {
       message: "Reviews retrieved",
@@ -195,6 +199,21 @@ export class UserController {
     ApiResponse.success(res, {
       message: "User unblocked",
       data: { block },
+    });
+  };
+
+  public listBlockedUsers = async (req: Request, res: Response): Promise<void> => {
+    const result = await this.userService.listBlockedUsers(
+      req.authUser as AuthUser,
+      req.query as { page?: number; limit?: number },
+    );
+
+    ApiResponse.success(res, {
+      message: "Blocked users retrieved",
+      data: {
+        users: result.data,
+      },
+      meta: { pagination: result.meta },
     });
   };
 

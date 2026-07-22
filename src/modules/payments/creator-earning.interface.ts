@@ -14,6 +14,7 @@ export interface ICreatorEarning {
   orderId: Types.ObjectId;
   eventId?: Types.ObjectId | null;
   itemType: "ticket" | "product";
+  lineItemKey?: string | null;
   grossAmount: number;
   platformFeePercent: number;
   platformFeeAmount: number;

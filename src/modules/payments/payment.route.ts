@@ -43,6 +43,11 @@ router.post("/stripe/webhook", catchAsync(checkoutPaymentController.stripeWebhoo
 router.use(authenticate);
 
 router.post(
+  "/checkout-quotes",
+  validate(checkoutPaymentValidation.quoteCheckout),
+  catchAsync(checkoutPaymentController.quoteCheckout),
+);
+router.post(
   "/checkout-intents",
   validate(checkoutPaymentValidation.createIntent),
   catchAsync(checkoutPaymentController.createIntent),

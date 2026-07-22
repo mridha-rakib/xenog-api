@@ -164,6 +164,15 @@ export interface BlockStatusResponse {
   isBlocked: boolean;
 }
 
+export interface BlockedUserResponse {
+  id: string;
+  name: string;
+  username?: string;
+  avatarKey?: string | null;
+  avatarUrl?: string | null;
+  blockedAt: Date;
+}
+
 export interface UserProfileStatsResponse {
   reviews: number;
   followers: number;
@@ -202,9 +211,14 @@ export interface UserResponse {
   name: string;
   username?: string;
   email?: string;
-  accountType: "personal" | "business";
+  accountType?: "personal" | "business";
   avatarKey?: string | null;
   avatarUrl?: string | null;
   bio?: string | null;
   isFollowing?: boolean;
+  profileAccess?: "open" | "blocked";
+  viewerHasBlockedTarget?: boolean;
+  targetHasBlockedViewer?: boolean;
+  blockedTitle?: string;
+  blockedDescription?: string;
 }

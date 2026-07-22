@@ -255,9 +255,29 @@ const eventLocation = z
     searchLabel: optionalText("Location", 240),
     venue: optionalText("Venue", 160),
     address: optionalText("Address", 240),
+    formattedAddress: optionalText("Formatted address", 500),
+    addressLine1: optionalText("Address line 1", 240),
+    neighborhood: optionalText("Neighborhood", 160),
+    district: optionalText("District", 160),
+    city: optionalText("City", 160),
+    region: optionalText("Region", 160),
+    regionCode: optionalText("Region code", 32),
+    postalCode: optionalText("Postal code", 32),
+    country: optionalText("Country", 160),
+    countryCode: z
+      .string()
+      .trim()
+      .length(2, "Country code must be a 2-letter ISO code")
+      .transform((value) => value.toUpperCase())
+      .optional()
+      .nullable()
+      .transform((value) => value ?? null),
     additionalInfo: optionalText("Additional info", 500),
     latitude: z.number().min(-90).max(90).optional().nullable(),
     longitude: z.number().min(-180).max(180).optional().nullable(),
+    mapboxPlaceId: optionalText("Mapbox place ID", 160),
+    locationProvider: optionalText("Location provider", 80),
+    providerResultType: optionalText("Provider result type", 80),
   })
   .strict();
 

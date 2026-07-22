@@ -12,6 +12,7 @@ import { StorageService } from "../storage/storage.service.js";
 import type {
   AdminManagedUserResponse,
   AdminUserStatsResponse,
+  BlockedUserResponse,
   BlockStatusResponse,
   CreateUserDto,
   FollowStatusResponse,
@@ -197,8 +198,13 @@ export class UserService {
   }
 
   public async listSuggestedUsers(user: AuthUser, limit = 10): Promise<SuggestedUserResponse[]> {
-    const followingIds = await this.userFollowRepository.findFollowingIds(user.id);
-    const users = await this.userRepository.findSuggestedUsers([user.id, ...followingIds], limit);
+    const [followingIds, blockedIds, blockerIds] = await Promise.all([
+      this.userFollowRepository.findFollowingIds(user.id),
+      this.userBlockRepository.findBlockedIds(user.id),
+      this.userBlockRepository.findBlockerIds(user.id),
+    ]);
+    const excludedIds = [...new Set([user.id, ...followingIds, ...blockedIds, ...blockerIds])];
+    const users = await this.userRepository.findSuggestedUsers(excludedIds, limit);
 
     return Promise.all(users.map((suggestedUser) => this.toSuggestedUserResponse(suggestedUser, false)));
   }
@@ -210,8 +216,9 @@ export class UserService {
     return Promise.all(users.map((friend) => this.toFriendUserResponse(friend)));
   }
 
-  public async getProfileStats(targetUserId: string): Promise<UserProfileStatsResponse> {
+  public async getProfileStats(targetUserId: string, viewer: AuthUser): Promise<UserProfileStatsResponse> {
     await this.assertFollowTarget(targetUserId);
+    await this.assertProfileAccessible(viewer, targetUserId);
 
     const [followers, following, reviews] = await Promise.all([
       this.userFollowRepository.countFollowers(targetUserId),
@@ -235,6 +242,7 @@ export class UserService {
     pagination: ReturnType<typeof createPaginationMeta>;
   }> {
     await this.assertFollowTarget(targetUserId);
+    await this.assertProfileAccessible(viewer, targetUserId);
 
     const { page, limit, skip } = getPaginationOptions({ page: query.page, limit: query.limit ?? 100 });
     const [followerIds, total] = await Promise.all([
@@ -259,6 +267,7 @@ export class UserService {
     pagination: ReturnType<typeof createPaginationMeta>;
   }> {
     await this.assertFollowTarget(targetUserId);
+    await this.assertProfileAccessible(viewer, targetUserId);
 
     const { page, limit, skip } = getPaginationOptions({ page: query.page, limit: query.limit ?? 100 });
     const [followingIds, total] = await Promise.all([
@@ -276,6 +285,7 @@ export class UserService {
 
   public async listReviews(
     targetUserId: string,
+    viewer: AuthUser,
     query: { page?: number; limit?: number } = {},
   ): Promise<{
     reviews: UserReviewResponse[];
@@ -283,6 +293,7 @@ export class UserService {
     pagination: ReturnType<typeof createPaginationMeta>;
   }> {
     await this.assertFollowTarget(targetUserId);
+    await this.assertProfileAccessible(viewer, targetUserId);
     const { page, limit, skip } = getPaginationOptions({ page: query.page, limit: query.limit ?? 100 });
     const [reviews, total] = await Promise.all([
       this.eventHostReviewRepository.findByHostUserId(targetUserId, limit, skip),
@@ -341,6 +352,7 @@ export class UserService {
     }
 
     const targetUser = await this.assertFollowTarget(targetUserId);
+    await this.assertProfileAccessible(user, targetUserId);
     await this.userFollowRepository.follow(user.id, targetUserId);
 
     void this.dispatchFollowNotification(user, targetUser);
@@ -405,6 +417,7 @@ export class UserService {
 
     await this.assertFollowTarget(targetUserId);
     await this.userBlockRepository.block(user.id, targetUserId);
+    await this.userFollowRepository.removeBetween(user.id, targetUserId);
 
     return { userId: targetUserId, isBlocked: true };
   }
@@ -417,6 +430,19 @@ export class UserService {
     await this.userBlockRepository.unblock(user.id, targetUserId);
 
     return { userId: targetUserId, isBlocked: false };
+  }
+
+  public async listBlockedUsers(
+    user: AuthUser,
+    query: { page?: number; limit?: number },
+  ): Promise<PaginatedResult<BlockedUserResponse>> {
+    const { page, limit, skip } = getPaginationOptions({ page: query.page, limit: query.limit ?? 30 });
+    const result = await this.userBlockRepository.findBlockedUsers(user.id, skip, limit);
+
+    return {
+      data: await Promise.all(result.users.map((blockedUser) => this.toBlockedUserResponse(blockedUser))),
+      meta: createPaginationMeta(page, limit, result.total),
+    };
   }
 
   public async getBlockedIds(userId: string): Promise<string[]> {
@@ -525,6 +551,30 @@ export class UserService {
     return targetUser;
   }
 
+  private async getBlockRelationship(viewerId: string, targetUserId: string): Promise<{
+    viewerHasBlockedTarget: boolean;
+    targetHasBlockedViewer: boolean;
+  }> {
+    const [viewerHasBlockedTarget, targetHasBlockedViewer] = await Promise.all([
+      this.userBlockRepository.isBlocked(viewerId, targetUserId),
+      this.userBlockRepository.isBlocked(targetUserId, viewerId),
+    ]);
+
+    return { viewerHasBlockedTarget, targetHasBlockedViewer };
+  }
+
+  private async assertProfileAccessible(viewer: AuthUser, targetUserId: string): Promise<void> {
+    if (viewer.id === targetUserId) {
+      return;
+    }
+
+    const relationship = await this.getBlockRelationship(viewer.id, targetUserId);
+
+    if (relationship.viewerHasBlockedTarget || relationship.targetHasBlockedViewer) {
+      throw new AppError("Profile unavailable", httpStatus.FORBIDDEN);
+    }
+  }
+
   private async toSuggestedUserResponse(user: IUser, isFollowing: boolean): Promise<SuggestedUserResponse> {
     const avatarUrl = user.avatarKey ? (await this.storageService.createDownloadUrl(user.avatarKey)).url : null;
 
@@ -567,16 +617,55 @@ export class UserService {
     };
   }
 
+  private async toBlockedUserResponse(
+    user: Pick<IUser, "_id" | "name" | "username" | "avatarKey"> & { blockedAt: Date },
+  ): Promise<BlockedUserResponse> {
+    const avatarUrl = user.avatarKey
+      ? await this.storageService.createDownloadUrl(user.avatarKey).then((download) => download.url).catch(() => null)
+      : null;
+
+    return {
+      id: user._id.toString(),
+      name: user.name,
+      username: user.username,
+      avatarKey: user.avatarKey ?? null,
+      avatarUrl,
+      blockedAt: user.blockedAt,
+    };
+  }
+
   private async toUserResponse(user: IUser, viewer?: AuthUser): Promise<UserResponse> {
     const userId = user._id.toString();
-    const [avatarUrl, isFollowing] = await Promise.all([
+    const [avatarUrl, relationship] = await Promise.all([
       user.avatarKey
         ? this.storageService.createDownloadUrl(user.avatarKey).then((download) => download.url).catch(() => null)
         : Promise.resolve(null),
       viewer && viewer.id !== userId
-        ? this.userFollowRepository.isFollowing(viewer.id, userId)
-        : Promise.resolve(false),
+        ? this.getBlockRelationship(viewer.id, userId)
+        : Promise.resolve({ viewerHasBlockedTarget: false, targetHasBlockedViewer: false }),
     ]);
+    const isBlockedProfile = relationship.viewerHasBlockedTarget || relationship.targetHasBlockedViewer;
+
+    if (isBlockedProfile) {
+      return {
+        id: userId,
+        name: user.name,
+        username: user.username,
+        avatarKey: user.avatarKey ?? null,
+        avatarUrl,
+        profileAccess: "blocked",
+        viewerHasBlockedTarget: relationship.viewerHasBlockedTarget,
+        targetHasBlockedViewer: relationship.targetHasBlockedViewer,
+        blockedTitle: relationship.viewerHasBlockedTarget ? "You blocked this account" : "This account isn't available",
+        blockedDescription: relationship.viewerHasBlockedTarget
+          ? "Unblock to view this profile, posts, and interact again."
+          : "You can't view this profile or interact with this account.",
+      };
+    }
+
+    const isFollowing = viewer && viewer.id !== userId
+      ? await this.userFollowRepository.isFollowing(viewer.id, userId)
+      : false;
 
     return {
       id: userId,
@@ -587,6 +676,7 @@ export class UserService {
       avatarKey: user.avatarKey ?? null,
       avatarUrl,
       bio: user.bio ?? null,
+      profileAccess: "open",
       ...(viewer && viewer.id !== userId ? { isFollowing } : {}),
     };
   }

@@ -21,6 +21,51 @@ export type CheckoutPaymentStatus = (typeof checkoutPaymentStatuses)[number];
 export const checkoutPayoutStatuses = ["not_ready", "held", "eligible", "transferred", "failed"] as const;
 export type CheckoutPayoutStatus = (typeof checkoutPayoutStatuses)[number];
 
+export type CheckoutTaxStatus =
+  | "calculated_non_zero"
+  | "calculated_zero"
+  | "not_applicable"
+  | "configuration_unavailable_zero_fallback"
+  | "provider_failure_zero_fallback";
+
+export interface CheckoutTaxSnapshot {
+  amount: number;
+  status: CheckoutTaxStatus;
+  provider: "stripe_tax" | "none";
+  calculationId?: string | null;
+  transactionId?: string | null;
+  failureCode?: string | null;
+  failureReason?: string | null;
+  venueSnapshot?: {
+    searchLabel?: string | null;
+    venue?: string | null;
+    address?: string | null;
+    formattedAddress?: string | null;
+    addressLine1?: string | null;
+    neighborhood?: string | null;
+    district?: string | null;
+    city?: string | null;
+    region?: string | null;
+    regionCode?: string | null;
+    postalCode?: string | null;
+    country?: string | null;
+    countryCode?: string | null;
+    latitude?: number | null;
+    longitude?: number | null;
+    mapboxPlaceId?: string | null;
+    locationProvider?: string | null;
+    providerResultType?: string | null;
+  } | null;
+  jurisdictionSummary?: string | null;
+  calculatedAt: Date;
+}
+
+export interface CheckoutPolicySnapshot {
+  termsVersion: string;
+  refundEscrowVersion: string;
+  acceptedAt: Date;
+}
+
 export interface CheckoutOrderLineItem {
   itemType: CheckoutOrderKind;
   itemId?: string | null;
@@ -54,8 +99,11 @@ export interface ICheckoutOrder {
   subtotalAmount: number;
   platformFeeAmount: number;
   taxAmount: number;
+  discountAmount?: number;
   totalAmount: number;
   amountMinor: number;
+  taxSnapshot?: CheckoutTaxSnapshot | null;
+  policySnapshot?: CheckoutPolicySnapshot | null;
   lineItems: CheckoutOrderLineItem[];
   ticketPasses: CheckoutOrderTicketPass[];
   stripePaymentIntentId?: string | null;
@@ -116,7 +164,10 @@ export interface CheckoutOrderResponse {
   subtotalAmount: number;
   platformFeeAmount: number;
   taxAmount: number;
+  discountAmount: number;
   totalAmount: number;
+  taxSnapshot?: CheckoutTaxSnapshot | null;
+  policySnapshot?: CheckoutPolicySnapshot | null;
   lineItems: Array<Omit<CheckoutOrderLineItem, "sellerUserId"> & { sellerUserId?: string | null }>;
   ticketPasses: CheckoutOrderTicketPass[];
   stripePaymentIntentId?: string | null;
@@ -158,11 +209,38 @@ export interface TicketWalletEvent {
     searchLabel?: string | null;
     venue?: string | null;
     address?: string | null;
+    formattedAddress?: string | null;
+    addressLine1?: string | null;
+    neighborhood?: string | null;
+    district?: string | null;
+    city?: string | null;
+    region?: string | null;
+    regionCode?: string | null;
+    postalCode?: string | null;
+    country?: string | null;
+    countryCode?: string | null;
+    latitude?: number | null;
+    longitude?: number | null;
+    mapboxPlaceId?: string | null;
+    locationProvider?: string | null;
+    providerResultType?: string | null;
   } | null;
   status: string;
   cancellationDisplayReason?: string | null;
   host?: TicketWalletEventHost | null;
   publicGoingSummary?: PublicEventGoingSummaryResponse;
+}
+
+export interface CheckoutQuoteResponse {
+  currency: string;
+  subtotalAmount: number;
+  platformFeeAmount: number;
+  taxAmount: number;
+  discountAmount: number;
+  totalAmount: number;
+  taxSnapshot: CheckoutTaxSnapshot;
+  policySnapshot: CheckoutPolicySnapshot;
+  lineItems: CheckoutOrderResponse["lineItems"];
 }
 
 export interface TicketWalletPass {
@@ -188,6 +266,11 @@ export interface TicketWalletItem {
   totalQuantity: number;
   unitAmount: number;
   totalAmount: number;
+  orderSubtotalAmount?: number | null;
+  orderPlatformFeeAmount?: number | null;
+  orderTaxAmount?: number | null;
+  orderDiscountAmount?: number | null;
+  orderTotalAmount?: number | null;
   currency: string;
   paymentStatus: CheckoutPaymentStatus;
   walletStatus: TicketWalletStatus;

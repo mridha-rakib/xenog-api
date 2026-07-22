@@ -14,6 +14,15 @@ export class UserFollowRepository {
     await UserFollowModel.findOneAndDelete({ followerId, followingId });
   }
 
+  public async removeBetween(userId: string, targetUserId: string): Promise<void> {
+    await UserFollowModel.deleteMany({
+      $or: [
+        { followerId: userId, followingId: targetUserId },
+        { followerId: targetUserId, followingId: userId },
+      ],
+    });
+  }
+
   public async isFollowing(followerId: string, followingId: string): Promise<boolean> {
     const relation = await UserFollowModel.exists({ followerId, followingId });
 

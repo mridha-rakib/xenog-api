@@ -145,6 +145,21 @@ export class CheckoutPaymentRepository {
     );
   }
 
+  public async markPaidIfFirst(orderId: string, paidAt = new Date()): Promise<ICheckoutOrder | null> {
+    return CheckoutOrderModel.findOneAndUpdate(
+      { _id: orderId, paymentStatus: { $in: ["requires_payment", "processing"] } },
+      {
+        $set: {
+          paymentStatus: "paid",
+          payoutStatus: "held",
+          paidAt,
+          failureMessage: null,
+        },
+      },
+      { new: true, runValidators: true },
+    );
+  }
+
   public async processRefundForCancelledEvent(orderId: string): Promise<ICheckoutOrder | null> {
     return CheckoutOrderModel.findByIdAndUpdate(
       orderId,

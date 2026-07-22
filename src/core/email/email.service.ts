@@ -17,6 +17,26 @@ interface PasswordResetEmailPayload {
 export class EmailService {
   private transporter: Transporter | null = null;
 
+  public isConfigured(): boolean {
+    return this.canSendEmail();
+  }
+
+  public async sendMail(payload: {
+    to: string;
+    subject: string;
+    text: string;
+    html: string;
+  }): Promise<void> {
+    if (!this.canSendEmail()) {
+      throw new Error("Email provider is not configured.");
+    }
+
+    await this.getTransporter().sendMail({
+      from: env.EMAIL_FROM,
+      ...payload,
+    });
+  }
+
   public async sendVerificationCode(payload: VerificationEmailPayload): Promise<void> {
     if (!this.canSendEmail()) {
       logger.warn(

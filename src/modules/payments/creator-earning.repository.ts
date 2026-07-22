@@ -6,6 +6,7 @@ interface CreateEarningRecord {
   orderId: string;
   eventId?: string | null;
   itemType: "ticket" | "product";
+  lineItemKey?: string | null;
   grossAmount: number;
   platformFeePercent: number;
   platformFeeAmount: number;

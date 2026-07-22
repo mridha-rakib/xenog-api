@@ -532,7 +532,11 @@ function createMomentService(overrides: {
       findFollowingIds: async () => [],
       findMutualFriendIds: async () => overrides.friendUserIds ?? [],
     } as never,
-    { findBlockedIds: async () => overrides.blockedUserIds ?? [] } as never,
+    {
+      findBlockedIds: async () => overrides.blockedUserIds ?? [],
+      isBlocked: async (blockerId: string, blockedId: string) =>
+        blockerId === viewer.id && (overrides.blockedUserIds ?? []).includes(blockedId),
+    } as never,
     {
       countByMomentIds: async () => new Map<string, number>(),
       countByMomentId: async () => 0,

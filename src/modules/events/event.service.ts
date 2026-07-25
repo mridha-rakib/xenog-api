@@ -36,6 +36,7 @@ import { EventWindowRepository } from "../event-windows/event-window.repository.
 import {
   EVENT_MEDIA_LIMITS_BYTES,
   MAX_EVENT_MEDIA_VIDEO_DURATION_SECONDS,
+  eventCategories,
   supportedEventImageContentTypes,
   supportedEventVideoContentTypes,
 } from "./event.interface.js";
@@ -52,6 +53,7 @@ import type {
   CreateEventRewardDto,
   DeleteEventMediaResponse,
   EventFeedQuery,
+  EventCategory,
   EventHostResponse,
   EventJoinRequestStatus,
   EventMapQuery,
@@ -96,6 +98,7 @@ const REWARD_END_DATE_AFTER_TICKET_SALES_END_MESSAGE =
   "Reward end date cannot be after the ticket sales end date.";
 const REWARD_END_TIME_AFTER_TICKET_SALES_END_MESSAGE =
   "Reward end time cannot be after the ticket sales end time.";
+const eventCategorySet = new Set<string>(eventCategories);
 
 type TicketValidationCode =
   | "EVENT_END_REQUIRED_FOR_TICKET_MANAGEMENT"
@@ -385,6 +388,7 @@ export class EventService {
   ): Promise<EventResponse> {
     const existingEvent = await this.getModifiableEventForOwner(user, eventId);
     const normalizedPayload = this.normalizeDraftPayload(payload);
+    this.assertPublishableCategories(this.getCategoryCandidate(existingEvent, normalizedPayload));
     await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
     const scheduleCandidate = this.getEventScheduleCandidate(existingEvent, normalizedPayload);
     this.assertEndAtChangeDoesNotEnterTicketCreationCutoff(existingEvent, normalizedPayload);
@@ -1421,6 +1425,11 @@ export class EventService {
             event.location?.address?.trim() ||
             "Location not specified",
           category: event.categories?.[0] ?? event.category ?? null,
+          categories: event.categories?.length
+            ? event.categories
+            : event.category
+              ? [event.category]
+              : [],
           bannerImageUrl,
           hostName: hostById.get(event.userId.toString())?.name ?? null,
         };
@@ -1989,6 +1998,9 @@ export class EventService {
 
     if (payload.category !== undefined) {
       normalized.category = payload.category ?? null;
+      if (payload.categories === undefined) {
+        normalized.categories = payload.category ? [payload.category] : [];
+      }
     }
 
     if (payload.hashtags !== undefined) {
@@ -1996,7 +2008,7 @@ export class EventService {
     }
 
     if (payload.categories !== undefined) {
-      normalized.categories = [...new Set(payload.categories)];
+      normalized.categories = [...payload.categories];
       normalized.category = normalized.categories[0] ?? null;
     }
 
@@ -2039,6 +2051,40 @@ export class EventService {
     }
 
     return normalized;
+  }
+
+  private getCategoryCandidate(event: IEvent, payload: SaveEventDraftDto): EventCategory[] {
+    if (payload.categories !== undefined) {
+      return payload.categories;
+    }
+
+    if (payload.category !== undefined) {
+      return payload.category ? [payload.category] : [];
+    }
+
+    return event.categories?.length
+      ? event.categories
+      : event.category
+        ? [event.category]
+        : [];
+  }
+
+  private assertPublishableCategories(categories: EventCategory[]): void {
+    if (categories.length === 0) {
+      throw new AppError("Select at least 1 category", httpStatus.BAD_REQUEST);
+    }
+
+    if (categories.length > 3) {
+      throw new AppError("You can select up to 3 categories", httpStatus.BAD_REQUEST);
+    }
+
+    if (categories.some((category) => !eventCategorySet.has(category))) {
+      throw new AppError("Category must be one of the predefined event categories", httpStatus.BAD_REQUEST);
+    }
+
+    if (new Set(categories).size !== categories.length) {
+      throw new AppError("Categories must be unique", httpStatus.BAD_REQUEST);
+    }
   }
 
   private normalizePublishPayload(payload: PublishEventDto): PublishEventDto {

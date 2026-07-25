@@ -62,8 +62,8 @@ const createEvent = (overrides: Record<string, unknown> = {}) => ({
   bannerOriginalImageKey: null,
   bannerImageDisplay: null,
   ageRestriction: "all_ages",
-  category: "Music",
-  categories: ["Music"],
+  category: "Live Music & Concerts",
+  categories: ["Live Music & Concerts"],
   scheduledAt: new Date(now.getTime() + 60 * 60 * 1000),
   endAt: new Date(now.getTime() + 3 * 60 * 60 * 1000),
   location: {

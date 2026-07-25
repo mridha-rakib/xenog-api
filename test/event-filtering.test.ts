@@ -3,6 +3,7 @@ import test from "node:test";
 import { Types } from "mongoose";
 import { EventModel } from "../src/modules/events/event.model.js";
 import { EventRepository } from "../src/modules/events/event.repository.js";
+import { eventCategories } from "../src/modules/events/event.interface.js";
 import { eventValidation } from "../src/modules/events/event.validation.js";
 
 const now = new Date("2026-07-14T12:00:00.000Z");
@@ -15,8 +16,8 @@ const makeEvent = (overrides: Record<string, unknown> = {}) => ({
   name: "Filtered Event",
   ageRestriction: "all_ages",
   hashtags: ["music"],
-  categories: ["Music"],
-  category: "Music",
+  categories: ["Live Music & Concerts"],
+  category: "Live Music & Concerts",
   scheduledAt: new Date("2026-07-14T13:00:00.000Z"),
   endAt: new Date("2026-07-14T15:00:00.000Z"),
   location: {
@@ -103,6 +104,16 @@ test("map validation remains compatible with geo-only requests and accepts new f
     query: { category: "Drinks", latitude: "40", longitude: "-73" },
   });
   assert.equal(invalidCategory.success, false);
+
+  const legacyCategory = eventValidation.mapEvents.safeParse({
+    query: { category: "Food Trucks", latitude: "40", longitude: "-73" },
+  });
+  assert.equal(legacyCategory.success, false);
+
+  for (const category of eventCategories) {
+    assert.equal(eventValidation.mapEvents.safeParse({ query: { category } }).success, true);
+    assert.equal(eventValidation.feedEvents.safeParse({ query: { category } }).success, true);
+  }
 
   const viewport = eventValidation.mapEvents.safeParse({
     query: { north: "45", south: "40", west: "170", east: "-170", limit: "100" },
@@ -312,14 +323,14 @@ test("explicit nearby coordinates take precedence over viewport bounds", async (
   });
 });
 
-test("map category filtering matches categories array or legacy category without bypassing private access", async () => {
+test("map category filtering matches the categories array without bypassing private access", async () => {
   const repository = new EventRepository();
   const userId = new Types.ObjectId().toString();
 
   await withMockedEventFind([], async (captured) => {
     await repository.findPrivateMapEventsForUser(userId, {
       activeSince: new Date("2026-07-01T00:00:00.000Z"),
-      category: "Food Trucks",
+      category: "Markets & Shopping",
       limit: 100,
     });
 
@@ -327,9 +338,9 @@ test("map category filtering matches categories array or legacy category without
     assert.match(queryText, /private/);
     assert.match(queryText, new RegExp(userId));
     assert.match(queryText, /memberUserIds/);
-    assert.match(queryText, /Food Trucks/);
+    assert.match(queryText, /Markets & Shopping/);
     assert.match(queryText, /categories/);
-    assert.match(queryText, /category/);
+    assert.doesNotMatch(queryText, /"category"/);
     assert.match(queryText, /published/);
     assert.match(queryText, /live/);
   });

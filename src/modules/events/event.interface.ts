@@ -47,27 +47,173 @@ export interface EventJoinRequest {
   createdAt: Date;
 }
 
-export const eventCategories = [
-  "Music",
-  "Nightlife",
-  "Shows & Entertainment",
-  "Food & Drinks",
-  "Dining Experiences",
-  "Food Trucks",
-  "Social Meetups",
-  "Social Pop-ups",
-  "Sports & Outdoor",
-  "Games & Leisure",
-  "Learning & Classes",
-  "Markets & Trade",
-  "Street Performances",
-  "Religious & Spiritual",
-  "College Events",
-  "Premium Experiences",
-  "Family & Community",
-  "Other",
+export const eventCategoryMetadata = [
+  {
+    value: "Parties & Celebrations",
+    displayName: "Parties & Celebrations",
+    order: 1,
+    emoji: "🎉",
+    solidColorName: "Hot Pink",
+    hexColor: "#FF1493",
+    purpose: "Bright, high-saturation neon pink. Ideal for birthdays, engagements, and personal celebrations.",
+  },
+  {
+    value: "Nightlife & Clubs",
+    displayName: "Nightlife & Clubs",
+    order: 2,
+    emoji: "🍻",
+    solidColorName: "Deep Purple",
+    hexColor: "#8A2BE2",
+    purpose: "Rich, vibrant violet. No pink undertones. For late-night events, DJ sets, and clubbing.",
+  },
+  {
+    value: "Social Meetups",
+    displayName: "Social Meetups",
+    order: 3,
+    emoji: "💬",
+    solidColorName: "Cyan",
+    hexColor: "#00F0FF",
+    purpose: "Glowing, electric light blue. Perfect for casual hangouts, mixer events, and meeting new people.",
+  },
+  {
+    value: "College & Campus",
+    displayName: "College & Campus",
+    order: 4,
+    emoji: "🎓",
+    solidColorName: "Electric Blue",
+    hexColor: "#1F51FF",
+    purpose: "High-luminance neon blue. Highly distinct from Cyan and Navy, popping brightly against dark backgrounds.",
+  },
+  {
+    value: "Live Music & Concerts",
+    displayName: "Live Music & Concerts",
+    order: 5,
+    emoji: "🎸",
+    solidColorName: "Bright Orange",
+    hexColor: "#FF6B00",
+    purpose: "Vivid, fiery orange. Highly energetic. For live gigs, festivals, and music sessions.",
+  },
+  {
+    value: "Entertainment & Shows",
+    displayName: "Entertainment & Shows",
+    order: 6,
+    emoji: "🎭",
+    solidColorName: "Ruby Red",
+    hexColor: "#E50914",
+    purpose: "High-impact, pure theater-curtain red. For comedy nights, cinema, plays, and performances.",
+  },
+  {
+    value: "Arts & Culture",
+    displayName: "Arts & Culture",
+    order: 7,
+    emoji: "🎨",
+    solidColorName: "Plum / Mauve",
+    hexColor: "#DDA0DD",
+    purpose: "A soft, light orchid-plum. Shifted lighter to differentiate clearly from Deep Purple and Hot Pink.",
+  },
+  {
+    value: "Community & Movements",
+    displayName: "Community & Movements",
+    order: 8,
+    emoji: "✊",
+    solidColorName: "Burgundy",
+    hexColor: "#580F24",
+    purpose: "Dark, warm wine-red. For neighborhood initiatives, social drives, volunteering, and collective action.",
+  },
+  {
+    value: "Food & Drinks",
+    displayName: "Food & Drinks",
+    order: 9,
+    emoji: "🍹",
+    solidColorName: "Golden Yellow",
+    hexColor: "#FFC700",
+    purpose: "Warm, golden amber yellow. Now includes dining experiences, food festivals, wine tastings, and brunches.",
+  },
+  {
+    value: "Markets & Shopping",
+    displayName: "Markets & Shopping",
+    order: 10,
+    emoji: "🛍️",
+    solidColorName: "Coral",
+    hexColor: "#FF7F50",
+    purpose: "Muted, friendly pink-orange pastel. For flea markets, clothing swaps, thrift events, and craft fairs.",
+  },
+  {
+    value: "Sports & Outdoors",
+    displayName: "Sports & Outdoors",
+    order: 11,
+    emoji: "🏃",
+    solidColorName: "Emerald Green",
+    hexColor: "#00A86B",
+    purpose: "Pure, deep grass and turf green. For group hikes, recreational sports, workouts, and outdoor activities.",
+  },
+  {
+    value: "Games & Recreation",
+    displayName: "Games & Recreation",
+    order: 12,
+    emoji: "🎮",
+    solidColorName: "Lime Green",
+    hexColor: "#39FF14",
+    purpose: "Ultra-bright, neon yellow-green. For board game nights, trivia, esports, and arcades. Distinct from Emerald.",
+  },
+  {
+    value: "Workshops & Classes",
+    displayName: "Workshops & Classes",
+    order: 13,
+    emoji: "🧶",
+    solidColorName: "Bronze Brown",
+    hexColor: "#8B5A2B",
+    purpose: "Rich, warm, earthy bronze. For hands-on learning, pottery, cooking classes, and skill-building.",
+  },
+  {
+    value: "Conferences & Talks",
+    displayName: "Conferences & Talks",
+    order: 14,
+    emoji: "🎤",
+    solidColorName: "Slate Gray",
+    hexColor: "#708090",
+    purpose: "Neutral, highly professional metallic gray-blue. For professional panels, guest speakers, seminars, and networking.",
+  },
+  {
+    value: "Family & Gathering",
+    displayName: "Family & Gathering",
+    order: 15,
+    emoji: "🏡",
+    solidColorName: "Mint Green",
+    hexColor: "#AAF0D1",
+    purpose: "Pale, welcoming pastel mint. Highly distinct from deep Emerald and neon Lime. For family-friendly meetups and gatherings.",
+  },
+  {
+    value: "Wellness & Spirituality",
+    displayName: "Wellness & Spirituality",
+    order: 16,
+    emoji: "🧘",
+    solidColorName: "Silver Grey",
+    hexColor: "#C0C0C0",
+    purpose: "A soft, balanced metallic silver-grey. Ensures high visibility on a pure white background while remaining clean and neutral.",
+  },
+  {
+    value: "Travel & Experiences",
+    displayName: "Travel & Experiences",
+    order: 17,
+    emoji: "✈️",
+    solidColorName: "Teal",
+    hexColor: "#008080",
+    purpose: "Rich, saturated blue-green. For day trips, local tours, excursions, and group travel adventures.",
+  },
+  {
+    value: "Pop-Ups & Exclusives",
+    displayName: "Pop-Ups & Exclusives",
+    order: 18,
+    emoji: "✨",
+    solidColorName: "Gold",
+    hexColor: "#D4AF37",
+    purpose: "Sophisticated, metallic champagne-gold. For hype limited-run events, fashion pop-ups, and special-edition collaborations.",
+  },
 ] as const;
-export type EventCategory = (typeof eventCategories)[number];
+export type EventCategoryMetadata = (typeof eventCategoryMetadata)[number];
+export type EventCategory = EventCategoryMetadata["value"];
+export const eventCategories = eventCategoryMetadata.map((category) => category.value) as [EventCategory, ...EventCategory[]];
 
 export interface EventLocation {
   searchLabel?: string | null;
@@ -402,6 +548,7 @@ export interface AdminMapEventResponse {
   longitude: number;
   locationName: string;
   category?: EventCategory | null;
+  categories: EventCategory[];
   bannerImageUrl?: string | null;
   hostName?: string | null;
 }

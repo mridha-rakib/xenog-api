@@ -563,6 +563,22 @@ const eventSchema = new Schema<IEvent>(
   },
 );
 
+eventSchema.pre("validate", function syncPrimaryEventCategory(next) {
+  if ((!this.categories || this.categories.length === 0) && this.category) {
+    this.categories = [this.category];
+  }
+
+  if (this.categories?.length) {
+    this.category = this.categories[0] ?? null;
+  }
+
+  if (this.status !== "draft" && (!this.categories || this.categories.length === 0)) {
+    this.invalidate("categories", "Select at least 1 category");
+  }
+
+  next();
+});
+
 eventSchema.index({ userId: 1, status: 1, createdAt: -1 });
 eventSchema.index({ userId: 1, status: 1, scheduledAt: 1, endAt: 1, publishedAt: -1, _id: -1 });
 eventSchema.index({ userId: 1, privacy: 1, status: 1, scheduledAt: 1, endAt: 1, publishedAt: -1, _id: -1 });

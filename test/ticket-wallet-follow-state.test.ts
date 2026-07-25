@@ -27,7 +27,7 @@ const makeEvent = (name: string) => {
       bannerImageKey: "events/banner.jpg",
       bannerOriginalImageKey: "events/banner-original.jpg",
       category: "Food & Drinks",
-      categories: ["Food & Drinks", "Food Trucks", "Social Meetups"],
+      categories: ["Food & Drinks", "Markets & Shopping", "Social Meetups"],
       scheduledAt: now,
       endAt: new Date("2026-07-09T12:00:00.000Z"),
       location: { venue: "Test Venue", address: "Test Address" },
@@ -204,7 +204,7 @@ test("owned wallet event includes canonical categories and public going summary 
   });
   const [walletItem] = await fixture.service.getMyTicketWallet({ id: viewerId.toString() } as never);
 
-  assert.deepEqual(walletItem?.event.categories, ["Food & Drinks", "Food Trucks", "Social Meetups"]);
+  assert.deepEqual(walletItem?.event.categories, ["Food & Drinks", "Markets & Shopping", "Social Meetups"]);
   assert.equal(walletItem?.event.category, "Food & Drinks");
   assert.equal(walletItem?.event.publicGoingSummary?.going, 2);
   assert.deepEqual(walletItem?.event.publicGoingSummary?.avatars, [{
@@ -245,7 +245,7 @@ test("shared-ticket wallet event uses active recipient in public going summary",
   });
   const [walletItem] = await fixture.service.getMyTicketWallet({ id: viewerId.toString() } as never);
 
-  assert.deepEqual(walletItem?.event.categories, ["Food & Drinks", "Food Trucks", "Social Meetups"]);
+  assert.deepEqual(walletItem?.event.categories, ["Food & Drinks", "Markets & Shopping", "Social Meetups"]);
   assert.equal(walletItem?.event.publicGoingSummary?.going, 1);
   assert.deepEqual(walletItem?.event.publicGoingSummary?.avatars, [{
     userId: viewerId.toString(),

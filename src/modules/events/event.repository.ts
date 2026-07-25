@@ -397,7 +397,7 @@ const addCategoryFilter = (filters: FilterQuery<IEvent>[], category?: EventCateg
     return;
   }
 
-  filters.push({ $or: [{ categories: category }, { category }] });
+  filters.push({ categories: category });
 };
 
 const filterAndLimitEvents = (
@@ -593,9 +593,7 @@ export class EventRepository {
       filters.push({ userId: { $in: options.hostUserIds } });
     }
 
-    if (options.category) {
-      filters.push({ $or: [{ categories: options.category }, { category: options.category }] });
-    }
+    addCategoryFilter(filters, options.category);
 
     addSharedEventFilters(filters, options);
 
@@ -664,9 +662,7 @@ export class EventRepository {
       filters.push({ userId: { $in: options.hostUserIds } });
     }
 
-    if (options.category) {
-      filters.push({ $or: [{ categories: options.category }, { category: options.category }] });
-    }
+    addCategoryFilter(filters, options.category);
 
     addSharedEventFilters(filters, options);
 
@@ -1462,7 +1458,12 @@ export class EventRepository {
     if (payload.bannerImageDisplay !== undefined) update.bannerImageDisplay = payload.bannerImageDisplay;
     if (payload.ageRestriction !== undefined) update.ageRestriction = payload.ageRestriction;
     if (payload.hashtags !== undefined) update.hashtags = payload.hashtags;
-    if (payload.category !== undefined) update.category = payload.category;
+    if (payload.category !== undefined) {
+      update.category = payload.category;
+      if (payload.categories === undefined) {
+        update.categories = payload.category ? [payload.category] : [];
+      }
+    }
     if (payload.categories !== undefined) {
       update.categories = payload.categories;
       update.category = payload.categories[0] ?? null;

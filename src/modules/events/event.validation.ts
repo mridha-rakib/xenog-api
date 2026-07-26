@@ -18,6 +18,7 @@ const ticketId = z.string().trim().min(1, "Ticket ID is required").max(80, "Tick
 const eventMediaId = z.string().trim().min(1, "Media ID is required").max(80, "Media ID cannot exceed 80 characters");
 const TICKET_SALES_END_DATE_AFTER_EVENT_END_MESSAGE = "Ticket sales end date must be before the event end date.";
 const TICKET_SALES_END_TIME_NOT_BEFORE_EVENT_END_MESSAGE = "Ticket sales end time must be before the event end time.";
+const MAX_EVENT_FILTER_RADIUS_KM = 200 * 1.609344;
 
 const optionalText = (label: string, maxLength: number) =>
   z
@@ -481,7 +482,7 @@ const mapQuery = z
     category: eventCategory.optional(),
     latitude: queryNumber(z.number().min(-90).max(90)),
     longitude: queryNumber(z.number().min(-180).max(180)),
-    radiusKm: queryNumber(z.number().min(1).max(250)),
+    radiusKm: queryNumber(z.number().finite().min(1).max(MAX_EVENT_FILTER_RADIUS_KM)),
     north: queryNumber(z.number().min(-90).max(90)),
     south: queryNumber(z.number().min(-90).max(90)),
     east: queryNumber(z.number().min(-180).max(180)),
@@ -521,7 +522,7 @@ const feedQuery = z
     category: eventCategory.optional(),
     latitude: queryNumber(z.number().min(-90).max(90)),
     longitude: queryNumber(z.number().min(-180).max(180)),
-    radiusKm: queryNumber(z.number().min(1).max(500)),
+    radiusKm: queryNumber(z.number().finite().min(1).max(MAX_EVENT_FILTER_RADIUS_KM)),
     limit: queryNumber(z.number().int().min(1).max(200)),
     ageRestriction: z.enum(eventAgeRestrictions).optional(),
     priceFilter: z.enum(eventPriceFilters).optional(),

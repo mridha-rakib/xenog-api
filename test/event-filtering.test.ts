@@ -144,6 +144,27 @@ test("map validation remains compatible with geo-only requests and accepts new f
   assert.equal(mapAudience.success, false);
 });
 
+test("feed and map validation share the approved event location radius range", () => {
+  const oneMileKm = 1.609344;
+  const maxRadiusKm = 321.8688;
+  const aboveMaxRadiusKm = 321.868801;
+
+  for (const query of [
+    { latitude: "23.7806", longitude: "90.4074", radiusKm: String(oneMileKm) },
+    { latitude: "23.7806", longitude: "90.4074", radiusKm: String(maxRadiusKm) },
+  ]) {
+    assert.equal(eventValidation.feedEvents.safeParse({ query }).success, true);
+    assert.equal(eventValidation.mapEvents.safeParse({ query }).success, true);
+  }
+
+  for (const radiusKm of ["0", "-1", "not-a-number", String(aboveMaxRadiusKm)]) {
+    const query = { latitude: "23.7806", longitude: "90.4074", radiusKm };
+
+    assert.equal(eventValidation.feedEvents.safeParse({ query }).success, false);
+    assert.equal(eventValidation.mapEvents.safeParse({ query }).success, false);
+  }
+});
+
 test("date and late-night filters build an inclusive-start exclusive-end UTC range", async () => {
   const repository = new EventRepository();
 
@@ -181,6 +202,103 @@ test("map filtering applies exact radius after bounding-box candidate query", as
     });
 
     assert.deepEqual(events.map((event) => event._id.toString()), [inside._id.toString()]);
+  });
+});
+
+test("feed location-only filtering keeps upcoming and live events without optional constraints", async () => {
+  const repository = new EventRepository();
+  const upcomingPaid = makeEvent({
+    _id: new Types.ObjectId(),
+    status: "published",
+    scheduledAt: new Date("2099-07-14T16:00:00.000Z"),
+    endAt: new Date("2099-07-14T18:00:00.000Z"),
+    location: { latitude: 40, longitude: -73.01 },
+    tickets: [{ id: "paid", name: "Paid", type: "pay", price: 25, capacity: 10, availableCount: 10 }],
+  });
+  const liveFree = makeEvent({
+    _id: new Types.ObjectId(),
+    status: "live",
+    scheduledAt: new Date("2026-07-14T10:00:00.000Z"),
+    endAt: new Date("2099-07-14T14:00:00.000Z"),
+    location: { latitude: 40.01, longitude: -73.01 },
+    tickets: [{ id: "free", name: "Free", type: "free", price: 0, capacity: 10, availableCount: 10 }],
+  });
+  const outsideRadius = makeEvent({
+    _id: new Types.ObjectId(),
+    location: { latitude: 40, longitude: -73.5 },
+  });
+
+  await withMockedEventFind([upcomingPaid, liveFree, outsideRadius], async (captured) => {
+    const events = await repository.findPublicFeedEvents([], {
+      activeOnly: true,
+      latitude: 40,
+      longitude: -73,
+      radiusKm: 5,
+    });
+
+    assert.deepEqual(events.map((event) => event._id.toString()), [
+      upcomingPaid._id.toString(),
+      liveFree._id.toString(),
+    ]);
+
+    const queryText = JSON.stringify(captured.query);
+    assert.match(queryText, /published/);
+    assert.match(queryText, /live/);
+    assert.match(queryText, /public/);
+    assert.match(queryText, /locked/);
+    assert.match(queryText, /endAt/);
+    assert.match(queryText, /location.latitude/);
+    assert.doesNotMatch(queryText, /tickets/);
+    assert.doesNotMatch(queryText, /ageRestriction/);
+    assert.doesNotMatch(queryText, /hashtags/);
+    assert.doesNotMatch(queryText, /\$expr/);
+  });
+});
+
+test("map location-only filtering keeps upcoming and live events without optional constraints", async () => {
+  const repository = new EventRepository();
+  const upcomingPaid = makeEvent({
+    _id: new Types.ObjectId(),
+    status: "published",
+    scheduledAt: new Date("2099-07-14T16:00:00.000Z"),
+    endAt: new Date("2099-07-14T18:00:00.000Z"),
+    location: { latitude: 40, longitude: -73.01 },
+    tickets: [{ id: "paid", name: "Paid", type: "pay", price: 25, capacity: 10, availableCount: 10 }],
+  });
+  const liveFree = makeEvent({
+    _id: new Types.ObjectId(),
+    status: "live",
+    scheduledAt: new Date("2026-07-14T10:00:00.000Z"),
+    endAt: new Date("2099-07-14T14:00:00.000Z"),
+    location: { latitude: 40.01, longitude: -73.01 },
+    tickets: [{ id: "free", name: "Free", type: "free", price: 0, capacity: 10, availableCount: 10 }],
+  });
+
+  await withMockedEventFind([upcomingPaid, liveFree], async (captured) => {
+    const events = await repository.findMapEvents({
+      activeSince: new Date("2026-07-01T00:00:00.000Z"),
+      latitude: 40,
+      longitude: -73,
+      radiusKm: 5,
+      limit: 100,
+    });
+
+    assert.deepEqual(events.map((event) => event._id.toString()), [
+      upcomingPaid._id.toString(),
+      liveFree._id.toString(),
+    ]);
+
+    const queryText = JSON.stringify(captured.query);
+    assert.match(queryText, /published/);
+    assert.match(queryText, /live/);
+    assert.match(queryText, /public/);
+    assert.match(queryText, /locked/);
+    assert.match(queryText, /endAt/);
+    assert.match(queryText, /location.latitude/);
+    assert.doesNotMatch(queryText, /tickets/);
+    assert.doesNotMatch(queryText, /ageRestriction/);
+    assert.doesNotMatch(queryText, /hashtags/);
+    assert.doesNotMatch(queryText, /\$expr/);
   });
 });
 

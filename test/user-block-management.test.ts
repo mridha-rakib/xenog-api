@@ -285,6 +285,20 @@ test("blocking removes follow relationships in both directions and unblock does 
   assert.deepEqual(follows, []);
 });
 
+test("open profile response includes explicit unblocked relationship booleans", async () => {
+  const viewerId = new Types.ObjectId().toString();
+  const targetId = new Types.ObjectId().toString();
+  const { service } = createService({
+    users: [createUser(viewerId, "Viewer"), createUser(targetId, "Target User")],
+  });
+
+  const response = await service.getById(targetId, createAuthUser(viewerId));
+
+  assert.equal(response.profileAccess, "open");
+  assert.equal(response.viewerHasBlockedTarget, false);
+  assert.equal(response.targetHasBlockedViewer, false);
+});
+
 test("blocked profile response is minimal when viewer blocked target", async () => {
   const viewerId = new Types.ObjectId().toString();
   const targetId = new Types.ObjectId().toString();

@@ -677,6 +677,8 @@ export class UserService {
       avatarUrl,
       bio: user.bio ?? null,
       profileAccess: "open",
+      viewerHasBlockedTarget: relationship.viewerHasBlockedTarget,
+      targetHasBlockedViewer: relationship.targetHasBlockedViewer,
       ...(viewer && viewer.id !== userId ? { isFollowing } : {}),
     };
   }

@@ -121,6 +121,13 @@ test("limited 100-ticket check-in validation", async (t) => {
       name: id === recipientId.toString() ? "Shared Recipient" : "Ticket Owner",
     }),
   };
+  const ticketCancellationRepository = {
+    existsByPass: async () => false,
+  };
+  const ticketPassClaimRepository = {
+    claimForCheckIn: async () => ({ claimed: true }),
+    abortCheckIn: async () => undefined,
+  };
   const service = new CheckoutPaymentService(
     repository as never,
     eventRepository as never,
@@ -131,6 +138,14 @@ test("limited 100-ticket check-in validation", async (t) => {
     ticketShareRepository as never,
     ticketUsageRepository as never,
     {} as never,
+    undefined as never,
+    undefined as never,
+    undefined as never,
+    ticketCancellationRepository as never,
+    undefined as never,
+    undefined as never,
+    undefined as never,
+    ticketPassClaimRepository as never,
   );
   const host = {
     id: hostId.toString(),

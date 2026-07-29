@@ -48,6 +48,7 @@ test("five purchased tickets receive five different check-in codes", () => {
 
 type ServiceOverrides = {
   concurrentCreate?: boolean;
+  passClaimResult?: { claimed: true } | { claimed: false; reason: "cancelled" | "used" | "busy" };
   eventStatus?: string;
   hostUserId?: string;
   paymentStatus?: string;
@@ -98,6 +99,13 @@ const createCheckInService = async (overrides: ServiceOverrides = {}) => {
       return usage;
     },
   };
+  const ticketCancellationRepository = {
+    existsByPass: async () => false,
+  };
+  const ticketPassClaimRepository = {
+    claimForCheckIn: async () => overrides.passClaimResult ?? { claimed: true },
+    abortCheckIn: async () => undefined,
+  };
   const userRepository = {
     findById: async (id: string) => ({ _id: new Types.ObjectId(id), name: id === recipientId.toString() ? "Recipient" : "Owner" }),
   };
@@ -111,6 +119,14 @@ const createCheckInService = async (overrides: ServiceOverrides = {}) => {
     ticketShareRepository as never,
     ticketUsageRepository as never,
     {} as never,
+    undefined as never,
+    undefined as never,
+    undefined as never,
+    ticketCancellationRepository as never,
+    undefined as never,
+    undefined as never,
+    undefined as never,
+    ticketPassClaimRepository as never,
   );
   const host = {
     id: hostId.toString(),
@@ -146,6 +162,17 @@ test("QR and manual code check-in create the existing TicketUsage identity", asy
   assert.equal(usage?.ticketId, ticketId);
   assert.equal(usage?.ticketIndex, 1);
   assert.equal(usage?.holderUserId, ownerId.toString());
+});
+
+test("cancelled pass claim rejects check-in before TicketUsage creation", async () => {
+  const fixture = await createCheckInService({ passClaimResult: { claimed: false, reason: "cancelled" } });
+
+  await assert.rejects(
+    () => fixture.service.scanTicket(fixture.host as never, { checkInCode: fixture.checkInCode }),
+    { message: "This ticket has been cancelled or refunded", statusCode: 409 },
+  );
+  assert.equal(fixture.getUsage(), null);
+  assert.equal(fixture.getSuccessfulUsageCreates(), 0);
 });
 
 test("the same code cannot be checked in twice", async () => {

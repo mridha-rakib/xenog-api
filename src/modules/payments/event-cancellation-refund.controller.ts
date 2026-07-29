@@ -1,13 +1,14 @@
 import type { Request, Response } from "express";
 import { ApiResponse } from "../../core/http/api-response.js";
 import type { AuthUser } from "../auth/auth.interface.js";
+import type { ListEventCancellationBatchesQuery } from "./event-cancellation-refund.interface.js";
 import { EventCancellationRefundService } from "./event-cancellation-refund.service.js";
 
 export class EventCancellationRefundController {
   public constructor(private readonly service = new EventCancellationRefundService()) {}
 
-  public listBatches = async (_req: Request, res: Response): Promise<void> => {
-    const batches = await this.service.listBatches();
+  public listBatches = async (req: Request, res: Response): Promise<void> => {
+    const batches = await this.service.listBatches(req.query as ListEventCancellationBatchesQuery);
 
     ApiResponse.success(res, {
       message: "Refund batches retrieved",

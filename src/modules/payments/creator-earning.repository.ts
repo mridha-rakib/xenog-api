@@ -15,6 +15,10 @@ interface CreateEarningRecord {
   eligibleAt?: Date | null;
 }
 
+export type CreatorEarningAdjustmentResult = "completed" | "not_found" | "withdrawn";
+
+const round2 = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
+
 export class CreatorEarningRepository {
   public async create(payload: CreateEarningRecord): Promise<ICreatorEarning> {
     return CreatorEarningModel.create(payload);
@@ -108,6 +112,72 @@ export class CreatorEarningRepository {
       { eventId, status: { $in: ["held", "eligible"] } },
       { $set: { status: "refunded" } },
     );
+  }
+
+  public async adjustTicketCancellationAmount(
+    orderId: string,
+    lineItemKey: string,
+    grossRefundAmount: number,
+  ): Promise<CreatorEarningAdjustmentResult> {
+    const refundGross = round2(grossRefundAmount);
+
+    if (refundGross <= 0) {
+      return "completed";
+    }
+
+    const earning = await CreatorEarningModel.findOne({ orderId, lineItemKey });
+
+    if (!earning) {
+      return "not_found";
+    }
+
+    if (earning.status === "withdrawn") {
+      return "withdrawn";
+    }
+
+    if (earning.status === "refunded") {
+      return "completed";
+    }
+
+    if (refundGross >= earning.grossAmount) {
+      const updated = await CreatorEarningModel.findOneAndUpdate(
+        { _id: earning._id, status: { $in: ["held", "eligible"] }, grossAmount: earning.grossAmount },
+        { $set: { status: "refunded" } },
+      );
+
+      if (!updated) {
+        throw new Error("Creator earning is no longer adjustable");
+      }
+
+      return "completed";
+    }
+
+    const ratio = refundGross / earning.grossAmount;
+    const refundPlatformFee = round2(earning.platformFeeAmount * ratio);
+    const refundNet = round2(earning.netAmount * ratio);
+    const updated = await CreatorEarningModel.findOneAndUpdate(
+      {
+        _id: earning._id,
+        status: { $in: ["held", "eligible"] },
+        grossAmount: earning.grossAmount,
+        platformFeeAmount: earning.platformFeeAmount,
+        netAmount: earning.netAmount,
+      },
+      {
+        $set: {
+          grossAmount: round2(earning.grossAmount - refundGross),
+          platformFeeAmount: round2(earning.platformFeeAmount - refundPlatformFee),
+          netAmount: round2(earning.netAmount - refundNet),
+        },
+      },
+      { runValidators: true },
+    );
+
+    if (!updated) {
+      throw new Error("Creator earning is no longer adjustable");
+    }
+
+    return "completed";
   }
 
   public async setEligibleAtByEventId(eventId: string, eligibleAt: Date): Promise<void> {

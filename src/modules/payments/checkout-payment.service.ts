@@ -51,6 +51,14 @@ import { TicketUsageRepository } from "./ticket-usage.repository.js";
 import { EventCancellationRefundRepository } from "./event-cancellation-refund.repository.js";
 import { EventCancellationRefundService } from "./event-cancellation-refund.service.js";
 import type { IEventCancellationRefund } from "./event-cancellation-refund.interface.js";
+import { TicketCancellationRepository } from "./ticket-cancellation.repository.js";
+import { TicketCancellationService } from "./ticket-cancellation.service.js";
+import { TicketPassClaimRepository } from "./ticket-pass-claim.repository.js";
+import type {
+  ITicketCancellation,
+  TicketCancellationEligibilityResponse,
+  TicketCancellationResponse,
+} from "./ticket-cancellation.interface.js";
 import { createCheckoutTicketPasses, generateTicketCheckInCode } from "./ticket-check-in-code.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
 import { realtimeGateway } from "../realtime/realtime.gateway.js";
@@ -85,6 +93,7 @@ const CURRENT_CHECKOUT_POLICY = {
   termsVersion: "terms-2026-07-22",
   refundEscrowVersion: "refund-escrow-72h-2026-07-22",
 } as const;
+const TICKET_CANCELLATION_CUTOFF_MS = 3 * 60 * 60 * 1000;
 
 const roundCurrency = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
@@ -106,15 +115,31 @@ export class CheckoutPaymentService {
     private readonly storageService = new StorageService(),
     private readonly eventCancellationRefundRepository = new EventCancellationRefundRepository(),
     private readonly eventCancellationRefundService = new EventCancellationRefundService(),
+    private readonly ticketCancellationRepository = new TicketCancellationRepository(),
+    private readonly ticketCancellationService = new TicketCancellationService(),
     private readonly taxService = new CheckoutTaxService(() => this.getStripe()),
     private readonly invoiceService = new CheckoutInvoiceService(),
+    private readonly ticketPassClaimRepository = new TicketPassClaimRepository(),
   ) {}
 
   public async getMyTicketPurchaseCounts(
     user: AuthUser,
     eventId: string,
   ): Promise<Record<string, number>> {
-    return this.repository.getPurchasedTicketCountsByEvent(user.id, eventId);
+    const [counts, cancellations] = await Promise.all([
+      this.repository.getPurchasedTicketCountsByEvent(user.id, eventId),
+      this.ticketCancellationRepository.findByEventId(eventId),
+    ]);
+
+    for (const cancellation of cancellations) {
+      if (cancellation.buyerUserId.toString() !== user.id) {
+        continue;
+      }
+
+      counts[cancellation.ticketId] = Math.max(0, (counts[cancellation.ticketId] ?? 0) - 1);
+    }
+
+    return counts;
   }
 
   public async getEventTicketStats(
@@ -127,11 +152,15 @@ export class CheckoutPaymentService {
       throw new AppError("Event not found", httpStatus.NOT_FOUND);
     }
 
-    const sales = await this.repository.getEventTicketSales(eventId);
+    const [sales, cancellations] = await Promise.all([
+      this.repository.getEventTicketSales(eventId),
+      this.ticketCancellationRepository.findByEventId(eventId),
+    ]);
     const stats: Record<string, { sold: number; available: number; capacity: number }> = {};
 
     for (const ticket of event.tickets) {
-      const sold = sales[ticket.id] ?? 0;
+      const cancelled = cancellations.filter((item) => item.ticketId === ticket.id).length;
+      const sold = Math.max(0, (sales[ticket.id] ?? 0) - cancelled);
       stats[ticket.id] = {
         sold,
         available: Math.max(0, ticket.availableCount ?? ticket.capacity - sold),
@@ -165,9 +194,10 @@ export class CheckoutPaymentService {
     });
     const orders = await this.repository.findTicketStatOrdersByEventId(eventId);
     const orderIds = orders.map((order) => order._id.toString());
-    const [activeShares, usages] = await Promise.all([
+    const [activeShares, usages, cancellations] = await Promise.all([
       this.ticketShareRepository.findActiveByEventId(eventId),
       this.ticketUsageRepository.findByEventIdsAndOrderIds([eventId], orderIds),
+      this.ticketCancellationRepository.findByEventId(eventId),
     ]);
     const activeShareByTicketPass = new Map(
       activeShares.map((share) => [
@@ -179,6 +209,17 @@ export class CheckoutPaymentService {
       usages.map((usage) => [
         this.getTicketPassKey(usage.eventId, usage.ticketId, usage.orderId.toString(), usage.ticketIndex),
         usage,
+      ]),
+    );
+    const cancellationByTicketPass = new Map(
+      cancellations.map((cancellation) => [
+        this.getTicketPassKey(
+          cancellation.eventId.toString(),
+          cancellation.ticketId,
+          cancellation.orderId.toString(),
+          cancellation.ticketIndex,
+        ),
+        cancellation,
       ]),
     );
     const userIds = new Set<string>();
@@ -229,6 +270,7 @@ export class CheckoutPaymentService {
           ticketPass.ticketIndex,
         );
         const usage = usageByTicketPass.get(key) ?? null;
+        const cancellation = cancellationByTicketPass.get(key) ?? null;
         const activeShare = activeShareByTicketPass.get(key) ?? null;
         const holderUserId =
           usage?.holderUserId.toString() ??
@@ -236,7 +278,7 @@ export class CheckoutPaymentService {
           order.userId.toString();
         const attendee = userById.get(holderUserId) ?? null;
         const ticket = event.tickets.find((item) => item.id === ticketPass.ticketId);
-        const status = this.getTicketStatItemStatus(order, usage, eventEnded, Boolean(filter));
+        const status = this.getTicketStatItemStatus(order, usage, eventEnded, Boolean(filter), Boolean(cancellation));
 
         if (!this.shouldIncludeTicketStatItem(status, filter)) {
           continue;
@@ -276,9 +318,10 @@ export class CheckoutPaymentService {
     const orders = (await this.repository.findTicketStatOrdersByEventId(eventId))
       .filter((order) => order.paymentStatus === "paid" || order.paymentStatus === "refunded");
     const orderIds = orders.map((order) => order._id.toString());
-    const [activeShares, usages] = await Promise.all([
+    const [activeShares, usages, cancellations] = await Promise.all([
       this.ticketShareRepository.findActiveByEventId(eventId),
       this.ticketUsageRepository.findByEventIdsAndOrderIds([eventId], orderIds),
+      this.ticketCancellationRepository.findByEventId(eventId),
     ]);
     const activeShareByTicketPass = new Map(
       activeShares.map((share) => [
@@ -290,6 +333,17 @@ export class CheckoutPaymentService {
       usages.map((usage) => [
         this.getTicketPassKey(usage.eventId, usage.ticketId, usage.orderId.toString(), usage.ticketIndex),
         usage,
+      ]),
+    );
+    const cancellationByTicketPass = new Map(
+      cancellations.map((cancellation) => [
+        this.getTicketPassKey(
+          cancellation.eventId.toString(),
+          cancellation.ticketId,
+          cancellation.orderId.toString(),
+          cancellation.ticketIndex,
+        ),
+        cancellation,
       ]),
     );
     const eventEnded = event.status === "completed"
@@ -331,6 +385,11 @@ export class CheckoutPaymentService {
         );
 
         if (isCanceled) {
+          canceled += 1;
+          continue;
+        }
+
+        if (cancellationByTicketPass.has(key)) {
           canceled += 1;
           continue;
         }
@@ -493,12 +552,14 @@ export class CheckoutPaymentService {
   }
 
   public async getMyTicketWallet(user: AuthUser): Promise<TicketWalletItem[]> {
-    const [orders, ownerShares, receivedShares] = await Promise.all([
+    const [orders, ownerShares, receivedShares, receivedCancelledShares] = await Promise.all([
       this.repository.findTicketWalletOrdersByUserId(user.id),
       this.ticketShareRepository.findActiveByOwnerId(user.id),
       this.ticketShareRepository.findActiveByRecipientId(user.id),
+      this.ticketShareRepository.findCancelledByRecipientId(user.id),
     ]);
-    const sharedOrderIds = [...new Set(receivedShares.map((share) => share.orderId.toString()))];
+    const allReceivedShares = [...receivedShares, ...receivedCancelledShares];
+    const sharedOrderIds = [...new Set(allReceivedShares.map((share) => share.orderId.toString()))];
     const sharedOrders = await this.repository.findByIds(sharedOrderIds);
     const orderById = new Map(
       [...orders, ...sharedOrders].map((order) => [order._id.toString(), order]),
@@ -512,7 +573,7 @@ export class CheckoutPaymentService {
               .map((item) => item.eventId as string),
           ),
           ...ownerShares.map((share) => share.eventId),
-          ...receivedShares.map((share) => share.eventId),
+          ...allReceivedShares.map((share) => share.eventId),
         ],
       ),
     ];
@@ -525,14 +586,15 @@ export class CheckoutPaymentService {
       ...new Set([
         ...orders.map((order) => order._id.toString()),
         ...ownerShares.map((share) => share.orderId.toString()),
-        ...receivedShares.map((share) => share.orderId.toString()),
+        ...allReceivedShares.map((share) => share.orderId.toString()),
       ]),
     ];
-    const [events, usages, followingIds, refundItems] = await Promise.all([
+    const [events, usages, followingIds, refundItems, ticketCancellations] = await Promise.all([
       this.eventRepository.findManyByIds(eventIds),
       this.ticketUsageRepository.findByEventIdsAndOrderIds(eventIds, orderIds),
       this.userFollowRepository.findFollowingIds(user.id),
       this.eventCancellationRefundRepository.findRefundItemsByOrderIds(orderIds),
+      this.ticketCancellationRepository.findByOrderIds(orderIds),
     ]);
     const eventById = new Map(events.map((event) => [event._id.toString(), event]));
     const publicGoingSummaries = await this.getPublicEventGoingSummaries(
@@ -543,7 +605,7 @@ export class CheckoutPaymentService {
       ...new Set([
         ...events.map((event) => event.userId.toString()),
         ...ownerShares.map((share) => share.recipientUserId.toString()),
-        ...receivedShares.map((share) => share.ownerUserId.toString()),
+        ...allReceivedShares.map((share) => share.ownerUserId.toString()),
       ]),
     ];
     const users = userIds.length > 0 ? await this.userRepository.findMany({ _id: { $in: userIds } }, 0, userIds.length) : [];
@@ -558,6 +620,17 @@ export class CheckoutPaymentService {
       usages.map((usage) => [
         this.getTicketPassKey(usage.eventId, usage.ticketId, usage.orderId.toString(), usage.ticketIndex),
         usage,
+      ]),
+    );
+    const cancellationByTicketPass = new Map(
+      ticketCancellations.map((cancellation) => [
+        this.getTicketPassKey(
+          cancellation.eventId.toString(),
+          cancellation.ticketId,
+          cancellation.orderId.toString(),
+          cancellation.ticketIndex,
+        ),
+        cancellation,
       ]),
     );
     const refundByOrderId = new Map(refundItems.map((refund) => [refund.checkoutOrderId.toString(), refund]));
@@ -590,14 +663,16 @@ export class CheckoutPaymentService {
           const activeShare = shareByTicketPass.get(ticketPassKey) ?? null;
           const shareFriend = activeShare ? userById.get(activeShare.recipientUserId.toString()) ?? null : null;
           const usage = usageByTicketPass.get(ticketPassKey) ?? null;
+          const cancellation = cancellationByTicketPass.get(ticketPassKey) ?? null;
           ticketPass.currentShare = activeShare
             ? this.toTicketShareResponse(activeShare, "", shareFriend)
             : null;
-          if (activeShare) {
+          if (activeShare && !cancellation) {
             ticketPass.ticketNo = "";
             ticketPass.qrCode = "";
           }
           this.applyUsageToTicketPass(ticketPass, usage);
+          this.applyCancellationToTicketPass(ticketPass, cancellation, event, order, true, activeShare !== null);
         }
         walletItem.ticketNo = walletItem.ticketPasses.find((pass) => !pass.currentShare)?.ticketNo ?? "";
         walletItem.currentShare = walletItem.ticketPasses.find((pass) => pass.currentShare)?.currentShare ?? null;
@@ -621,7 +696,7 @@ export class CheckoutPaymentService {
       }
     }
 
-    const sharedItems = receivedShares
+    const sharedItems = allReceivedShares
       .map((share) => {
         const event = eventById.get(share.eventId);
         const order = orderById.get(share.orderId.toString());
@@ -644,20 +719,27 @@ export class CheckoutPaymentService {
         const usage = usageByTicketPass.get(
           this.getTicketPassKey(share.eventId, share.ticketId, share.orderId.toString(), share.ticketIndex ?? 1),
         ) ?? null;
+        const cancellation = cancellationByTicketPass.get(
+          this.getTicketPassKey(share.eventId, share.ticketId, share.orderId.toString(), share.ticketIndex ?? 1),
+        ) ?? null;
+
+        if (share.status === "cancelled" && !cancellation) {
+          return null;
+        }
 
         const sharedItem = this.toSharedTicketWalletItem(
           share,
           order,
           event,
           ticket,
-          lineItem,
           host,
           owner,
           usage,
+          cancellation,
           followingIdSet.has(event.userId.toString()),
           publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },
         );
-        sharedItem.refund = this.toTicketWalletRefund(refundByOrderId.get(order._id.toString()));
+        sharedItem.refund = null;
         return sharedItem;
       })
       .filter((item): item is TicketWalletItem => Boolean(item));
@@ -750,6 +832,17 @@ export class CheckoutPaymentService {
 
     if (usedPass) {
       throw new AppError("Used tickets cannot be shared", httpStatus.CONFLICT);
+    }
+
+    const cancelledPass = await this.ticketCancellationRepository.existsByPass({
+      eventId: payload.eventId,
+      ticketId: payload.ticketId,
+      orderId: payload.orderId,
+      ticketIndex: payload.ticketIndex,
+    });
+
+    if (cancelledPass) {
+      throw new AppError("Cancelled tickets cannot be shared", httpStatus.CONFLICT);
     }
 
     const existingShare = await this.ticketShareRepository.findActiveByOwnerAndTicket(
@@ -922,6 +1015,19 @@ export class CheckoutPaymentService {
       );
     }
 
+    if (await this.ticketCancellationRepository.existsByPass({
+      eventId: ticketPass.eventId,
+      ticketId: ticketPass.ticketId,
+      orderId: order._id.toString(),
+      ticketIndex: ticketPass.ticketIndex,
+    })) {
+      throw new AppError(
+        "This ticket has been cancelled or refunded",
+        httpStatus.CONFLICT,
+        { code: "TICKET_CANCELLED_OR_REFUNDED" },
+      );
+    }
+
     if (order.paymentStatus !== "paid") {
       throw new AppError("Invalid ticket", httpStatus.BAD_REQUEST, { code: "INVALID_TICKET" });
     }
@@ -978,6 +1084,19 @@ export class CheckoutPaymentService {
       );
     }
 
+    if (await this.ticketCancellationRepository.existsByPass({
+      eventId: ticketPass.eventId,
+      ticketId: ticketPass.ticketId,
+      orderId: currentOrder?._id.toString() ?? order._id.toString(),
+      ticketIndex: ticketPass.ticketIndex,
+    })) {
+      throw new AppError(
+        "This ticket has been cancelled or refunded",
+        httpStatus.CONFLICT,
+        { code: "TICKET_CANCELLED_OR_REFUNDED" },
+      );
+    }
+
     if (currentEvent && currentEvent.userId.toString() !== user.id) {
       throw new AppError(
         "You are not authorized to check in tickets for this event",
@@ -1002,7 +1121,43 @@ export class CheckoutPaymentService {
       ticketPass.ticketIndex,
     );
 
+    if (await this.ticketCancellationRepository.existsByPass({
+      eventId: ticketPass.eventId,
+      ticketId: ticketPass.ticketId,
+      orderId: currentOrder._id.toString(),
+      ticketIndex: ticketPass.ticketIndex,
+    })) {
+      throw new AppError(
+        "This ticket has been cancelled or refunded",
+        httpStatus.CONFLICT,
+        { code: "TICKET_CANCELLED_OR_REFUNDED" },
+      );
+    }
+
     const holderUserId = activeShare ? activeShare.recipientUserId.toString() : currentOrder.userId.toString();
+    const passIdentity = {
+      eventId: ticketPass.eventId,
+      ticketId: ticketPass.ticketId,
+      orderId: currentOrder._id.toString(),
+      ticketIndex: ticketPass.ticketIndex,
+    };
+    const passClaim = await this.ticketPassClaimRepository.claimForCheckIn(passIdentity);
+    if (!passClaim.claimed) {
+      if (passClaim.reason === "used") {
+        throw new AppError(
+          "This ticket has already been checked in",
+          httpStatus.CONFLICT,
+          { code: "TICKET_ALREADY_CHECKED_IN" },
+        );
+      }
+
+      throw new AppError(
+        "This ticket has been cancelled or refunded",
+        httpStatus.CONFLICT,
+        { code: "TICKET_CANCELLED_OR_REFUNDED" },
+      );
+    }
+
     let usage: ITicketUsage;
 
     try {
@@ -1026,6 +1181,7 @@ export class CheckoutPaymentService {
         );
       }
 
+      await this.ticketPassClaimRepository.abortCheckIn(passIdentity);
       throw error;
     }
 
@@ -1116,7 +1272,13 @@ export class CheckoutPaymentService {
           payload.eventId,
           payload.ticketId,
         );
-        const remaining = Math.max(0, 2 - activeCount);
+        const cancelledCount = await this.ticketCancellationRepository.countByBuyerEventTicket(
+          user.id,
+          payload.eventId,
+          payload.ticketId,
+        );
+        const effectiveActiveCount = Math.max(0, activeCount - cancelledCount);
+        const remaining = Math.max(0, 2 - effectiveActiveCount);
 
         if (remaining === 0) {
           throw new AppError(
@@ -1125,7 +1287,7 @@ export class CheckoutPaymentService {
           );
         }
 
-        if (activeCount + payload.quantity > 2) {
+        if (effectiveActiveCount + payload.quantity > 2) {
           throw new AppError(
             `You can only purchase ${remaining} more ticket${remaining === 1 ? "" : "s"} of this type`,
             httpStatus.BAD_REQUEST,
@@ -1157,13 +1319,25 @@ export class CheckoutPaymentService {
         );
 
         if (existingFree) {
-          return {
-            order: this.toOrderResponse(existingFree),
-            paymentIntentClientSecret: null,
-            publishableKey: null,
-            merchantDisplayName: env.APP_NAME,
-            merchantCountryCode: env.STRIPE_MERCHANT_COUNTRY,
-          };
+          const freeLineItem = existingFree.lineItems.find(
+            (item) => item.itemType === "ticket" && item.eventId === payload.eventId && item.itemId === payload.ticketId,
+          );
+          const freeOrderQuantity = freeLineItem?.totalQuantity ?? freeLineItem?.quantity ?? 0;
+          const cancelledFreeCount = await this.ticketCancellationRepository.countByOrderEventTicket(
+            existingFree._id.toString(),
+            payload.eventId,
+            payload.ticketId,
+          );
+
+          if (cancelledFreeCount < freeOrderQuantity) {
+            return {
+              order: this.toOrderResponse(existingFree),
+              paymentIntentClientSecret: null,
+              publishableKey: null,
+              merchantDisplayName: env.APP_NAME,
+              merchantCountryCode: env.STRIPE_MERCHANT_COUNTRY,
+            };
+          }
         }
       }
 
@@ -1301,9 +1475,22 @@ export class CheckoutPaymentService {
 
     if (
       event.type === "refund.created" ||
-      event.type === "refund.updated" ||
-      event.type === "charge.refunded"
+      event.type === "refund.updated"
     ) {
+      const refund = event.data.object;
+      if (
+        refund.metadata?.sourceType === "user_ticket_cancellation" ||
+        typeof refund.metadata?.ticketCancellationId === "string"
+      ) {
+        await this.ticketCancellationService.handleStripeWebhook(event);
+        return;
+      }
+
+      await this.eventCancellationRefundService.handleStripeWebhook(event);
+      return;
+    }
+
+    if (event.type === "charge.refunded") {
       await this.eventCancellationRefundService.handleStripeWebhook(event);
     }
   }
@@ -1849,13 +2036,20 @@ export class CheckoutPaymentService {
       ticketId,
     );
 
-    return orders.reduce((total, order) => {
+    const totalOwned = orders.reduce((total, order) => {
       const orderTotal = order.lineItems
         .filter((item) => item.itemType === "ticket" && item.eventId === event._id.toString() && item.itemId === ticketId)
         .reduce((sum, item) => sum + this.getEffectiveTicketQuantities(event, item).totalQuantity, 0);
 
       return total + orderTotal;
     }, 0);
+    const cancelledCount = await this.ticketCancellationRepository.countByBuyerEventTicket(
+      userId,
+      event._id.toString(),
+      ticketId,
+    );
+
+    return Math.max(0, totalOwned - cancelledCount);
   }
 
   private async dispatchTicketNotifications(order: ICheckoutOrder): Promise<void> {
@@ -2125,6 +2319,10 @@ export class CheckoutPaymentService {
       return "cancelled";
     }
 
+    if (ticketPasses.length > 0 && ticketPasses.every((ticketPass) => ticketPass.status === "cancelled")) {
+      return "cancelled";
+    }
+
     if (ticketPasses.length > 0 && ticketPasses.every((ticketPass) => ticketPass.status === "used")) {
       return "used";
     }
@@ -2149,6 +2347,220 @@ export class CheckoutPaymentService {
     };
   }
 
+  private toTicketCancellationResponse(
+    cancellation: ITicketCancellation,
+    exposeFinancials: boolean,
+  ): TicketCancellationResponse {
+    return {
+      id: cancellation._id.toString(),
+      sourceType: cancellation.sourceType,
+      eventId: cancellation.eventId.toString(),
+      ticketId: cancellation.ticketId,
+      orderId: cancellation.orderId.toString(),
+      ticketIndex: cancellation.ticketIndex,
+      buyerUserId: cancellation.buyerUserId.toString(),
+      hostUserId: cancellation.hostUserId.toString(),
+      sharedRecipientUserId: cancellation.sharedRecipientUserId?.toString() ?? null,
+      eventName: cancellation.eventName ?? null,
+      ticketName: cancellation.ticketName ?? null,
+      status: cancellation.status,
+      refundStatus: exposeFinancials ? cancellation.refundStatus : "not_required",
+      currency: cancellation.currency,
+      stripePaymentIntentId: exposeFinancials ? cancellation.stripePaymentIntentId ?? null : null,
+      stripeRefundId: exposeFinancials ? cancellation.stripeRefundId ?? null : null,
+      requestedAmountMinor: exposeFinancials ? cancellation.requestedAmountMinor : 0,
+      completedAmountMinor: exposeFinancials ? cancellation.completedAmountMinor : 0,
+      remainingRefundableAmountMinor: exposeFinancials ? cancellation.remainingRefundableAmountMinor : 0,
+      ticketSubtotalAmountMinor: exposeFinancials ? cancellation.ticketSubtotalAmountMinor : 0,
+      platformFeeAmountMinor: exposeFinancials ? cancellation.platformFeeAmountMinor : 0,
+      taxAmountMinor: exposeFinancials ? cancellation.taxAmountMinor : 0,
+      discountAmountMinor: exposeFinancials ? cancellation.discountAmountMinor : 0,
+      capacityReleaseStatus: cancellation.capacityReleaseStatus,
+      shareRevocationStatus: cancellation.shareRevocationStatus,
+      qrInvalidationStatus: cancellation.qrInvalidationStatus,
+      attemptCount: exposeFinancials ? cancellation.attemptCount : 0,
+      nextRetryAt: exposeFinancials ? cancellation.nextRetryAt ?? null : null,
+      lastErrorCode: exposeFinancials ? cancellation.lastErrorCode ?? null : null,
+      safeLastErrorMessage: exposeFinancials ? cancellation.safeLastErrorMessage ?? null : null,
+      providerStatus: exposeFinancials ? cancellation.providerStatus ?? null : null,
+      cancellationCutoffAt: cancellation.cancellationCutoffAt,
+      cancelledAt: cancellation.cancelledAt,
+      refundCompletedAt: exposeFinancials ? cancellation.refundCompletedAt ?? null : null,
+      auditHistory: exposeFinancials ? cancellation.auditHistory : [],
+      createdAt: cancellation.createdAt,
+      updatedAt: cancellation.updatedAt,
+    };
+  }
+
+  private applyCancellationToTicketPass(
+    ticketPass: TicketWalletPass,
+    cancellation: ITicketCancellation | null,
+    event: IEvent,
+    order: ICheckoutOrder,
+    isOriginalBuyer: boolean,
+    isShared: boolean,
+  ): void {
+    const exposeFinancials = isOriginalBuyer;
+
+    ticketPass.cancellation = cancellation
+      ? this.toTicketCancellationResponse(cancellation, exposeFinancials)
+      : null;
+    ticketPass.cancellationEligibility = this.buildTicketCancellationEligibility(
+      event,
+      order,
+      ticketPass,
+      cancellation,
+      isOriginalBuyer,
+      isShared,
+    );
+
+    if (cancellation) {
+      ticketPass.status = "cancelled";
+      ticketPass.ticketNo = "";
+      ticketPass.qrCode = "";
+      ticketPass.currentShare = null;
+    }
+  }
+
+  private buildTicketCancellationEligibility(
+    event: IEvent,
+    order: ICheckoutOrder,
+    ticketPass: TicketWalletPass,
+    cancellation: ITicketCancellation | null,
+    isOriginalBuyer: boolean,
+    isShared: boolean,
+  ): TicketCancellationEligibilityResponse {
+    const serverNow = new Date();
+    const cancellationCutoffAt = event.scheduledAt
+      ? new Date(event.scheduledAt.getTime() - TICKET_CANCELLATION_CUTOFF_MS)
+      : null;
+    const base = {
+      cancellationCutoffAt,
+      serverNow,
+      cancellationStatus: cancellation?.status ?? null,
+      refundStatus: isOriginalBuyer ? cancellation?.refundStatus ?? null : null,
+      isOriginalBuyer,
+      isShared,
+      isRecipientOnly: !isOriginalBuyer && isShared,
+    };
+
+    if (cancellation) {
+      const reason: TicketCancellationEligibilityResponse["disabledReason"] = !isOriginalBuyer
+        ? "already_cancelled"
+        : cancellation.status === "needs_attention" || cancellation.refundStatus === "failed_terminal"
+          ? "refund_needs_attention"
+          : ["pending", "processing", "failed_retryable", "reconciliation_required"].includes(cancellation.refundStatus)
+            ? "refund_processing"
+            : "already_cancelled";
+
+      return {
+        ...base,
+        canCancel: false,
+        disabledReason: reason,
+        disabledMessage: this.getTicketCancellationDisabledMessage(reason),
+        qrAvailable: false,
+      };
+    }
+
+    if (!isOriginalBuyer) {
+      return {
+        ...base,
+        canCancel: false,
+        disabledReason: "not_original_buyer",
+        disabledMessage: this.getTicketCancellationDisabledMessage("not_original_buyer"),
+        qrAvailable: ticketPass.status === "active" && Boolean(ticketPass.qrCode),
+      };
+    }
+
+    if (ticketPass.status === "used") {
+      return {
+        ...base,
+        canCancel: false,
+        disabledReason: "already_used",
+        disabledMessage: this.getTicketCancellationDisabledMessage("already_used"),
+        qrAvailable: false,
+      };
+    }
+
+    if (event.status === "cancelled") {
+      return {
+        ...base,
+        canCancel: false,
+        disabledReason: "event_cancelled",
+        disabledMessage: this.getTicketCancellationDisabledMessage("event_cancelled"),
+        qrAvailable: false,
+      };
+    }
+
+    if (order.paymentStatus !== "paid" || event.status !== "published") {
+      return {
+        ...base,
+        canCancel: false,
+        disabledReason: "payment_not_eligible",
+        disabledMessage: this.getTicketCancellationDisabledMessage("payment_not_eligible"),
+        qrAvailable: false,
+      };
+    }
+
+    if (!cancellationCutoffAt || serverNow.getTime() >= cancellationCutoffAt.getTime()) {
+      return {
+        ...base,
+        canCancel: false,
+        disabledReason: "cutoff_reached",
+        disabledMessage: this.getTicketCancellationDisabledMessage("cutoff_reached"),
+        qrAvailable: ticketPass.status === "active" && Boolean(ticketPass.qrCode),
+      };
+    }
+
+    return {
+      ...base,
+      canCancel: true,
+      disabledReason: "eligible",
+      disabledMessage: null,
+      qrAvailable: ticketPass.status === "active" && Boolean(ticketPass.qrCode),
+    };
+  }
+
+  private getTicketCancellationDisabledMessage(reason: TicketCancellationEligibilityResponse["disabledReason"]): string | null {
+    if (reason === "cutoff_reached") {
+      return "Ticket cancellation is unavailable within 3 hours of the event start time.";
+    }
+
+    if (reason === "already_used") {
+      return "This ticket has already been used and can no longer be cancelled.";
+    }
+
+    if (reason === "already_cancelled") {
+      return "This ticket has already been cancelled.";
+    }
+
+    if (reason === "refund_processing") {
+      return "Your refund is currently being processed.";
+    }
+
+    if (reason === "refund_needs_attention") {
+      return "Refund needs attention";
+    }
+
+    if (reason === "not_original_buyer") {
+      return "Only the original buyer can cancel this ticket.";
+    }
+
+    if (reason === "event_cancelled") {
+      return "Event already cancelled; refund is already being processed.";
+    }
+
+    if (reason === "payment_not_eligible") {
+      return "This ticket is not eligible for cancellation.";
+    }
+
+    if (reason === "invalid_pass") {
+      return "Ticket pass not found for this order.";
+    }
+
+    return null;
+  }
+
   private async getSingleTicketEvent(order: ICheckoutOrder): Promise<IEvent | null> {
     if (order.kind !== "ticket") return null;
 
@@ -2163,9 +2575,10 @@ export class CheckoutPaymentService {
       return [];
     }
 
-    const [orders, activeShares] = await Promise.all([
+    const [orders, activeShares, cancellations] = await Promise.all([
       this.repository.findIssuedTicketOrdersByEventIds(uniqueEventIds),
       this.ticketShareRepository.findActiveByEventIds(uniqueEventIds),
+      this.ticketCancellationRepository.findByEventIds(uniqueEventIds),
     ]);
     const eventIdSet = new Set(uniqueEventIds);
     const activeShareByTicketPass = new Map(
@@ -2173,6 +2586,16 @@ export class CheckoutPaymentService {
         this.getTicketPassKey(share.eventId, share.ticketId, share.orderId.toString(), share.ticketIndex ?? 1),
         share,
       ]),
+    );
+    const cancelledPassKeys = new Set(
+      cancellations.map((cancellation) =>
+        this.getTicketPassKey(
+          cancellation.eventId.toString(),
+          cancellation.ticketId,
+          cancellation.orderId.toString(),
+          cancellation.ticketIndex,
+        ),
+      ),
     );
     const passes: PublicGoingPass[] = [];
 
@@ -2201,6 +2624,10 @@ export class CheckoutPaymentService {
           orderId,
           ticketPass.ticketIndex,
         );
+        if (cancelledPassKeys.has(key)) {
+          continue;
+        }
+
         const activeShare = activeShareByTicketPass.get(key) ?? null;
         const holderUserId = activeShare?.recipientUserId.toString() ?? order.userId.toString();
 
@@ -2247,8 +2674,9 @@ export class CheckoutPaymentService {
     usage: ITicketUsage | null,
     eventEnded = false,
     useActiveClassification = false,
+    passCancelled = false,
   ): EventTicketStatItemStatus {
-    if (order.paymentStatus === "refunded") {
+    if (order.paymentStatus === "refunded" || passCancelled) {
       return "refunded";
     }
 
@@ -2370,6 +2798,8 @@ export class CheckoutPaymentService {
         status: "active",
         usedAt: null,
         currentShare: null,
+        cancellation: null,
+        cancellationEligibility: null,
       };
     });
   }
@@ -2469,15 +2899,15 @@ export class CheckoutPaymentService {
     order: ICheckoutOrder,
     event: IEvent,
     ticket: EventTicket,
-    lineItem: CheckoutOrderLineItem,
     host: IUser | null,
     owner: IUser | null,
     usage: ITicketUsage | null,
+    cancellation: ITicketCancellation | null,
     isFollowing: boolean,
     publicGoingSummary: PublicEventGoingSummaryResponse,
   ): TicketWalletItem {
     const ticketIndex = share.ticketIndex ?? 1;
-    const unitAmount = this.getTicketPassAmount(lineItem, ticketIndex);
+    const unitAmount = 0;
     const orderId = share.orderId.toString();
     const checkInCode = this.getStoredCheckInCode(order, share.eventId, share.ticketId, ticketIndex);
     const ticketPasses: TicketWalletPass[] = [
@@ -2489,8 +2919,11 @@ export class CheckoutPaymentService {
         status: usage ? "used" : "active",
         usedAt: usage?.usedAt ?? null,
         currentShare: null,
+        cancellation: null,
+        cancellationEligibility: null,
       },
     ];
+    this.applyCancellationToTicketPass(ticketPasses[0]!, cancellation, event, order, false, true);
 
     return {
       id: `share-${share._id.toString()}`,
@@ -2500,8 +2933,8 @@ export class CheckoutPaymentService {
       ticketId: share.ticketId,
       ticketName: ticket.name,
       quantity: 1,
-      paidQuantity: 1,
-      freeQuantity: 0,
+      paidQuantity: 0,
+      freeQuantity: 1,
       totalQuantity: 1,
       unitAmount,
       totalAmount: unitAmount,

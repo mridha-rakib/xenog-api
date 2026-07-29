@@ -13,6 +13,7 @@ import { creatorEarningValidation } from "./creator-earning.validation.js";
 import { PayoutSettingsController } from "./payout-settings.controller.js";
 import { payoutSettingsValidation } from "./payout-settings.validation.js";
 import { EventCancellationRefundController } from "./event-cancellation-refund.controller.js";
+import { TicketCancellationController } from "./ticket-cancellation.controller.js";
 
 const router = Router();
 const stripeConnectController = new StripeConnectController();
@@ -20,6 +21,7 @@ const checkoutPaymentController = new CheckoutPaymentController();
 const creatorEarningController = new CreatorEarningController();
 const payoutSettingsController = new PayoutSettingsController();
 const eventCancellationRefundController = new EventCancellationRefundController();
+const ticketCancellationController = new TicketCancellationController();
 const ticketScanRateLimit = rateLimit({
   windowMs: 60_000,
   limit: 120,
@@ -95,10 +97,41 @@ router.get(
 );
 router.get("/ticket-wallet", catchAsync(checkoutPaymentController.getMyTicketWallet));
 
+router.post(
+  "/ticket-cancellations",
+  validate(checkoutPaymentValidation.cancelTicketPass),
+  catchAsync(ticketCancellationController.cancelTicketPass),
+);
+
 router.get(
   "/admin/refund-batches",
   authorizeRoles("admin"),
+  validate(checkoutPaymentValidation.listRefundBatches),
   catchAsync(eventCancellationRefundController.listBatches),
+);
+router.get(
+  "/admin/ticket-cancellations",
+  authorizeRoles("admin"),
+  validate(checkoutPaymentValidation.listTicketCancellations),
+  catchAsync(ticketCancellationController.listCancellations),
+);
+router.get(
+  "/admin/ticket-cancellations/:cancellationId",
+  authorizeRoles("admin"),
+  validate(checkoutPaymentValidation.ticketCancellationParams),
+  catchAsync(ticketCancellationController.getCancellation),
+);
+router.post(
+  "/admin/ticket-cancellations/:cancellationId/retry",
+  authorizeRoles("admin"),
+  validate(checkoutPaymentValidation.ticketCancellationParams),
+  catchAsync(ticketCancellationController.retryCancellation),
+);
+router.post(
+  "/admin/ticket-cancellations/:cancellationId/reconcile",
+  authorizeRoles("admin"),
+  validate(checkoutPaymentValidation.ticketCancellationParams),
+  catchAsync(ticketCancellationController.reconcileCancellation),
 );
 router.get(
   "/admin/refund-batches/:batchId",

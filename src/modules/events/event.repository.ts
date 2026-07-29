@@ -1328,11 +1328,43 @@ export class EventRepository {
    */
   public async releaseTicketCapacity(eventId: string, ticketId: string, quantity: number): Promise<void> {
     await EventModel.updateOne(
-      {
-        _id: eventId,
-        tickets: { $elemMatch: { id: ticketId, availableCount: { $ne: null } } },
-      },
-      { $inc: { "tickets.$.availableCount": quantity } },
+      { _id: eventId },
+      [
+        {
+          $set: {
+            tickets: {
+              $map: {
+                input: "$tickets",
+                as: "ticket",
+                in: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $eq: ["$$ticket.id", ticketId] },
+                        { $ne: ["$$ticket.availableCount", null] },
+                      ],
+                    },
+                    {
+                      $mergeObjects: [
+                        "$$ticket",
+                        {
+                          availableCount: {
+                            $min: [
+                              { $add: ["$$ticket.availableCount", quantity] },
+                              "$$ticket.capacity",
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                    "$$ticket",
+                  ],
+                },
+              },
+            },
+          },
+        },
+      ],
     );
   }
 
@@ -1350,18 +1382,72 @@ export class EventRepository {
 
     await EventModel.updateOne(
       { _id: eventId },
-      {
-        $inc: {
-          "tickets.$[ticket].availableCount": ticketQuantity,
-          "rewards.$[reward].availableCount": rewardQuantity,
+      [
+        {
+          $set: {
+            tickets: {
+              $map: {
+                input: "$tickets",
+                as: "ticket",
+                in: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $eq: ["$$ticket.id", ticketId] },
+                        { $ne: ["$$ticket.availableCount", null] },
+                      ],
+                    },
+                    {
+                      $mergeObjects: [
+                        "$$ticket",
+                        {
+                          availableCount: {
+                            $min: [
+                              { $add: ["$$ticket.availableCount", ticketQuantity] },
+                              "$$ticket.capacity",
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                    "$$ticket",
+                  ],
+                },
+              },
+            },
+            rewards: {
+              $map: {
+                input: "$rewards",
+                as: "reward",
+                in: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $eq: ["$$reward.id", rewardId] },
+                        { $ne: ["$$reward.availableCount", null] },
+                      ],
+                    },
+                    {
+                      $mergeObjects: [
+                        "$$reward",
+                        {
+                          availableCount: {
+                            $min: [
+                              { $add: ["$$reward.availableCount", rewardQuantity] },
+                              "$$reward.capacity",
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                    "$$reward",
+                  ],
+                },
+              },
+            },
+          },
         },
-      },
-      {
-        arrayFilters: [
-          { "ticket.id": ticketId, "ticket.availableCount": { $ne: null } },
-          { "reward.id": rewardId, "reward.availableCount": { $ne: null } },
-        ],
-      },
+      ],
     );
   }
 

@@ -1,6 +1,10 @@
 import type { Types } from "mongoose";
 import type { EventCategory } from "../events/event.interface.js";
 import type { CancellationRefundStatus } from "./event-cancellation-refund.interface.js";
+import type {
+  TicketCancellationEligibilityResponse,
+  TicketCancellationResponse,
+} from "./ticket-cancellation.interface.js";
 
 export const checkoutOrderKinds = ["ticket", "product", "custom"] as const;
 export type CheckoutOrderKind = (typeof checkoutOrderKinds)[number];
@@ -186,7 +190,7 @@ export interface CheckoutIntentResponse {
 export type TicketWalletStatus = "active" | "used" | "cancelled";
 export type TicketWalletSource = "owned" | "shared";
 export type TicketShareStatus = "active" | "cancelled";
-export type TicketPassStatus = "active" | "used";
+export type TicketPassStatus = "active" | "used" | "cancelled";
 
 export interface TicketWalletEventHost {
   id: string;
@@ -251,6 +255,8 @@ export interface TicketWalletPass {
   status: TicketPassStatus;
   usedAt?: Date | null;
   currentShare?: TicketShareResponse | null;
+  cancellation?: TicketCancellationResponse | null;
+  cancellationEligibility?: TicketCancellationEligibilityResponse | null;
 }
 
 export interface TicketWalletItem {

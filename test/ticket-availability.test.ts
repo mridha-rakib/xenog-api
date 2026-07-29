@@ -10,6 +10,9 @@ process.env.JWT_ACCESS_SECRET = process.env.JWT_ACCESS_SECRET ?? "development-ac
 
 test("event ticket stats returns availableCount instead of recalculating from original capacity", async () => {
   const { CheckoutPaymentService } = await import("../src/modules/payments/checkout-payment.service.js");
+  const ticketCancellationRepository = {
+    findByEventId: async () => [],
+  };
   const service = new CheckoutPaymentService(
     {
       getEventTicketSales: async () => ({ standard: 2 }),
@@ -28,6 +31,17 @@ test("event ticket stats returns availableCount instead of recalculating from or
         ],
       }),
     } as never,
+    undefined as never,
+    undefined as never,
+    undefined as never,
+    undefined as never,
+    undefined as never,
+    undefined as never,
+    undefined as never,
+    undefined as never,
+    undefined as never,
+    undefined as never,
+    ticketCancellationRepository as never,
   );
 
   const result = await service.getEventTicketStats({ id: "host-1" } as never, "event-1");

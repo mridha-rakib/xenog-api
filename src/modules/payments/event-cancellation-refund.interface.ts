@@ -231,9 +231,24 @@ export interface CancellationBatchResponse {
   lastReconciledAt?: Date | null;
   lastErrorSummary?: string | null;
   legacyPayoutAnomaly: boolean;
+  event?: {
+    name?: string | null;
+    scheduledAt?: Date | null;
+    cancelledAt?: Date | null;
+  } | null;
+  host?: {
+    name?: string | null;
+    email?: string | null;
+    username?: string | null;
+  } | null;
   auditHistory: CancellationAuditEntry[];
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface ListEventCancellationBatchesQuery {
+  search?: string;
+  status?: CancellationBatchStatus;
 }
 
 export interface CancelEventResult {

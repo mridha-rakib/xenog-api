@@ -1,5 +1,11 @@
 import { z } from "zod";
 import { checkoutPaymentMethods } from "./checkout-payment.interface.js";
+import {
+  ticketCancellationRefundStatuses,
+  ticketCancellationSourceTypes,
+  ticketCancellationStatuses,
+} from "./ticket-cancellation.interface.js";
+import { cancellationBatchStatuses } from "./event-cancellation-refund.interface.js";
 
 const objectId = z.string().trim().regex(/^[a-f\d]{24}$/i, "Invalid MongoDB ObjectId");
 const ticketId = z.string().trim().min(1, "Ticket ID is required").max(80, "Ticket ID cannot exceed 80 characters");
@@ -95,6 +101,16 @@ export const checkoutPaymentValidation = {
       })
       .strict(),
   }),
+  cancelTicketPass: z.object({
+    body: z
+      .object({
+        eventId: objectId,
+        ticketId,
+        orderId: objectId,
+        ticketIndex: z.coerce.number().int().min(1).max(100),
+      })
+      .strict(),
+  }),
   scanTicket: z.object({
     body: z
       .object({
@@ -122,10 +138,42 @@ export const checkoutPaymentValidation = {
       batchId: objectId,
     }),
   }),
+  listRefundBatches: z.object({
+    query: z
+      .object({
+        search: z.string().trim().min(1).max(120).optional(),
+        status: z.enum(cancellationBatchStatuses).optional(),
+      })
+      .strict(),
+  }),
   refundItemParams: z.object({
     params: z.object({
       refundId: objectId,
     }),
+  }),
+  ticketCancellationParams: z.object({
+    params: z.object({
+      cancellationId: objectId,
+    }),
+  }),
+  listTicketCancellations: z.object({
+    query: z
+      .object({
+        page: z.coerce.number().int().min(1).optional(),
+        limit: z.coerce.number().int().min(1).max(100).optional(),
+        status: z.enum(ticketCancellationStatuses).optional(),
+        refundStatus: z.enum(ticketCancellationRefundStatuses).optional(),
+        sourceType: z.enum(ticketCancellationSourceTypes).optional(),
+        eventId: objectId.optional(),
+        buyerUserId: objectId.optional(),
+        orderId: objectId.optional(),
+        ticketId: ticketId.optional(),
+        ticketIndex: z.coerce.number().int().min(1).max(100).optional(),
+        ticketType: z.enum(["paid", "free", "rewarded"]).optional(),
+        search: z.string().trim().min(1).max(120).optional(),
+        monetary: z.enum(["monetary", "non_monetary", "all"]).optional(),
+      })
+      .strict(),
   }),
   ticketStatItems: z.object({
     params: z.object({

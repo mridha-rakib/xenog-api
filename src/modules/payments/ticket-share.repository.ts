@@ -73,6 +73,13 @@ export class TicketShareRepository {
     }).sort({ sharedAt: -1, _id: -1 });
   }
 
+  public async findCancelledByRecipientId(recipientUserId: string): Promise<ITicketShare[]> {
+    return TicketShareModel.find({
+      recipientUserId,
+      status: "cancelled",
+    }).sort({ cancelledAt: -1, sharedAt: -1, _id: -1 });
+  }
+
   public async findActiveByEventId(eventId: string): Promise<ITicketShare[]> {
     return TicketShareModel.find({
       eventId,
@@ -128,6 +135,33 @@ export class TicketShareRepository {
       {
         _id: shareId,
         ownerUserId,
+        status: "active",
+      },
+      {
+        $set: {
+          status: "cancelled",
+          cancelledAt: new Date(),
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    );
+  }
+
+  public async cancelActiveByTicketPass(
+    eventId: string,
+    ticketId: string,
+    orderId: string,
+    ticketIndex: number,
+  ): Promise<ITicketShare | null> {
+    return TicketShareModel.findOneAndUpdate(
+      {
+        eventId,
+        ticketId,
+        orderId,
+        ticketIndex,
         status: "active",
       },
       {

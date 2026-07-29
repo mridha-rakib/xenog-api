@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Types } from "mongoose";
+import { checkoutPaymentValidation } from "../src/modules/payments/checkout-payment.validation.js";
+import { buildEventCancellationBatchSearchPipeline } from "../src/modules/payments/event-cancellation-refund.repository.js";
 import { EventCancellationRefundService } from "../src/modules/payments/event-cancellation-refund.service.js";
 import {
   CANCELLATION_WORKFLOW_VERSION,
@@ -41,7 +43,7 @@ const createEvent = (overrides: Record<string, unknown> = {}) => ({
   _id: eventId,
   userId: ownerId,
   status: "published",
-  scheduledAt: new Date("2026-07-21T12:00:00.000Z"),
+  scheduledAt: new Date("2026-08-21T12:00:00.000Z"),
   cancellationReasonType: null,
   cancellationCustomReason: null,
   cancellationDisplayReason: null,
@@ -233,6 +235,10 @@ const createService = (overrides: {
     sendSystemNotification: async (_recipientId: string, type: string, message: string, options?: Record<string, unknown>) =>
       overrides.onNotification?.(type, message, options),
   };
+  const ticketCancellationRepository = {
+    sumRequestedAmountByOrderId: async () => 0,
+    findByOrderId: async () => [],
+  };
 
   return new EventCancellationRefundService(
     repository as never,
@@ -241,6 +247,7 @@ const createService = (overrides: {
     earningRepository as never,
     ticketShareRepository as never,
     notificationService as never,
+    ticketCancellationRepository as never,
   );
 };
 
@@ -375,4 +382,73 @@ test("recoverCancellationWorkflows completes an initializing batch before refund
 
   assert.equal(recovered, 1);
   assert.equal(refundCount, 1);
+});
+
+test("admin event cancellation refund batch search covers event and host display fields", () => {
+  const pipeline = buildEventCancellationBatchSearchPipeline({
+    status: "completed",
+    search: " Host+Name@example.com ",
+  });
+  const encoded = JSON.stringify(pipeline);
+  const firstMatch = pipeline[0] as { $match: Record<string, unknown> };
+  const searchMatch = pipeline.find((stage) => "$match" in stage && "$or" in (stage.$match as Record<string, unknown>)) as {
+    $match: { $or: Array<{ "eventSearch.name"?: { $regex: string } }> };
+  };
+
+  assert.equal(firstMatch.$match.status, "completed");
+  assert.match(encoded, /"from":"events"/);
+  assert.match(encoded, /"from":"users"/);
+  assert.match(encoded, /eventSearch\.name/);
+  assert.match(encoded, /hostSearch\.name/);
+  assert.match(encoded, /hostSearch\.email/);
+  assert.match(encoded, /hostSearch\.username/);
+  assert.equal(searchMatch.$match.$or[0]?.["eventSearch.name"]?.$regex, "Host\\+Name@example\\.com");
+});
+
+test("admin event cancellation refund batch list response includes event and host display context", async () => {
+  const batch = createBatch("Organizer issue", "Organizer issue", "completed");
+  const event = createEvent({
+    name: "Readable Event",
+    scheduledAt: new Date("2026-08-21T12:00:00.000Z"),
+    cancelledAt: new Date("2026-08-20T12:00:00.000Z"),
+  });
+  const host = {
+    _id: ownerId,
+    name: "Host Person",
+    email: "host@example.com",
+    username: "hostperson",
+  };
+  let capturedQuery: unknown;
+
+  const service = new EventCancellationRefundService(
+    { findBatches: async (query: unknown) => {
+      capturedQuery = query;
+      return [batch];
+    } } as never,
+    { findManyByIds: async () => [event] } as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    { findByIds: async () => [host] } as never,
+  );
+
+  const response = await service.listBatches({ search: "readable", status: "completed" });
+
+  assert.deepEqual(capturedQuery, { search: "readable", status: "completed" });
+  assert.equal(response[0]?.event?.name, "Readable Event");
+  assert.equal(response[0]?.host?.name, "Host Person");
+  assert.equal(response[0]?.host?.email, "host@example.com");
+});
+
+test("admin event cancellation refund batch query validation accepts search and rejects unsafe values", () => {
+  const parsed = checkoutPaymentValidation.listRefundBatches.parse({
+    query: { search: "  readable event  ", status: "completed" },
+  });
+
+  assert.equal(parsed.query.search, "readable event");
+  assert.equal(parsed.query.status, "completed");
+  assert.throws(() => checkoutPaymentValidation.listRefundBatches.parse({ query: { status: "succeeded" } }));
+  assert.throws(() => checkoutPaymentValidation.listRefundBatches.parse({ query: { search: "x".repeat(121) } }));
 });

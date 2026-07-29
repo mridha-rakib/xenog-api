@@ -14,6 +14,7 @@ import { startEventScheduler } from "./modules/events/event.scheduler.js";
 import { startPaymentScheduler } from "./modules/payments/payment.scheduler.js";
 import { startCreatorPayoutScheduler } from "./modules/payments/creator-payout.scheduler.js";
 import { startEventCancellationRefundScheduler } from "./modules/payments/event-cancellation-refund.scheduler.js";
+import { startTicketCancellationScheduler } from "./modules/payments/ticket-cancellation.scheduler.js";
 import { ensureCheckoutOrderIndexes } from "./modules/payments/checkout-payment.model.js";
 import { ensureCheckoutInvoiceIndexes } from "./modules/payments/checkout-invoice.model.js";
 import { ensureCreatorEarningIndexes } from "./modules/payments/creator-earning.model.js";
@@ -21,6 +22,8 @@ import { ensureCreatorPayoutIndexes } from "./modules/payments/creator-payout.mo
 import { ensureEventCancellationRefundIndexes } from "./modules/payments/event-cancellation-refund.model.js";
 import { ensureTicketShareIndexes } from "./modules/payments/ticket-share.model.js";
 import { ensureTicketUsageIndexes } from "./modules/payments/ticket-usage.model.js";
+import { ensureTicketPassClaimIndexes } from "./modules/payments/ticket-pass-claim.model.js";
+import { ensureTicketCancellationIndexes } from "./modules/payments/ticket-cancellation.model.js";
 import { ensureEventHostReviewIndexes } from "./modules/events/event-host-review.model.js";
 import { createApp } from "./app.js";
 
@@ -33,12 +36,15 @@ const startServer = async (): Promise<void> => {
   await ensureEventCancellationRefundIndexes();
   await ensureTicketShareIndexes();
   await ensureTicketUsageIndexes();
+  await ensureTicketPassClaimIndexes();
+  await ensureTicketCancellationIndexes();
   await ensureEventHostReviewIndexes();
   await seedAdminUser();
   startEventScheduler();
   startPaymentScheduler();
   startCreatorPayoutScheduler();
   startEventCancellationRefundScheduler();
+  startTicketCancellationScheduler();
 
   try {
     await RedisClient.waitUntilReady();

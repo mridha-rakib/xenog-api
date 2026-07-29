@@ -155,10 +155,15 @@ const createWalletFixture = async ({
   const ticketShareRepository = {
     findActiveByOwnerId: async () => [],
     findActiveByRecipientId: async () => receivedShares,
+    findCancelledByRecipientId: async () => [],
     findActiveByEventIds: async (ids: string[]) => receivedShares.filter((share) => ids.includes(share.eventId)),
   };
   const ticketUsageRepository = {
     findByEventIdsAndOrderIds: async () => [],
+  };
+  const ticketCancellationRepository = {
+    findByOrderIds: async () => [],
+    findByEventIds: async () => [],
   };
   const service = new CheckoutPaymentService(
     repository as never,
@@ -172,6 +177,8 @@ const createWalletFixture = async ({
     {} as never,
     {} as never,
     { findRefundItemsByOrderIds: async () => [] } as never,
+    undefined as never,
+    ticketCancellationRepository as never,
   );
 
   return {

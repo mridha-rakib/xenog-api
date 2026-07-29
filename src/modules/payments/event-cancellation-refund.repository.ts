@@ -1,4 +1,4 @@
-import type { FilterQuery, UpdateQuery } from "mongoose";
+import type { FilterQuery, PipelineStage, UpdateQuery } from "mongoose";
 import {
   EventCancellationBatchModel,
   EventCancellationRefundModel,
@@ -13,6 +13,7 @@ import type {
   IEventCancellationBatch,
   IEventCancellationRefund,
   IEventCancellationTaxReversal,
+  ListEventCancellationBatchesQuery,
 } from "./event-cancellation-refund.interface.js";
 
 type CreateBatchPayload = {
@@ -63,6 +64,60 @@ const audit = (
   metadata: metadata ?? null,
   createdAt: new Date(),
 });
+
+const escapeSearchRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+export const buildEventCancellationBatchSearchPipeline = (
+  query: ListEventCancellationBatchesQuery = {},
+): PipelineStage[] => {
+  const match: FilterQuery<IEventCancellationBatch> = {};
+  if (query.status) match.status = query.status;
+
+  const pipeline: PipelineStage[] = [
+    { $match: match },
+    {
+      $lookup: {
+        from: "events",
+        localField: "eventId",
+        foreignField: "_id",
+        as: "eventSearch",
+      },
+    },
+    {
+      $lookup: {
+        from: "users",
+        localField: "hostUserId",
+        foreignField: "_id",
+        as: "hostSearch",
+      },
+    },
+    {
+      $addFields: {
+        eventSearch: { $first: "$eventSearch" },
+        hostSearch: { $first: "$hostSearch" },
+      },
+    },
+  ];
+
+  const normalizedSearch = query.search?.trim();
+  if (normalizedSearch) {
+    const escapedSearch = escapeSearchRegex(normalizedSearch);
+    pipeline.push({
+      $match: {
+        $or: [
+          { "eventSearch.name": { $regex: escapedSearch, $options: "i" } },
+          { "hostSearch.name": { $regex: escapedSearch, $options: "i" } },
+          { "hostSearch.email": { $regex: escapedSearch, $options: "i" } },
+          { "hostSearch.username": { $regex: escapedSearch, $options: "i" } },
+          { displayReason: { $regex: escapedSearch, $options: "i" } },
+        ],
+      },
+    });
+  }
+
+  pipeline.push({ $project: { eventSearch: 0, hostSearch: 0 } });
+  return pipeline;
+};
 
 export class EventCancellationRefundRepository {
   public async createOrGetBatch(payload: CreateBatchPayload): Promise<IEventCancellationBatch> {
@@ -129,10 +184,12 @@ export class EventCancellationRefundRepository {
     return EventCancellationBatchModel.findById(batchId);
   }
 
-  public async findBatches(limit = 100): Promise<IEventCancellationBatch[]> {
-    return EventCancellationBatchModel.find()
-      .sort({ createdAt: -1, _id: -1 })
-      .limit(limit);
+  public async findBatches(query: ListEventCancellationBatchesQuery = {}, limit = 100): Promise<IEventCancellationBatch[]> {
+    return EventCancellationBatchModel.aggregate<IEventCancellationBatch>([
+      ...buildEventCancellationBatchSearchPipeline(query),
+      { $sort: { createdAt: -1, _id: -1 } },
+      { $limit: limit },
+    ]);
   }
 
   public async findInitializingBatches(limit = 50): Promise<IEventCancellationBatch[]> {

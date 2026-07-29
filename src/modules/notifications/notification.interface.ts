@@ -14,6 +14,7 @@ export type NotificationType =
   | "payout_completed"
   | "payout_failed"
   | "event_cancelled"
+  | "ticket_cancelled"
   | "refund_processing"
   | "refund_completed"
   | "refund_needs_attention";

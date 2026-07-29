@@ -12,6 +12,8 @@ import { CheckoutPaymentRepository } from "./checkout-payment.repository.js";
 import { CreatorEarningRepository } from "./creator-earning.repository.js";
 import { TicketShareRepository } from "./ticket-share.repository.js";
 import { NotificationService } from "../notifications/notification.service.js";
+import { UserRepository } from "../user/user.repository.js";
+import type { IUser } from "../user/user.interface.js";
 import {
   CANCELLATION_WORKFLOW_VERSION,
   type CancelEventDto,
@@ -23,8 +25,10 @@ import {
   type IEventCancellationBatch,
   type IEventCancellationRefund,
   type IEventCancellationTaxReversal,
+  type ListEventCancellationBatchesQuery,
 } from "./event-cancellation-refund.interface.js";
 import { EventCancellationRefundRepository } from "./event-cancellation-refund.repository.js";
+import { TicketCancellationRepository } from "./ticket-cancellation.repository.js";
 
 type StripeClient = InstanceType<typeof Stripe>;
 type StripeWebhookEvent = ReturnType<StripeClient["webhooks"]["constructEvent"]>;
@@ -61,6 +65,8 @@ export class EventCancellationRefundService {
     private readonly earningRepository = new CreatorEarningRepository(),
     private readonly ticketShareRepository = new TicketShareRepository(),
     private readonly notificationService = new NotificationService(),
+    private readonly ticketCancellationRepository = new TicketCancellationRepository(),
+    private readonly userRepository = new UserRepository(),
   ) {}
 
   public async cancelPublishedEvent(
@@ -418,9 +424,14 @@ export class EventCancellationRefundService {
     return this.toBatchResponse(recovered);
   }
 
-  public async listBatches(): Promise<CancellationBatchResponse[]> {
-    const batches = await this.repository.findBatches();
-    return batches.map((batch) => this.toBatchResponse(batch));
+  public async listBatches(query: ListEventCancellationBatchesQuery = {}): Promise<CancellationBatchResponse[]> {
+    const batches = await this.repository.findBatches(query);
+    const { eventById, hostById } = await this.getBatchHumanContext(batches);
+    return batches.map((batch) => this.toBatchResponse(
+      batch,
+      eventById.get(batch.eventId.toString()) ?? null,
+      hostById.get(batch.hostUserId.toString()) ?? null,
+    ));
   }
 
   public async getBatchDetails(batchId: string): Promise<{
@@ -433,8 +444,13 @@ export class EventCancellationRefundService {
     const taxReversals = await this.repository.findTaxReversalsByRefundItemIds(refunds.map((refund) => refund._id.toString()));
     const taxReversalByRefundId = new Map(taxReversals.map((reversal) => [reversal.refundItemId.toString(), reversal]));
 
+    const [event, host] = await Promise.all([
+      this.eventRepository.findById(batch.eventId.toString()),
+      this.userRepository.findById(batch.hostUserId.toString()),
+    ]);
+
     return {
-      batch: this.toBatchResponse(batch),
+      batch: this.toBatchResponse(batch, event, host),
       refunds: refunds.map((refund) => this.toRefundItemResponse(refund, taxReversalByRefundId.get(refund._id.toString()))),
     };
   }
@@ -527,7 +543,10 @@ export class EventCancellationRefundService {
     batch: IEventCancellationBatch,
     order: ICheckoutOrder,
   ): Promise<IEventCancellationRefund> {
-    const requestedAmountMinor = toMinor(order.amountMinor);
+    const previouslyCancelledAmountMinor = await this.ticketCancellationRepository.sumRequestedAmountByOrderId(
+      order._id.toString(),
+    );
+    const requestedAmountMinor = Math.max(0, toMinor(order.amountMinor) - previouslyCancelledAmountMinor);
     const providerIdempotencyKey = [
       "event-cancellation-refund",
       batch.eventId.toString(),
@@ -685,15 +704,18 @@ export class EventCancellationRefundService {
     stripeRefundId?: string | null;
     providerStatus?: string | null;
   }> {
-    const paymentIntent = await this.getStripe().paymentIntents.retrieve(paymentIntentId);
-    const captured = Math.max(item.originalCapturedAmountMinor, paymentIntent.amount_received ?? 0);
+    const captured = item.originalCapturedAmountMinor;
     const refunds = await this.getStripe().refunds.list({ payment_intent: paymentIntentId, limit: 100 });
-    const matchingRefund = refunds.data.find((refund) =>
+    const eventCancellationRefunds = refunds.data.filter((refund) =>
+      refund.metadata?.sourceType !== "user_ticket_cancellation" &&
+      typeof refund.metadata?.ticketCancellationId !== "string",
+    );
+    const matchingRefund = eventCancellationRefunds.find((refund) =>
       refund.id === item.stripeRefundId ||
       refund.metadata?.refundItemId === item._id.toString() ||
       refund.metadata?.orderId === item.checkoutOrderId.toString(),
     ) ?? null;
-    const providerRefunded = refunds.data.reduce((sum, refund) => {
+    const providerRefunded = eventCancellationRefunds.reduce((sum, refund) => {
       if (refund.status === "failed" || refund.status === "canceled") return sum;
       return sum + (refund.amount ?? 0);
     }, 0);
@@ -783,14 +805,30 @@ export class EventCancellationRefundService {
   }
 
   private async releaseCapacityForOrder(order: ICheckoutOrder): Promise<void> {
+    const cancellations = await this.ticketCancellationRepository.findByOrderId(order._id.toString());
+
     for (const item of order.lineItems.filter((lineItem) => lineItem.itemType === "ticket" && lineItem.eventId && lineItem.itemId)) {
       const qty = item.totalQuantity ?? item.quantity;
+      const paidQuantity = item.paidQuantity ?? item.quantity;
+      const lineCancellations = cancellations.filter((cancellation) =>
+        cancellation.eventId.toString() === item.eventId &&
+        cancellation.ticketId === item.itemId,
+      );
+      const cancelledTicketQty = lineCancellations.length;
+      const cancelledRewardQty = lineCancellations.filter((cancellation) => cancellation.ticketIndex > paidQuantity).length;
+      const releaseTicketQty = Math.max(0, qty - cancelledTicketQty);
+      const releaseRewardQty = Math.max(0, (item.freeQuantity ?? 0) - cancelledRewardQty);
+
+      if (releaseTicketQty <= 0 && releaseRewardQty <= 0) {
+        continue;
+      }
+
       await this.eventRepository.releaseTicketAndRewardCapacity(
         item.eventId!,
         item.itemId!,
-        qty,
+        releaseTicketQty,
         item.rewardId,
-        item.freeQuantity ?? 0,
+        releaseRewardQty,
       ).catch((error) => {
         logger.error({ error, eventId: item.eventId, ticketId: item.itemId, orderId: order._id.toString() }, "Failed to release cancelled-event ticket capacity");
       });
@@ -880,7 +918,7 @@ export class EventCancellationRefundService {
   private async sendBuyerProcessingNotification(batch: IEventCancellationBatch, orderId: string): Promise<void> {
     const item = (await this.repository.findRefundItemsByBatchId(batch._id.toString()))
       .find((refund) => refund.checkoutOrderId.toString() === orderId);
-    if (!item || item.notificationState.processingSentAt) return;
+    if (!item || item.requestedAmountMinor <= 0 || item.notificationState.processingSentAt) return;
 
     await this.notificationService.sendSystemNotification(
       item.originalPayerUserId.toString(),
@@ -904,6 +942,7 @@ export class EventCancellationRefundService {
   }
 
   private async sendBuyerCompletedNotification(item: IEventCancellationRefund): Promise<void> {
+    if (item.requestedAmountMinor <= 0) return;
     if (item.notificationState.completedSentAt) return;
 
     const amount = (item.completedAmountMinor / 100).toLocaleString("en-US", {
@@ -1024,7 +1063,28 @@ export class EventCancellationRefundService {
     };
   }
 
-  private toBatchResponse(batch: IEventCancellationBatch): CancellationBatchResponse {
+  private async getBatchHumanContext(batches: IEventCancellationBatch[]): Promise<{
+    eventById: Map<string, IEvent>;
+    hostById: Map<string, IUser>;
+  }> {
+    const eventIds = [...new Set(batches.map((batch) => batch.eventId.toString()))];
+    const hostIds = [...new Set(batches.map((batch) => batch.hostUserId.toString()))];
+    const [events, hosts] = await Promise.all([
+      this.eventRepository.findManyByIds(eventIds),
+      this.userRepository.findByIds(hostIds),
+    ]);
+
+    return {
+      eventById: new Map(events.map((event) => [event._id.toString(), event])),
+      hostById: new Map(hosts.map((host) => [host._id.toString(), host])),
+    };
+  }
+
+  private toBatchResponse(
+    batch: IEventCancellationBatch,
+    event: IEvent | null = null,
+    host: IUser | null = null,
+  ): CancellationBatchResponse {
     const rawSummaries = batch.currencySummaries instanceof Map
       ? Object.fromEntries(batch.currencySummaries.entries())
       : batch.currencySummaries;
@@ -1054,6 +1114,16 @@ export class EventCancellationRefundService {
       lastReconciledAt: batch.lastReconciledAt ?? null,
       lastErrorSummary: batch.lastErrorSummary ?? null,
       legacyPayoutAnomaly: batch.legacyPayoutAnomaly,
+      event: {
+        name: event?.name ?? null,
+        scheduledAt: event?.scheduledAt ?? null,
+        cancelledAt: event?.cancelledAt ?? null,
+      },
+      host: {
+        name: host?.name ?? null,
+        email: host?.email ?? null,
+        username: host?.username ?? null,
+      },
       auditHistory: batch.auditHistory ?? [],
       createdAt: batch.createdAt,
       updatedAt: batch.updatedAt,

@@ -104,6 +104,7 @@ const createSummaryService = async ({
   eventTickets = [{ id: ticketId, name: "Standard", type: "pay", price: 10, capacity: 100, availableCount: 100 }],
   failAvatarUrl = false,
   followingIds = [],
+  cancellations = [],
 }: {
   orders: Array<ReturnType<typeof createOrder>>;
   usages?: Array<ReturnType<typeof passUsage>>;
@@ -121,6 +122,12 @@ const createSummaryService = async ({
   }>;
   failAvatarUrl?: boolean;
   followingIds?: string[];
+  cancellations?: Array<{
+    eventId: Types.ObjectId | string;
+    ticketId: string;
+    orderId: Types.ObjectId | string;
+    ticketIndex: number;
+  }>;
 }) => {
   const { CheckoutPaymentService } = await import("../src/modules/payments/checkout-payment.service.js");
   const event = {
@@ -154,6 +161,10 @@ const createSummaryService = async ({
   const ticketUsageRepository = {
     findByEventIdsAndOrderIds: async () => usages,
   };
+  const ticketCancellationRepository = {
+    findByEventId: async () => cancellations,
+    findByEventIds: async () => cancellations,
+  };
   const userRepository = {
     findByIds: async (ids: string[]) => users.filter((user) => ids.includes(user._id.toString())),
   };
@@ -180,6 +191,9 @@ const createSummaryService = async ({
     ticketUsageRepository as never,
     {} as never,
     storageService as never,
+    undefined as never,
+    undefined as never,
+    ticketCancellationRepository as never,
   );
 
   return service;

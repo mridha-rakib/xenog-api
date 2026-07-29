@@ -30,6 +30,7 @@ import { TicketPassClaimRepository } from "./ticket-pass-claim.repository.js";
 
 type StripeClient = InstanceType<typeof Stripe>;
 type StripeWebhookEvent = ReturnType<StripeClient["webhooks"]["constructEvent"]>;
+type StripeRefund = Extract<StripeWebhookEvent, { type: "refund.created" | "refund.updated" }>["data"]["object"];
 
 const CANCELLATION_CUTOFF_MS = 3 * 60 * 60 * 1000;
 const MAX_ATTEMPTS = 6;
@@ -693,7 +694,7 @@ export class TicketCancellationService {
     return result;
   }
 
-  private async applyRefundWebhook(refund: Stripe.Refund): Promise<void> {
+  private async applyRefundWebhook(refund: StripeRefund): Promise<void> {
     const cancellationId = typeof refund.metadata?.ticketCancellationId === "string"
       ? refund.metadata.ticketCancellationId
       : null;

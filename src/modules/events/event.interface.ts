@@ -5,6 +5,8 @@ import type { EventCancellationReasonType } from "../payments/event-cancellation
 
 export const eventStatuses = ["draft", "published", "live", "completed", "cancelled"] as const;
 export type EventStatus = (typeof eventStatuses)[number];
+export const crowdStatuses = ["not_busy", "busy", "very_busy"] as const;
+export type CrowdStatus = (typeof crowdStatuses)[number];
 
 export const eventAgeRestrictions = ["all_ages", "18_plus", "21_plus"] as const;
 export type EventAgeRestriction = (typeof eventAgeRestrictions)[number];
@@ -452,6 +454,7 @@ export interface EventResponse {
   isSaved?: boolean;
   canReport?: boolean;
   status: EventStatus;
+  crowdStatus: CrowdStatus | null;
   name?: string | null;
   description?: string | null;
   bannerImageKey?: string | null;
@@ -542,6 +545,7 @@ export interface AdminMapEventResponse {
   id: string;
   title: string;
   status: AdminMapEventStatus;
+  crowdStatus: CrowdStatus | null;
   scheduledAt?: Date | null;
   endAt?: Date | null;
   latitude: number;

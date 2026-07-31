@@ -25,6 +25,7 @@ import { RewardClaimRepository } from "./reward-claim.repository.js";
 import type { IRewardClaim } from "./reward-claim.model.js";
 import { CheckoutPaymentRepository } from "../payments/checkout-payment.repository.js";
 import { CheckoutPaymentService } from "../payments/checkout-payment.service.js";
+import { CrowdStatusService } from "../payments/crowd-status.service.js";
 import { CreatorEarningRepository } from "../payments/creator-earning.repository.js";
 import { EventCancellationRefundService } from "../payments/event-cancellation-refund.service.js";
 import type { CancelEventDto, CancellationBatchResponse } from "../payments/event-cancellation-refund.interface.js";
@@ -230,6 +231,7 @@ export class EventService {
     private readonly ticketUsageRepository = new TicketUsageRepository(),
     private readonly eventHostReviewRepository = new EventHostReviewRepository(),
     private readonly eventWindowRepository = new EventWindowRepository(),
+    private readonly crowdStatusService = new CrowdStatusService(),
     private readonly getServerNow = () => new Date(Date.now()),
     private readonly eventCancellationRefundService = new EventCancellationRefundService(),
   ) {}
@@ -1026,7 +1028,7 @@ export class EventService {
   public async listMyEvents(user: AuthUser): Promise<EventResponse[]> {
     const events = await this.eventRepository.findByUserId(user.id);
 
-    return events.map((event) => this.toResponse(event));
+    return this.withCrowdStatuses(events, events.map((event) => this.toResponse(event)));
   }
 
   public async listMyDraftEvents(user: AuthUser): Promise<EventResponse[]> {
@@ -1094,7 +1096,7 @@ export class EventService {
         publicGoingSummariesPromise,
       ]);
 
-    return events.map((event, index) => {
+    const responseEvents = events.map((event, index) => {
       const host = hostById.get(event.userId.toString()) ?? null;
       const hostExtras =
         user && host ? { isFollowing: followingSet.has(event.userId.toString()) } : undefined;
@@ -1110,6 +1112,8 @@ export class EventService {
         publicGoingSummary: publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },
       };
     });
+
+    return this.withCrowdStatuses(events, responseEvents);
   }
 
   public async toggleSaveEvent(
@@ -1257,7 +1261,10 @@ export class EventService {
         this.eventRepository.countProfileEventsByUserId(userId, includePrivateEvents, filter),
         this.userRepository.findById(userId),
       ]);
-      const responseEvents = await this.withPublicGoingSummaries(events.map((event) => this.toResponse(event, host)));
+      const responseEvents = await this.withCrowdStatuses(
+        events,
+        await this.withPublicGoingSummaries(events.map((event) => this.toResponse(event, host))),
+      );
 
       return {
         active: filter === "past" ? [] : responseEvents,
@@ -1270,7 +1277,7 @@ export class EventService {
     const cachedEvents = await this.getCachedProfileEvents(cacheKey);
 
     if (cachedEvents) {
-      return this.withPublicGoingSummariesForGroups(cachedEvents);
+      return this.withCrowdStatusesForGroups(await this.withPublicGoingSummariesForGroups(cachedEvents));
     }
 
     const [events, host] = await Promise.all([
@@ -1285,7 +1292,7 @@ export class EventService {
 
     await this.cacheProfileEvents(cacheKey, response);
 
-    return this.withPublicGoingSummariesForGroups(response);
+    return this.withCrowdStatusesForGroups(await this.withPublicGoingSummariesForGroups(response));
   }
 
   public async startEvent(user: AuthUser, eventId: string): Promise<EventResponse> {
@@ -1370,8 +1377,11 @@ export class EventService {
     const hostById = await this.getHostById(pageEvents);
 
     return {
-      events: pageEvents.map((event) =>
-        this.toResponse(event, hostById.get(event.userId.toString()) ?? null),
+      events: await this.withCrowdStatuses(
+        pageEvents,
+        pageEvents.map((event) =>
+          this.toResponse(event, hostById.get(event.userId.toString()) ?? null),
+        ),
       ),
       nextCursor,
     };
@@ -1382,6 +1392,7 @@ export class EventService {
     const activeSince = new Date(now.getTime() - ACTIVE_EVENT_WINDOW_MS);
     const events = await this.eventRepository.findAdminMapEvents(now, activeSince);
     const hostById = await this.getHostById(events);
+    const crowdStatusByEventId = await this.crowdStatusService.getCrowdStatusByEventId(events);
 
     const items = await Promise.all(
       events.map(async (event): Promise<AdminMapEventResponse | null> => {
@@ -1415,6 +1426,7 @@ export class EventService {
           id: event._id.toString(),
           title: event.name?.trim() || "Untitled Event",
           status: event.status === "live" ? "live" : isUpcoming ? "upcoming" : "active",
+          crowdStatus: crowdStatusByEventId.get(event._id.toString()) ?? null,
           scheduledAt: event.scheduledAt ?? null,
           endAt: event.endAt ?? null,
           latitude,
@@ -1459,7 +1471,7 @@ export class EventService {
       last_call: 2,
     };
 
-    return events
+    const responseEvents = events
       .map((event) => {
         const nowStatus = getNowStatus(event.scheduledAt ?? null, event.endAt ?? null);
 
@@ -1474,6 +1486,8 @@ export class EventService {
       })
       .filter((event): event is NowModeEventResponse => event !== null)
       .sort((a, b) => statusPriority[a.nowStatus] - statusPriority[b.nowStatus]);
+
+    return this.withCrowdStatuses(events, responseEvents);
   }
 
   public async getEventById(user: AuthUser, eventId: string): Promise<EventResponse> {
@@ -1547,6 +1561,7 @@ export class EventService {
       savedMomentIds,
       attendance,
       publicGoingSummaries,
+      crowdStatusByEventId,
     ] = await Promise.all([
       this.momentReactionRepository.countByMomentIds([interactionMomentId]),
       this.momentCommentRepository.countByMomentIds([interactionMomentId]),
@@ -1557,6 +1572,7 @@ export class EventService {
       this.checkoutPaymentService.getPublicEventGoingSummaries([
         { id: event._id.toString(), status: event.status },
       ]),
+      this.crowdStatusService.getCrowdStatusByEventId([event]),
     ]);
 
     let myJoinRequestStatus: EventJoinRequestStatus | null = null;
@@ -1588,6 +1604,7 @@ export class EventService {
       isMember: !isOwner && event.memberUserIds.some((id) => id.toString() === user.id),
       hostReviewEligibility,
       publicGoingSummary: publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },
+      crowdStatus: crowdStatusByEventId.get(event._id.toString()) ?? null,
     };
   }
 
@@ -2997,6 +3014,37 @@ export class EventService {
     };
   }
 
+  private async withCrowdStatuses<T extends EventResponse>(
+    sourceEvents: Array<IEvent | EventResponse>,
+    responseEvents: T[],
+  ): Promise<T[]> {
+    if (responseEvents.length === 0) {
+      return responseEvents;
+    }
+
+    const crowdStatusByEventId = await this.crowdStatusService.getCrowdStatusByEventId(sourceEvents);
+
+    return responseEvents.map((event) => ({
+      ...event,
+      crowdStatus: crowdStatusByEventId.get(event.id) ?? null,
+    }));
+  }
+
+  private async withCrowdStatusesForGroups(
+    groups: ProfileEventGroupsResponse,
+  ): Promise<ProfileEventGroupsResponse> {
+    const [active, past] = await Promise.all([
+      this.withCrowdStatuses(groups.active, groups.active),
+      this.withCrowdStatuses(groups.past, groups.past),
+    ]);
+
+    return {
+      ...groups,
+      active,
+      past,
+    };
+  }
+
   private getProfileEventsCacheKey(userId: string, includePrivateEvents: boolean): string {
     return [
       "events",
@@ -3178,6 +3226,7 @@ export class EventService {
       userId: event.userId.toString(),
       ...(host !== undefined ? { host: this.toHostResponse(host, hostExtras) } : {}),
       status: event.status,
+      crowdStatus: null,
       name: event.name ?? null,
       description: event.description ?? null,
       bannerImageKey: event.bannerImageKey ?? null,

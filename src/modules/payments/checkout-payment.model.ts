@@ -295,6 +295,7 @@ const checkoutOrderSchema = new Schema<ICheckoutOrder>(
 );
 
 checkoutOrderSchema.index({ userId: 1, createdAt: -1 });
+checkoutOrderSchema.index({ kind: 1, paymentStatus: 1, "lineItems.eventId": 1 });
 checkoutOrderSchema.index(
   { stripePaymentIntentId: 1 },
   {

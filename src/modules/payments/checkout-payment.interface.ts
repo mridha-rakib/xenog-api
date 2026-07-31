@@ -1,5 +1,5 @@
 import type { Types } from "mongoose";
-import type { EventCategory } from "../events/event.interface.js";
+import type { CrowdStatus, EventCategory } from "../events/event.interface.js";
 import type { CancellationRefundStatus } from "./event-cancellation-refund.interface.js";
 import type {
   TicketCancellationEligibilityResponse,
@@ -230,6 +230,7 @@ export interface TicketWalletEvent {
     providerResultType?: string | null;
   } | null;
   status: string;
+  crowdStatus: CrowdStatus | null;
   cancellationDisplayReason?: string | null;
   host?: TicketWalletEventHost | null;
   publicGoingSummary?: PublicEventGoingSummaryResponse;

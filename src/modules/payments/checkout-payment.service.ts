@@ -45,6 +45,7 @@ import type {
 import { CheckoutPaymentRepository } from "./checkout-payment.repository.js";
 import { CheckoutTaxService } from "./checkout-tax.service.js";
 import { CheckoutInvoiceService } from "./checkout-invoice.service.js";
+import { CrowdStatusService } from "./crowd-status.service.js";
 import { CreatorEarningRepository } from "./creator-earning.repository.js";
 import { TicketShareRepository } from "./ticket-share.repository.js";
 import { TicketUsageRepository } from "./ticket-usage.repository.js";
@@ -120,6 +121,7 @@ export class CheckoutPaymentService {
     private readonly taxService = new CheckoutTaxService(() => this.getStripe()),
     private readonly invoiceService = new CheckoutInvoiceService(),
     private readonly ticketPassClaimRepository = new TicketPassClaimRepository(),
+    private readonly crowdStatusService = new CrowdStatusService(),
   ) {}
 
   public async getMyTicketPurchaseCounts(
@@ -597,9 +599,12 @@ export class CheckoutPaymentService {
       this.ticketCancellationRepository.findByOrderIds(orderIds),
     ]);
     const eventById = new Map(events.map((event) => [event._id.toString(), event]));
-    const publicGoingSummaries = await this.getPublicEventGoingSummaries(
-      events.map((event) => ({ id: event._id.toString(), status: event.status })),
-    );
+    const [publicGoingSummaries, crowdStatusByEventId] = await Promise.all([
+      this.getPublicEventGoingSummaries(
+        events.map((event) => ({ id: event._id.toString(), status: event.status })),
+      ),
+      this.crowdStatusService.getCrowdStatusByEventId(events),
+    ]);
     const followingIdSet = new Set(followingIds);
     const userIds = [
       ...new Set([
@@ -656,6 +661,7 @@ export class CheckoutPaymentService {
           host,
           followingIdSet.has(event.userId.toString()),
           publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },
+          crowdStatusByEventId.get(event._id.toString()) ?? null,
         );
         const itemKey = `${lineItem.eventId}:${lineItem.itemId}`;
         for (const ticketPass of walletItem.ticketPasses) {
@@ -738,6 +744,7 @@ export class CheckoutPaymentService {
           cancellation,
           followingIdSet.has(event.userId.toString()),
           publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },
+          crowdStatusByEventId.get(event._id.toString()) ?? null,
         );
         sharedItem.refund = null;
         return sharedItem;
@@ -2816,6 +2823,7 @@ export class CheckoutPaymentService {
     host: IUser | null,
     isFollowing: boolean,
     publicGoingSummary: PublicEventGoingSummaryResponse,
+    crowdStatus: TicketWalletItem["event"]["crowdStatus"],
   ): TicketWalletItem {
     const { paidQuantity, freeQuantity, totalQuantity } = this.getEffectiveTicketQuantities(event, lineItem);
     const ticketPasses = this.buildTicketPasses(order, lineItem, event);
@@ -2879,6 +2887,7 @@ export class CheckoutPaymentService {
             }
           : null,
         status: event.status,
+        crowdStatus,
         cancellationDisplayReason: event.cancellationDisplayReason ?? null,
         host: host
           ? {
@@ -2905,6 +2914,7 @@ export class CheckoutPaymentService {
     cancellation: ITicketCancellation | null,
     isFollowing: boolean,
     publicGoingSummary: PublicEventGoingSummaryResponse,
+    crowdStatus: TicketWalletItem["event"]["crowdStatus"],
   ): TicketWalletItem {
     const ticketIndex = share.ticketIndex ?? 1;
     const unitAmount = 0;
@@ -2981,6 +2991,7 @@ export class CheckoutPaymentService {
             }
           : null,
         status: event.status,
+        crowdStatus,
         cancellationDisplayReason: event.cancellationDisplayReason ?? null,
         host: host ? { ...this.toWalletUser(host), isFollowing } : null,
         publicGoingSummary,

@@ -29,6 +29,7 @@ import {
 } from "./event-cancellation-refund.interface.js";
 import { EventCancellationRefundRepository } from "./event-cancellation-refund.repository.js";
 import { TicketCancellationRepository } from "./ticket-cancellation.repository.js";
+import { RefundReceiptService } from "./refund-receipt.service.js";
 
 type StripeClient = InstanceType<typeof Stripe>;
 type StripeWebhookEvent = ReturnType<StripeClient["webhooks"]["constructEvent"]>;
@@ -67,6 +68,7 @@ export class EventCancellationRefundService {
     private readonly notificationService = new NotificationService(),
     private readonly ticketCancellationRepository = new TicketCancellationRepository(),
     private readonly userRepository = new UserRepository(),
+    private readonly refundReceiptService = new RefundReceiptService(),
   ) {}
 
   public async cancelPublishedEvent(
@@ -943,6 +945,14 @@ export class EventCancellationRefundService {
 
   private async sendBuyerCompletedNotification(item: IEventCancellationRefund): Promise<void> {
     if (item.requestedAmountMinor <= 0) return;
+
+    await this.refundReceiptService.enqueueForEventCancellation(item).catch((error) => {
+      logger.error(
+        { error, refundItemId: item._id.toString(), orderId: item.checkoutOrderId.toString() },
+        "Failed to enqueue event cancellation refund receipt",
+      );
+    });
+
     if (item.notificationState.completedSentAt) return;
 
     const amount = (item.completedAmountMinor / 100).toLocaleString("en-US", {

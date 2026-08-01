@@ -27,6 +27,7 @@ import {
 } from "./ticket-cancellation.interface.js";
 import { TicketCancellationRepository } from "./ticket-cancellation.repository.js";
 import { TicketPassClaimRepository } from "./ticket-pass-claim.repository.js";
+import { RefundReceiptService } from "./refund-receipt.service.js";
 
 type StripeClient = InstanceType<typeof Stripe>;
 type StripeWebhookEvent = ReturnType<StripeClient["webhooks"]["constructEvent"]>;
@@ -205,6 +206,7 @@ export class TicketCancellationService {
     private readonly earningRepository = new CreatorEarningRepository(),
     private readonly passClaimRepository = new TicketPassClaimRepository(),
     private readonly userRepository = new UserRepository(),
+    private readonly refundReceiptService = new RefundReceiptService(),
   ) {}
 
   public async cancelTicketPass(user: AuthUser, payload: CancelTicketPassDto): Promise<TicketCancellationResponse> {
@@ -1178,7 +1180,18 @@ export class TicketCancellationService {
   }
 
   private async sendBuyerCompletedNotification(cancellation: ITicketCancellation): Promise<void> {
-    if (cancellation.requestedAmountMinor <= 0 || cancellation.notificationState.buyerRefundCompletedSentAt) {
+    if (cancellation.requestedAmountMinor <= 0) {
+      return;
+    }
+
+    await this.refundReceiptService.enqueueForTicketCancellation(cancellation).catch((error) => {
+      logger.error(
+        { error, ticketCancellationId: cancellation._id.toString(), orderId: cancellation.orderId.toString() },
+        "Failed to enqueue ticket cancellation refund receipt",
+      );
+    });
+
+    if (cancellation.notificationState.buyerRefundCompletedSentAt) {
       return;
     }
 

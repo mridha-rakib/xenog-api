@@ -17,6 +17,7 @@ import { startEventCancellationRefundScheduler } from "./modules/payments/event-
 import { startTicketCancellationScheduler } from "./modules/payments/ticket-cancellation.scheduler.js";
 import { ensureCheckoutOrderIndexes } from "./modules/payments/checkout-payment.model.js";
 import { ensureCheckoutInvoiceIndexes } from "./modules/payments/checkout-invoice.model.js";
+import { ensureRefundReceiptIndexes } from "./modules/payments/refund-receipt.model.js";
 import { ensureCreatorEarningIndexes } from "./modules/payments/creator-earning.model.js";
 import { ensureCreatorPayoutIndexes } from "./modules/payments/creator-payout.model.js";
 import { ensureEventCancellationRefundIndexes } from "./modules/payments/event-cancellation-refund.model.js";
@@ -31,6 +32,7 @@ const startServer = async (): Promise<void> => {
   await Database.connect();
   await ensureCheckoutOrderIndexes();
   await ensureCheckoutInvoiceIndexes();
+  await ensureRefundReceiptIndexes();
   await ensureCreatorEarningIndexes();
   await ensureCreatorPayoutIndexes();
   await ensureEventCancellationRefundIndexes();

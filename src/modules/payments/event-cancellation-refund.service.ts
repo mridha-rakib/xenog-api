@@ -6,6 +6,7 @@ import { logger } from "../../core/logger/logger.js";
 import { AppError } from "../../core/errors/app-error.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { EventRepository } from "../events/event.repository.js";
+import { RewardClaimRepository } from "../events/reward-claim.repository.js";
 import type { IEvent } from "../events/event.interface.js";
 import type { ICheckoutOrder } from "./checkout-payment.interface.js";
 import { CheckoutPaymentRepository } from "./checkout-payment.repository.js";
@@ -69,6 +70,7 @@ export class EventCancellationRefundService {
     private readonly ticketCancellationRepository = new TicketCancellationRepository(),
     private readonly userRepository = new UserRepository(),
     private readonly refundReceiptService = new RefundReceiptService(),
+    private readonly rewardClaimRepository = new RewardClaimRepository(),
   ) {}
 
   public async cancelPublishedEvent(
@@ -811,29 +813,34 @@ export class EventCancellationRefundService {
 
     for (const item of order.lineItems.filter((lineItem) => lineItem.itemType === "ticket" && lineItem.eventId && lineItem.itemId)) {
       const qty = item.totalQuantity ?? item.quantity;
-      const paidQuantity = item.paidQuantity ?? item.quantity;
       const lineCancellations = cancellations.filter((cancellation) =>
         cancellation.eventId.toString() === item.eventId &&
         cancellation.ticketId === item.itemId,
       );
       const cancelledTicketQty = lineCancellations.length;
-      const cancelledRewardQty = lineCancellations.filter((cancellation) => cancellation.ticketIndex > paidQuantity).length;
       const releaseTicketQty = Math.max(0, qty - cancelledTicketQty);
-      const releaseRewardQty = Math.max(0, (item.freeQuantity ?? 0) - cancelledRewardQty);
 
-      if (releaseTicketQty <= 0 && releaseRewardQty <= 0) {
-        continue;
+      if (releaseTicketQty > 0) {
+        await this.eventRepository.releaseTicketAndRewardCapacity(
+          item.eventId!,
+          item.itemId!,
+          releaseTicketQty,
+          null,
+          0,
+        ).catch((error) => {
+          logger.error({ error, eventId: item.eventId, ticketId: item.itemId, orderId: order._id.toString() }, "Failed to release cancelled-event ticket capacity");
+        });
       }
 
-      await this.eventRepository.releaseTicketAndRewardCapacity(
-        item.eventId!,
-        item.itemId!,
-        releaseTicketQty,
-        item.rewardId,
-        releaseRewardQty,
-      ).catch((error) => {
-        logger.error({ error, eventId: item.eventId, ticketId: item.itemId, orderId: order._id.toString() }, "Failed to release cancelled-event ticket capacity");
-      });
+      if (item.rewardId && item.rewardSnapshot?.rewardType === "ticket") {
+        await this.rewardClaimRepository.releaseCheckoutRewardRedemptionAndRestoreCapacity({
+          orderId: order._id.toString(),
+          eventId: item.eventId!,
+          ticketId: item.itemId!,
+          rewardId: item.rewardId,
+          claimStatuses: ["pending", "redeemed"],
+        });
+      }
     }
   }
 

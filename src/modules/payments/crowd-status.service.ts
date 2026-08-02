@@ -172,7 +172,11 @@ export class CrowdStatusService {
   }
 
   private calculateTicketRewardQuantity(paidQuantity: number, reward?: EventReward | null): number {
-    if (!reward || reward.rewardType !== "ticket" || reward.buyQuantity <= 0 || reward.freeQuantity <= 0) {
+    const bogoEnabled = reward?.bogoEnabled ?? (
+      typeof reward?.buyQuantity === "number" && typeof reward?.freeQuantity === "number"
+    );
+
+    if (!reward || reward.rewardType !== "ticket" || !bogoEnabled) {
       return 0;
     }
 
@@ -180,7 +184,7 @@ export class CrowdStatusService {
       return 0;
     }
 
-    return Math.floor(paidQuantity / reward.buyQuantity) * reward.freeQuantity;
+    return Math.floor(paidQuantity / (reward.buyQuantity ?? 1)) * (reward.freeQuantity ?? 0);
   }
 
   private getTicketRewardForLineItem(event: CrowdStatusEventInput, lineItem: CheckoutOrderLineItem): EventReward | null {

@@ -1294,8 +1294,31 @@ export class EventRepository {
     rewardId: string | null,
     rewardQuantity: number,
   ): Promise<IEvent | null> {
-    if (!rewardId || rewardQuantity <= 0) {
+    if (!rewardId) {
       return this.reserveTicketCapacity(eventId, ticketId, ticketQuantity);
+    }
+
+    if (rewardQuantity <= 0) {
+      return EventModel.findOneAndUpdate(
+        {
+          _id: eventId,
+          status: "published",
+          scheduledAt: { $ne: null, $gt: new Date() },
+          tickets: { $elemMatch: { id: ticketId, availableCount: { $gte: ticketQuantity } } },
+          rewards: { $elemMatch: { id: rewardId, disabledAt: null } },
+        },
+        {
+          $inc: {
+            "tickets.$[ticket].availableCount": -ticketQuantity,
+          },
+        },
+        {
+          new: true,
+          arrayFilters: [
+            { "ticket.id": ticketId },
+          ],
+        },
+      );
     }
 
     return EventModel.findOneAndUpdate(
@@ -1304,7 +1327,7 @@ export class EventRepository {
         status: "published",
         scheduledAt: { $ne: null, $gt: new Date() },
         tickets: { $elemMatch: { id: ticketId, availableCount: { $gte: ticketQuantity } } },
-        rewards: { $elemMatch: { id: rewardId, availableCount: { $gte: rewardQuantity } } },
+        rewards: { $elemMatch: { id: rewardId, disabledAt: null, availableCount: { $gte: rewardQuantity } } },
       },
       {
         $inc: {

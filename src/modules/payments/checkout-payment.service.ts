@@ -9,6 +9,7 @@ import { logger } from "../../core/logger/logger.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { EventRepository } from "../events/event.repository.js";
 import type { EventReward, EventTicket, IEvent } from "../events/event.interface.js";
+import { RewardClaimRepository } from "../events/reward-claim.repository.js";
 import { ProductRepository } from "../products/product.repository.js";
 import { UserRepository } from "../user/user.repository.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
@@ -122,6 +123,7 @@ export class CheckoutPaymentService {
     private readonly invoiceService = new CheckoutInvoiceService(),
     private readonly ticketPassClaimRepository = new TicketPassClaimRepository(),
     private readonly crowdStatusService = new CrowdStatusService(),
+    private readonly rewardClaimRepository = new RewardClaimRepository(),
   ) {}
 
   public async getMyTicketPurchaseCounts(
@@ -1306,6 +1308,7 @@ export class CheckoutPaymentService {
           user.id,
           payload.eventId,
           payload.ticketId,
+          payload.applyReward ? payload.rewardId ?? null : null,
         );
 
         if (existingPending) {
@@ -1323,6 +1326,7 @@ export class CheckoutPaymentService {
           user.id,
           payload.eventId,
           payload.ticketId,
+          payload.applyReward ? payload.rewardId ?? null : null,
         );
 
         if (existingFree) {
@@ -1363,6 +1367,19 @@ export class CheckoutPaymentService {
       const ticketLineItem = lineItems[0];
       const reserveQty = ticketLineItem?.totalQuantity ?? payload.quantity;
       const rewardReservation = await this.prepareRewardReservation(amounts.event ?? null, ticketLineItem);
+      const rewardClaimReservation = ticketLineItem?.rewardId
+        ? await this.rewardClaimRepository.reserveCheckoutReward({
+            userId: user.id,
+            eventId: payload.eventId,
+            rewardId: ticketLineItem.rewardId,
+            ticketId: payload.ticketId,
+          })
+        : null;
+
+      if (ticketLineItem?.rewardId && !rewardClaimReservation) {
+        throw new AppError("You have already used this offer.", httpStatus.CONFLICT);
+      }
+
       const reserved = await this.eventRepository.reserveTicketAndRewardCapacity(
         payload.eventId,
         payload.ticketId,
@@ -1372,31 +1389,65 @@ export class CheckoutPaymentService {
       );
 
       if (!reserved) {
+        if (ticketLineItem?.rewardId) {
+          await this.rewardClaimRepository.releasePendingCheckoutReward({
+            userId: user.id,
+            eventId: payload.eventId,
+            rewardId: ticketLineItem.rewardId,
+          }).catch((releaseError) => {
+            logger.error({ releaseError, eventId: payload.eventId, rewardId: ticketLineItem.rewardId }, "Failed to release reward claim after capacity reservation failure");
+          });
+        }
         throw new AppError(
-          "Not enough tickets are available. Please try a different ticket or quantity.",
+          ticketLineItem?.rewardId
+            ? "This offer is no longer available for the selected quantity. You can remove the offer and continue with normal checkout."
+            : "Not enough tickets are available. Please try a different ticket or quantity.",
           httpStatus.BAD_REQUEST,
         );
       }
 
       // Create the order; compensate on any failure
       try {
-        if (amounts.totalAmount === 0) {
-          return await this.createFreeOrder(user, payload, lineItems, amounts);
+        const checkout = amounts.totalAmount === 0
+          ? await this.createFreeOrder(user, payload, lineItems, amounts)
+          : await this.createStripeOrder(user, payload, lineItems, amounts);
+
+        if (ticketLineItem?.rewardId) {
+          await this.rewardClaimRepository.attachCheckoutOrder({
+            userId: user.id,
+            eventId: payload.eventId,
+            rewardId: ticketLineItem.rewardId,
+            checkoutOrderId: checkout.order.id,
+            stripePaymentIntentId: checkout.order.stripePaymentIntentId,
+          });
+
+          if (checkout.order.paymentStatus === "paid") {
+            await this.rewardClaimRepository.markRedeemedByOrder(checkout.order.id);
+          }
         }
 
-        return await this.createStripeOrder(user, payload, lineItems, amounts);
+        return checkout;
       } catch (error) {
         await this.eventRepository.releaseTicketAndRewardCapacity(
           payload.eventId,
           payload.ticketId,
           reserveQty,
-          rewardReservation.rewardId,
-          rewardReservation.quantity,
+          null,
+          0,
         ).catch(
           (releaseError) => {
             logger.error({ releaseError, eventId: payload.eventId, ticketId: payload.ticketId }, "Failed to release ticket capacity after order creation failure");
           },
         );
+        if (ticketLineItem?.rewardId) {
+          await this.rewardClaimRepository.releaseCheckoutRewardRedemptionAndRestoreCapacity({
+            userId: user.id,
+            eventId: payload.eventId,
+            ticketId: payload.ticketId,
+            rewardId: ticketLineItem.rewardId,
+            claimStatuses: ["pending"],
+          });
+        }
         throw error;
       }
     } finally {
@@ -1785,14 +1836,24 @@ export class CheckoutPaymentService {
         item.eventId!,
         item.itemId!,
         qty,
-        item.rewardId,
-        item.freeQuantity ?? 0,
+        null,
+        0,
       ).catch((error) => {
         logger.error(
           { error, eventId: item.eventId, ticketId: item.itemId, orderId: order._id.toString() },
           "Failed to release ticket capacity",
         );
       });
+
+      if (item.rewardId && item.rewardSnapshot?.rewardType === "ticket") {
+        await this.rewardClaimRepository.releaseCheckoutRewardRedemptionAndRestoreCapacity({
+          orderId: order._id.toString(),
+          eventId: item.eventId!,
+          ticketId: item.itemId!,
+          rewardId: item.rewardId,
+          claimStatuses: ["pending", "redeemed"],
+        });
+      }
     }
   }
 
@@ -1804,8 +1865,14 @@ export class CheckoutPaymentService {
     const eventId = lineItems.find((item) => item.eventId)?.eventId;
     const event = eventId ? await this.eventRepository.findById(eventId) : null;
     const subtotalAmount = roundCurrency(lineItems.reduce((sum, item) => sum + item.totalAmount, 0));
-    const platformFeeAmount = roundCurrency(subtotalAmount * BUYER_FEE_STRIPE);
-    const discountAmount = 0;
+    const platformFeeBaseAmount = roundCurrency(lineItems.reduce((sum, item) => {
+      if (item.itemType === "ticket" && item.rewardSnapshot) {
+        return sum + item.rewardSnapshot.originalUnitAmount * (item.paidQuantity ?? item.quantity);
+      }
+      return sum + item.totalAmount;
+    }, 0));
+    const platformFeeAmount = roundCurrency(platformFeeBaseAmount * BUYER_FEE_STRIPE);
+    const discountAmount = roundCurrency(lineItems.reduce((sum, item) => sum + (item.rewardSnapshot?.discountAmount ?? 0), 0));
     const taxSnapshot = await this.taxService.calculate({
       currency,
       lineItems,
@@ -1813,7 +1880,15 @@ export class CheckoutPaymentService {
       event,
     });
     const taxAmount = roundCurrency(taxSnapshot.amount);
-    const totalAmount = roundCurrency(subtotalAmount + platformFeeAmount + taxAmount - discountAmount);
+    const totalAmount = roundCurrency(subtotalAmount + platformFeeAmount + taxAmount);
+
+    for (const item of lineItems) {
+      if (item.rewardSnapshot) {
+        item.rewardSnapshot.platformFeeAmount = platformFeeAmount;
+        item.rewardSnapshot.finalAmount = totalAmount;
+        item.rewardSnapshot.currency = currency;
+      }
+    }
 
     return {
       currency,
@@ -1835,14 +1910,14 @@ export class CheckoutPaymentService {
     if (!event || !rewardId) return;
 
     const reward = event.rewards.find((item) => item.id === rewardId);
-    if (!reward || reward.capacity <= 0 || reward.availableCount !== undefined && reward.availableCount !== null) {
+    if (!reward || !this.isRewardCapacityLimited(reward) || reward.availableCount !== undefined && reward.availableCount !== null) {
       return;
     }
 
     await this.eventRepository.initializeRewardAvailableCount(
       event._id.toString(),
       reward.id,
-      reward.capacity,
+      reward.capacity ?? 0,
     );
   }
 
@@ -1851,20 +1926,19 @@ export class CheckoutPaymentService {
     lineItem?: CheckoutOrderLineItem,
   ): Promise<{ rewardId: string | null; quantity: number }> {
     const rewardId = lineItem?.rewardId ?? null;
-    const freeQuantity = lineItem?.freeQuantity ?? 0;
 
-    if (!event || !rewardId || freeQuantity <= 0) {
+    if (!event || !rewardId) {
       return { rewardId: null, quantity: 0 };
     }
 
     const reward = event.rewards.find((item) => item.id === rewardId);
-    if (!reward || reward.capacity <= 0) {
+    if (!reward || !this.isRewardCapacityLimited(reward)) {
       return { rewardId: null, quantity: 0 };
     }
 
     await this.initializeRewardCounterForReservation(event, rewardId);
 
-    return { rewardId, quantity: freeQuantity };
+    return { rewardId, quantity: 1 };
   }
 
   private getStripe(): StripeClient {
@@ -1921,13 +1995,21 @@ export class CheckoutPaymentService {
         );
       }
 
-      const linkedReward = event.rewards.find(
-        (reward) => reward.rewardType === "ticket" && reward.ticketId === ticket.id,
-      );
-      const freeQuantity = this.calculateTicketRewardQuantity(payload.quantity, linkedReward);
+      const linkedReward = payload.applyReward
+        ? await this.getValidatedCheckoutReward(user, event, ticket, payload.rewardId ?? null, payload.quantity)
+        : null;
+      const freeQuantity = linkedReward
+        ? this.calculateTicketRewardQuantity(payload.quantity, linkedReward)
+        : 0;
       const totalQuantity = payload.quantity + freeQuantity;
       // Capacity enforcement is handled atomically by reserveTicketCapacity — no non-atomic check here.
-      const unitAmount = ticket.type === "free" || ticket.price <= 0 ? 0 : roundCurrency(ticket.price);
+      const originalUnitAmount = ticket.type === "free" || ticket.price <= 0 ? 0 : roundCurrency(ticket.price);
+      const unitAmount = linkedReward && this.isRewardDiscountEnabled(linkedReward)
+        ? roundCurrency(originalUnitAmount * (1 - (linkedReward.discountPercent ?? 0) / 100))
+        : originalUnitAmount;
+      const rewardDiscountAmount = linkedReward
+        ? roundCurrency((originalUnitAmount - unitAmount) * payload.quantity)
+        : 0;
 
       return [
         {
@@ -1940,7 +2022,31 @@ export class CheckoutPaymentService {
           paidQuantity: payload.quantity,
           freeQuantity,
           totalQuantity,
-          rewardId: freeQuantity > 0 ? linkedReward?.id ?? null : null,
+          rewardId: linkedReward?.id ?? null,
+          rewardSnapshot: linkedReward
+            ? {
+                rewardId: linkedReward.id,
+                rewardType: "ticket" as const,
+                name: linkedReward.name,
+                description: linkedReward.description ?? null,
+                discountEnabled: this.isRewardDiscountEnabled(linkedReward),
+                discountPercent: this.isRewardDiscountEnabled(linkedReward) ? linkedReward.discountPercent ?? null : null,
+                bogoEnabled: this.isRewardBogoEnabled(linkedReward),
+                buyQuantity: this.isRewardBogoEnabled(linkedReward) ? linkedReward.buyQuantity ?? null : null,
+                freeQuantity: this.isRewardBogoEnabled(linkedReward) ? linkedReward.freeQuantity ?? null : null,
+                capacityLimited: this.isRewardCapacityLimited(linkedReward),
+                originalUnitAmount,
+                discountedUnitAmount: unitAmount,
+                discountAmount: rewardDiscountAmount,
+                paidQuantity: payload.quantity,
+                freeQuantityIssued: freeQuantity,
+                totalQuantityIssued: totalQuantity,
+                platformFeeAmount: 0,
+                finalAmount: 0,
+                currency: env.STRIPE_CURRENCY.toLowerCase(),
+                appliedAt: new Date(),
+              }
+            : null,
           unitAmount,
           totalAmount: roundCurrency(unitAmount * payload.quantity),
         },
@@ -1992,7 +2098,7 @@ export class CheckoutPaymentService {
   }
 
   private calculateTicketRewardQuantity(paidQuantity: number, reward?: EventReward | null): number {
-    if (!reward || reward.rewardType !== "ticket" || reward.buyQuantity <= 0 || reward.freeQuantity <= 0) {
+    if (!reward || reward.rewardType !== "ticket" || !this.isRewardBogoEnabled(reward)) {
       return 0;
     }
 
@@ -2000,7 +2106,86 @@ export class CheckoutPaymentService {
       return 0;
     }
 
-    return Math.floor(paidQuantity / reward.buyQuantity) * reward.freeQuantity;
+    return Math.floor(paidQuantity / (reward.buyQuantity ?? 1)) * (reward.freeQuantity ?? 0);
+  }
+
+  private isRewardDiscountEnabled(reward: Pick<EventReward, "discountEnabled" | "discountPercent">): boolean {
+    return reward.discountEnabled ?? ((reward.discountPercent ?? 0) > 0);
+  }
+
+  private isRewardBogoEnabled(reward: Pick<EventReward, "bogoEnabled" | "buyQuantity" | "freeQuantity">): boolean {
+    return reward.bogoEnabled ?? (typeof reward.buyQuantity === "number" && typeof reward.freeQuantity === "number");
+  }
+
+  private isRewardCapacityLimited(reward: Pick<EventReward, "capacityLimited" | "capacity">): boolean {
+    return reward.capacityLimited ?? ((reward.capacity ?? 0) > 0);
+  }
+
+  private async getValidatedCheckoutReward(
+    user: AuthUser,
+    event: IEvent,
+    ticket: EventTicket,
+    rewardId: string | null,
+    paidQuantity: number,
+  ): Promise<EventReward> {
+    if (!rewardId) {
+      throw new AppError("Select an offer before applying it.", httpStatus.BAD_REQUEST);
+    }
+
+    const reward = event.rewards.find(
+      (item) => item.id === rewardId && item.rewardType === "ticket" && item.ticketId === ticket.id,
+    );
+
+    if (!reward) {
+      throw new AppError("This offer is not available for the selected ticket.", httpStatus.BAD_REQUEST);
+    }
+
+    if (reward.disabledAt) {
+      throw new AppError("This offer is disabled.", httpStatus.GONE);
+    }
+
+    if (reward.expiresAt && reward.expiresAt.getTime() < Date.now()) {
+      throw new AppError("This offer has expired.", httpStatus.GONE);
+    }
+
+    const discountEnabled = this.isRewardDiscountEnabled(reward);
+    const bogoEnabled = this.isRewardBogoEnabled(reward);
+
+    if (!discountEnabled && !bogoEnabled) {
+      throw new AppError("This offer is not available.", httpStatus.GONE);
+    }
+
+    if (discountEnabled && (!Number.isInteger(reward.discountPercent) || (reward.discountPercent ?? 0) < 1 || (reward.discountPercent ?? 0) > 100)) {
+      throw new AppError("This offer is not configured correctly.", httpStatus.GONE);
+    }
+
+    if (bogoEnabled) {
+      if (!Number.isInteger(reward.buyQuantity) || (reward.buyQuantity ?? 0) < 1 || (reward.buyQuantity ?? 0) > 2) {
+        throw new AppError("This offer is not configured correctly.", httpStatus.GONE);
+      }
+      if (!Number.isInteger(reward.freeQuantity) || (reward.freeQuantity ?? 0) < 1) {
+        throw new AppError("This offer is not configured correctly.", httpStatus.GONE);
+      }
+      if (paidQuantity < (reward.buyQuantity ?? 1)) {
+        throw new AppError(
+          `Select at least ${reward.buyQuantity} paid ticket${reward.buyQuantity === 1 ? "" : "s"} to apply this offer.`,
+          httpStatus.BAD_REQUEST,
+          { code: "REWARD_MINIMUM_QUANTITY_NOT_MET" },
+        );
+      }
+    }
+
+    const existingClaim = await this.rewardClaimRepository.findByUserAndReward(
+      user.id,
+      event._id.toString(),
+      reward.id,
+    );
+
+    if (existingClaim?.source === "checkout" && (existingClaim.status === "pending" || existingClaim.status === "redeemed")) {
+      throw new AppError("You have already used this offer.", httpStatus.CONFLICT);
+    }
+
+    return reward;
   }
 
   private getTicketRewardForLineItem(event: IEvent, lineItem: CheckoutOrderLineItem): EventReward | null {
@@ -2188,6 +2373,7 @@ export class CheckoutPaymentService {
   }
 
   private async finalizePaidSideEffects(order: ICheckoutOrder): Promise<void> {
+    await this.rewardClaimRepository.markRedeemedByOrder(order._id.toString());
     await this.recordCreatorEarnings(order);
     await this.invoiceService.enqueueForOrder(order).catch((error) => {
       logger.error({ error, orderId: order._id.toString() }, "Failed to enqueue checkout invoice");
@@ -2311,6 +2497,7 @@ export class CheckoutPaymentService {
         freeQuantity: item.freeQuantity ?? 0,
         totalQuantity: item.totalQuantity ?? item.quantity,
         rewardId: item.rewardId ?? null,
+        rewardSnapshot: item.rewardSnapshot ?? null,
         unitAmount: item.unitAmount,
         totalAmount: item.totalAmount,
       })),
@@ -2846,6 +3033,7 @@ export class CheckoutPaymentService {
       orderTaxAmount: order.taxAmount,
       orderDiscountAmount: order.discountAmount ?? 0,
       orderTotalAmount: order.totalAmount,
+      rewardSnapshot: lineItem.rewardSnapshot ?? null,
       currency: order.currency,
       paymentStatus: order.paymentStatus,
       walletStatus: this.getWalletStatus(order, event, ticketPasses),

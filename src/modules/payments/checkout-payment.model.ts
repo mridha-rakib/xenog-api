@@ -66,6 +66,10 @@ const checkoutOrderLineItemSchema = new Schema<CheckoutOrderLineItem>(
       trim: true,
       default: null,
     },
+    rewardSnapshot: {
+      type: Schema.Types.Mixed,
+      default: null,
+    },
     unitAmount: {
       type: Number,
       required: true,

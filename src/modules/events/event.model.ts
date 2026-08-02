@@ -251,33 +251,49 @@ const eventRewardSchema = new Schema<EventReward>(
       type: Date,
       default: null,
     },
+    discountEnabled: {
+      type: Boolean,
+      default: undefined,
+    },
     discountPercent: {
       type: Number,
       min: 0,
       max: 100,
-      default: 0,
+      default: null,
+    },
+    bogoEnabled: {
+      type: Boolean,
+      default: undefined,
     },
     buyQuantity: {
       type: Number,
       min: 1,
       max: 1_000_000,
-      required: true,
+      default: null,
     },
     freeQuantity: {
       type: Number,
       min: 1,
       max: 1_000_000,
-      required: true,
+      default: null,
+    },
+    capacityLimited: {
+      type: Boolean,
+      default: undefined,
     },
     capacity: {
       type: Number,
       min: 0,
       max: 1_000_000,
-      required: true,
+      default: null,
     },
     availableCount: {
       type: Number,
       min: 0,
+      default: null,
+    },
+    disabledAt: {
+      type: Date,
       default: null,
     },
   },

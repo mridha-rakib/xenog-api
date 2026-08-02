@@ -25,6 +25,8 @@ const ticketIntent = z
     eventId: objectId,
     ticketId,
     quantity,
+    applyReward: z.boolean().optional().default(false),
+    rewardId: ticketId.optional().nullable().transform((value) => value ?? null),
     anonymous: z.boolean().optional().default(false),
     acceptedTerms,
   })

@@ -222,6 +222,7 @@ export class CheckoutPaymentRepository {
     userId: string,
     eventId: string,
     ticketId: string,
+    rewardId?: string | null,
   ): Promise<ICheckoutOrder | null> {
     return CheckoutOrderModel.findOne({
       userId,
@@ -229,8 +230,13 @@ export class CheckoutPaymentRepository {
       paymentStatus: "requires_payment",
       reservedUntil: { $gt: new Date() },
       stripePaymentIntentId: { $exists: true, $ne: null },
-      "lineItems.eventId": eventId,
-      "lineItems.itemId": ticketId,
+      lineItems: {
+        $elemMatch: {
+          eventId,
+          itemId: ticketId,
+          rewardId: rewardId ?? null,
+        },
+      },
     });
   }
 
@@ -238,14 +244,20 @@ export class CheckoutPaymentRepository {
     userId: string,
     eventId: string,
     ticketId: string,
+    rewardId?: string | null,
   ): Promise<ICheckoutOrder | null> {
     return CheckoutOrderModel.findOne({
       userId,
       kind: "ticket",
       paymentStatus: "paid",
       totalAmount: 0,
-      "lineItems.eventId": eventId,
-      "lineItems.itemId": ticketId,
+      lineItems: {
+        $elemMatch: {
+          eventId,
+          itemId: ticketId,
+          rewardId: rewardId ?? null,
+        },
+      },
     });
   }
 

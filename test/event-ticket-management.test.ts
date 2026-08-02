@@ -166,6 +166,7 @@ const createService = ({
   {
     findConflictingForEventSchedule: async () => [],
   } as never,
+  {} as never,
   () => now,
 );
 

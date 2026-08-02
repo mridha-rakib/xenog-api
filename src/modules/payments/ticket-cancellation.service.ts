@@ -9,6 +9,7 @@ import { createPaginationMeta, getPaginationOptions } from "../../core/utils/pag
 import type { AuthUser } from "../auth/auth.interface.js";
 import { EventRepository } from "../events/event.repository.js";
 import type { IEvent } from "../events/event.interface.js";
+import { RewardClaimRepository } from "../events/reward-claim.repository.js";
 import { NotificationService } from "../notifications/notification.service.js";
 import { UserRepository } from "../user/user.repository.js";
 import type { IUser } from "../user/user.interface.js";
@@ -179,7 +180,7 @@ export const buildTicketPassRefundAllocations = (order: ICheckoutOrder): TicketP
     const discountAmountMinor = discountAllocations[index] ?? 0;
     const requestedAmountMinor = Math.max(
       0,
-      unit.ticketSubtotalAmountMinor + platformFeeAmountMinor + taxAmountMinor - discountAmountMinor,
+      unit.ticketSubtotalAmountMinor + platformFeeAmountMinor + taxAmountMinor,
     );
 
     return {
@@ -207,6 +208,7 @@ export class TicketCancellationService {
     private readonly passClaimRepository = new TicketPassClaimRepository(),
     private readonly userRepository = new UserRepository(),
     private readonly refundReceiptService = new RefundReceiptService(),
+    private readonly rewardClaimRepository = new RewardClaimRepository(),
   ) {}
 
   public async cancelTicketPass(user: AuthUser, payload: CancelTicketPassDto): Promise<TicketCancellationResponse> {
@@ -215,6 +217,13 @@ export class TicketCancellationService {
       if (existing.buyerUserId.toString() !== user.id) {
         throw new AppError("Only the original buyer can cancel this ticket.", httpStatus.FORBIDDEN, { code: "NOT_ORIGINAL_BUYER" });
       }
+
+      await this.releaseRewardForAcceptedCancellation(existing).catch((error) => {
+        logger.error(
+          { error, ticketCancellationId: existing._id.toString(), orderId: existing.orderId.toString() },
+          "Failed to release reward claim for existing ticket cancellation",
+        );
+      });
 
       return this.toResponse(existing);
     }
@@ -273,6 +282,13 @@ export class TicketCancellationService {
           if (accepted.buyerUserId.toString() !== user.id) {
             throw new AppError("Only the original buyer can cancel this ticket.", httpStatus.FORBIDDEN, { code: "NOT_ORIGINAL_BUYER" });
           }
+
+          await this.releaseRewardForAcceptedCancellation(accepted).catch((error) => {
+            logger.error(
+              { error, ticketCancellationId: accepted._id.toString(), orderId: accepted.orderId.toString() },
+              "Failed to release reward claim for accepted ticket cancellation",
+            );
+          });
 
           return this.toResponse(accepted);
         }
@@ -377,6 +393,12 @@ export class TicketCancellationService {
     const { cancellation, created } = await this.repository.createOrGet(payloadToCreate);
     if (!created) {
       shouldAbortCancellationClaim = false;
+      await this.releaseRewardForAcceptedCancellation(cancellation).catch((error) => {
+        logger.error(
+          { error, ticketCancellationId: cancellation._id.toString(), orderId: cancellation.orderId.toString() },
+          "Failed to release reward claim for existing ticket cancellation",
+        );
+      });
       return this.toResponse(cancellation);
     }
 
@@ -791,8 +813,8 @@ export class TicketCancellationService {
           current.eventId.toString(),
           current.ticketId,
           1,
-          allocation.isRewardPass ? allocation.rewardId ?? null : null,
-          allocation.isRewardPass ? 1 : 0,
+          null,
+          0,
         );
         current = await this.repository.update(current._id.toString(), {
           $set: { capacityReleaseStatus: "completed" },
@@ -803,8 +825,8 @@ export class TicketCancellationService {
               message: "Ticket capacity released for cancelled pass",
               metadata: {
                 ticketQuantity: 1,
-                rewardId: allocation.isRewardPass ? allocation.rewardId ?? null : null,
-                rewardQuantity: allocation.isRewardPass ? 1 : 0,
+                rewardId: null,
+                rewardQuantity: 0,
               },
               createdAt: new Date(),
             },
@@ -821,6 +843,8 @@ export class TicketCancellationService {
         throw error;
       }
     }
+
+    await this.releaseRewardForFullyCancelledPurchase(current, allocation);
 
     if (current.creatorEarningAdjustmentStatus === "pending" || current.creatorEarningAdjustmentStatus === "failed") {
       try {
@@ -884,6 +908,83 @@ export class TicketCancellationService {
     }
 
     return current;
+  }
+
+  private async releaseRewardForAcceptedCancellation(cancellation: ITicketCancellation): Promise<void> {
+    if (cancellation.capacityReleaseStatus !== "completed") {
+      return;
+    }
+
+    const order = await this.checkoutRepository.findById(cancellation.orderId.toString());
+    if (!order || order.kind !== "ticket") {
+      return;
+    }
+
+    const allocation = buildTicketPassRefundAllocations(order).find(
+      (item) =>
+        item.eventId === cancellation.eventId.toString() &&
+        item.ticketId === cancellation.ticketId &&
+        item.orderId === cancellation.orderId.toString() &&
+        item.ticketIndex === cancellation.ticketIndex,
+    );
+
+    if (!allocation) {
+      return;
+    }
+
+    await this.releaseRewardForFullyCancelledPurchase(cancellation, allocation);
+  }
+
+  private async releaseRewardForFullyCancelledPurchase(
+    cancellation: ITicketCancellation,
+    allocation: TicketPassRefundAllocation,
+  ): Promise<void> {
+    const lineItem = allocation.lineItem;
+    const rewardId = lineItem.rewardId ?? null;
+
+    if (
+      cancellation.capacityReleaseStatus !== "completed" ||
+      lineItem.itemType !== "ticket" ||
+      !lineItem.eventId ||
+      !lineItem.itemId ||
+      !rewardId ||
+      !lineItem.rewardSnapshot ||
+      lineItem.rewardSnapshot.rewardType !== "ticket" ||
+      lineItem.rewardSnapshot.rewardId !== rewardId
+    ) {
+      return;
+    }
+
+    const totalQuantity = allocation.totalQuantity;
+    if (totalQuantity <= 0) {
+      return;
+    }
+
+    const cancellations = await this.repository.findByOrderId(allocation.orderId);
+    const cancelledIndexes = new Set(
+      cancellations
+        .filter((item) =>
+          item.eventId.toString() === lineItem.eventId &&
+          item.ticketId === lineItem.itemId &&
+          item.capacityReleaseStatus === "completed",
+        )
+        .map((item) => item.ticketIndex),
+    );
+    const allRewardedPassesCancelled = Array.from(
+      { length: totalQuantity },
+      (_unused, index) => index + 1,
+    ).every((ticketIndex) => cancelledIndexes.has(ticketIndex));
+
+    if (!allRewardedPassesCancelled) {
+      return;
+    }
+
+    await this.rewardClaimRepository.releaseCheckoutRewardRedemptionAndRestoreCapacity({
+      orderId: allocation.orderId,
+      eventId: lineItem.eventId,
+      ticketId: lineItem.itemId,
+      rewardId,
+    });
   }
 
   private async assertNoEventCancellationRefund(order: ICheckoutOrder, event: IEvent): Promise<void> {

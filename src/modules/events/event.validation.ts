@@ -326,10 +326,13 @@ const eventRewardShape = {
   name: z.string().trim().min(1, "Offer name is required").max(120),
   description: optionalText("Offer description", 1000),
   expiresAt: z.coerce.date().optional().nullable().transform((value) => value ?? null),
-  discountPercent: z.coerce.number().min(0).max(100).default(0),
-  buyQuantity: z.coerce.number().int().min(1).max(1_000_000),
-  freeQuantity: z.coerce.number().int().min(1).max(1_000_000),
-  capacity: z.coerce.number().int().min(0).max(1_000_000),
+  discountEnabled: z.coerce.boolean().optional(),
+  discountPercent: z.coerce.number().int().min(1).max(100).optional().nullable().transform((value) => value ?? null),
+  bogoEnabled: z.coerce.boolean().optional(),
+  buyQuantity: z.coerce.number().int().min(1).max(2).optional().nullable().transform((value) => value ?? null),
+  freeQuantity: z.coerce.number().int().min(1).max(1_000_000).optional().nullable().transform((value) => value ?? null),
+  capacityLimited: z.coerce.boolean().optional(),
+  capacity: z.coerce.number().int().min(1).max(1_000_000).optional().nullable().transform((value) => value ?? null),
 };
 
 const validateRewardTarget = <T extends { rewardType?: string; ticketId?: string | null; productId?: string | null }>(
@@ -352,6 +355,51 @@ const eventReward = z
   .refine(validateRewardTarget, {
     message: "Select a ticket or product for this reward",
   })
+  .superRefine((reward, ctx) => {
+    const discountEnabled = reward.discountEnabled ?? (typeof reward.discountPercent === "number" && reward.discountPercent > 0);
+    const bogoEnabled = reward.bogoEnabled ?? (typeof reward.buyQuantity === "number" && typeof reward.freeQuantity === "number");
+
+    if (!discountEnabled && !bogoEnabled) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Enable a discount or Buy X Get Y offer.",
+        path: ["discountEnabled"],
+      });
+    }
+
+    if (discountEnabled && !(typeof reward.discountPercent === "number" && reward.discountPercent >= 1 && reward.discountPercent <= 100)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Discount must be a whole number between 1 and 100.",
+        path: ["discountPercent"],
+      });
+    }
+
+    if (bogoEnabled) {
+      if (!(typeof reward.buyQuantity === "number" && reward.buyQuantity >= 1 && reward.buyQuantity <= 2)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Buy quantity must be 1 or 2.",
+          path: ["buyQuantity"],
+        });
+      }
+      if (!(typeof reward.freeQuantity === "number" && reward.freeQuantity >= 1)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Free quantity must be a positive whole number.",
+          path: ["freeQuantity"],
+        });
+      }
+    }
+
+    if (reward.capacityLimited === true && !(typeof reward.capacity === "number" && reward.capacity >= 1)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Capacity must be a positive whole number when users are limited.",
+        path: ["capacity"],
+      });
+    }
+  })
   .transform((reward) => ({
     ...reward,
     ticketId: reward.rewardType === "ticket" ? reward.ticketId : null,
@@ -366,10 +414,14 @@ const updateEventReward = z
     name: eventRewardShape.name.optional(),
     description: eventRewardShape.description,
     expiresAt: eventRewardShape.expiresAt,
-    discountPercent: z.coerce.number().min(0).max(100).optional(),
+    discountEnabled: eventRewardShape.discountEnabled,
+    discountPercent: eventRewardShape.discountPercent,
+    bogoEnabled: eventRewardShape.bogoEnabled,
     buyQuantity: eventRewardShape.buyQuantity.optional(),
     freeQuantity: eventRewardShape.freeQuantity.optional(),
+    capacityLimited: eventRewardShape.capacityLimited,
     capacity: eventRewardShape.capacity.optional(),
+    disabledAt: z.coerce.date().optional().nullable().transform((value) => value ?? null),
   })
   .strict()
   .refine((reward) => Object.values(reward).some((value) => value !== undefined), {

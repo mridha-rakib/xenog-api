@@ -264,11 +264,15 @@ export interface EventReward {
   name: string;
   description?: string | null;
   expiresAt?: Date | null;
-  discountPercent: number;
-  buyQuantity: number;
-  freeQuantity: number;
-  capacity: number;
+  discountEnabled?: boolean;
+  discountPercent?: number | null;
+  bogoEnabled?: boolean;
+  buyQuantity?: number | null;
+  freeQuantity?: number | null;
+  capacityLimited?: boolean;
+  capacity?: number | null;
   availableCount?: number | null;
+  disabledAt?: Date | null;
 }
 
 export type EventRewardInput = Omit<EventReward, "id" | "productId"> & {

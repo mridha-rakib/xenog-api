@@ -133,6 +133,7 @@ const createEventService = (overrides: {
   (overrides.eventWindowRepository ?? {
     findConflictingForEventSchedule: async () => [],
   }) as never,
+  {} as never,
   () => now,
 );
 

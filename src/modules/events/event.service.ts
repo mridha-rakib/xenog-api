@@ -856,6 +856,11 @@ export class EventService {
     }
 
     const updatedReward = nextRewards.find((reward) => reward.id === rewardId)!;
+    const originalReward = rewards.find((reward) => reward.id === rewardId)!;
+    const redeemedCount = await this.rewardClaimRepository.countSuccessfulCheckoutRedemptions(eventId, rewardId);
+    if (redeemedCount > 0) {
+      this.assertRedeemedRewardUpdateAllowed(originalReward, updatedReward);
+    }
     this.assertRewardDatesFitEventSchedule(event, [updatedReward]);
     this.assertRewardDatesFitTicketSalesEnd(event, [updatedReward]);
     this.assertTicketRewardAvailable(rewards, updatedReward, rewardId);
@@ -891,6 +896,22 @@ export class EventService {
 
     if (nextRewards.length === rewards.length) {
       throw new AppError("Event reward not found.", httpStatus.NOT_FOUND);
+    }
+
+    const redeemedCount = await this.rewardClaimRepository.countSuccessfulCheckoutRedemptions(eventId, rewardId);
+    if (redeemedCount > 0) {
+      const nextDisabledRewards = rewards.map((reward) =>
+        reward.id === rewardId ? { ...reward, disabledAt: reward.disabledAt ?? new Date() } : reward,
+      );
+      const disabledEvent = await this.eventRepository.updateByIdForUser(eventId, user.id, {
+        rewards: nextDisabledRewards,
+      });
+
+      if (!disabledEvent) {
+        throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+      }
+
+      return this.toProfileMutatingResponse(disabledEvent);
     }
 
     const updatedEvent = await this.eventRepository.updateByIdForUser(eventId, user.id, {
@@ -2151,11 +2172,17 @@ export class EventService {
       name: reward.name.trim(),
       description: reward.description?.trim() || null,
       expiresAt: reward.expiresAt ?? null,
-      discountPercent: reward.discountPercent,
-      buyQuantity: reward.buyQuantity,
-      freeQuantity: reward.freeQuantity,
-      capacity: reward.capacity,
-      availableCount: reward.availableCount ?? null,
+      discountEnabled: reward.discountEnabled ?? ((reward.discountPercent ?? 0) > 0),
+      discountPercent: reward.discountEnabled === false ? null : reward.discountPercent ?? null,
+      bogoEnabled: reward.bogoEnabled ?? (reward.buyQuantity !== null && reward.buyQuantity !== undefined && reward.freeQuantity !== null && reward.freeQuantity !== undefined),
+      buyQuantity: reward.bogoEnabled === false ? null : reward.buyQuantity ?? null,
+      freeQuantity: reward.bogoEnabled === false ? null : reward.freeQuantity ?? null,
+      capacityLimited: reward.capacityLimited ?? ((reward.capacity ?? 0) > 0),
+      capacity: reward.capacityLimited === false || reward.capacity === 0 ? null : reward.capacity ?? null,
+      availableCount: reward.capacityLimited === false || reward.capacity === 0
+        ? null
+        : reward.availableCount ?? reward.capacity ?? null,
+      disabledAt: reward.disabledAt ?? null,
     }));
 
     const ticketIds = new Set<string>();
@@ -2198,6 +2225,113 @@ export class EventService {
     );
   }
 
+  private isDiscountEnabled(reward: Pick<EventReward, "discountEnabled" | "discountPercent">): boolean {
+    return reward.discountEnabled ?? ((reward.discountPercent ?? 0) > 0);
+  }
+
+  private isBogoEnabled(reward: Pick<EventReward, "bogoEnabled" | "buyQuantity" | "freeQuantity">): boolean {
+    return reward.bogoEnabled ?? (typeof reward.buyQuantity === "number" && typeof reward.freeQuantity === "number");
+  }
+
+  private isCapacityLimited(reward: Pick<EventReward, "capacityLimited" | "capacity">): boolean {
+    return reward.capacityLimited ?? ((reward.capacity ?? 0) > 0);
+  }
+
+  private getNextRewardAvailableCount(existingReward: EventReward, reward: EventRewardInput): number | null {
+    const capacityLimited = reward.capacityLimited ?? ((reward.capacity ?? 0) > 0);
+    const nextCapacity = capacityLimited ? reward.capacity ?? 0 : null;
+    const existingCapacity = this.isCapacityLimited(existingReward) ? existingReward.capacity ?? 0 : null;
+
+    if (!capacityLimited || !nextCapacity) {
+      return null;
+    }
+
+    if (!existingCapacity) {
+      return nextCapacity;
+    }
+
+    return Math.max(0, (existingReward.availableCount ?? existingCapacity) + (nextCapacity - existingCapacity));
+  }
+
+  private assertRewardBenefitConfiguration(
+    reward: Pick<EventReward, "discountEnabled" | "discountPercent" | "bogoEnabled" | "buyQuantity" | "freeQuantity" | "capacityLimited" | "capacity">,
+  ): void {
+    const discountEnabled = this.isDiscountEnabled(reward);
+    const bogoEnabled = this.isBogoEnabled(reward);
+
+    if (!discountEnabled && !bogoEnabled) {
+      throw new AppError("Enable a discount or Buy X Get Y offer.", httpStatus.BAD_REQUEST);
+    }
+
+    if (discountEnabled) {
+      const value = reward.discountPercent;
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 100) {
+        throw new AppError("Discount must be a whole number between 1 and 100.", httpStatus.BAD_REQUEST);
+      }
+    }
+
+    if (bogoEnabled) {
+      if (!Number.isInteger(reward.buyQuantity) || (reward.buyQuantity ?? 0) < 1 || (reward.buyQuantity ?? 0) > 2) {
+        throw new AppError("Buy quantity must be 1 or 2.", httpStatus.BAD_REQUEST);
+      }
+      if (!Number.isInteger(reward.freeQuantity) || (reward.freeQuantity ?? 0) < 1) {
+        throw new AppError("Free quantity must be a positive whole number.", httpStatus.BAD_REQUEST);
+      }
+    }
+
+    if (this.isCapacityLimited(reward)) {
+      if (!Number.isInteger(reward.capacity) || (reward.capacity ?? 0) < 1) {
+        throw new AppError("Capacity must be a positive whole number when users are limited.", httpStatus.BAD_REQUEST);
+      }
+    }
+  }
+
+  private assertRewardBundleFitsTicketAvailability(
+    reward: Pick<EventReward, "bogoEnabled" | "buyQuantity" | "freeQuantity">,
+    ticket: Pick<EventTicket, "availableCount" | "capacity">,
+  ): void {
+    if (!this.isBogoEnabled(reward)) {
+      return;
+    }
+
+    const availableCount = ticket.availableCount ?? ticket.capacity;
+    const requiredBundleInventory = (reward.buyQuantity ?? 0) + (reward.freeQuantity ?? 0);
+
+    if (requiredBundleInventory > availableCount) {
+      throw new AppError(
+        "Buy X Get Y requires more tickets than are currently available.",
+        httpStatus.UNPROCESSABLE_ENTITY,
+        { code: "REWARD_BUNDLE_EXCEEDS_AVAILABLE_INVENTORY" },
+      );
+    }
+  }
+
+  private assertRedeemedRewardUpdateAllowed(originalReward: EventReward, updatedReward: EventReward): void {
+    const protectedChanged =
+      originalReward.rewardType !== updatedReward.rewardType
+      || (originalReward.ticketId ?? null) !== (updatedReward.ticketId ?? null)
+      || this.isDiscountEnabled(originalReward) !== this.isDiscountEnabled(updatedReward)
+      || (originalReward.discountPercent ?? null) !== (updatedReward.discountPercent ?? null)
+      || this.isBogoEnabled(originalReward) !== this.isBogoEnabled(updatedReward)
+      || (originalReward.buyQuantity ?? null) !== (updatedReward.buyQuantity ?? null)
+      || (originalReward.freeQuantity ?? null) !== (updatedReward.freeQuantity ?? null);
+
+    if (protectedChanged) {
+      throw new AppError(
+        "This reward has already been used and its ticket, discount, and Buy X Get Y settings cannot be changed.",
+        httpStatus.CONFLICT,
+      );
+    }
+
+    if (this.isCapacityLimited(originalReward)) {
+      if (!this.isCapacityLimited(updatedReward) || (updatedReward.capacity ?? 0) < (originalReward.capacity ?? 0)) {
+        throw new AppError("Used reward capacity cannot be reduced.", httpStatus.CONFLICT);
+      }
+    } else if (this.isCapacityLimited(updatedReward)) {
+      throw new AppError("Used unlimited rewards cannot be changed to limited capacity.", httpStatus.CONFLICT);
+    }
+  }
+
   private async normalizeReward(
     reward: EventRewardInput,
     event: IEvent,
@@ -2216,14 +2350,22 @@ export class EventService {
       name: reward.name?.trim() || existingReward?.name?.trim() || "Reward",
       description: reward.description?.trim() || null,
       expiresAt: reward.expiresAt ?? null,
-      discountPercent: reward.discountPercent,
-      buyQuantity: reward.buyQuantity,
-      freeQuantity: reward.freeQuantity,
-      capacity: reward.capacity,
+      discountEnabled: reward.discountEnabled ?? (typeof reward.discountPercent === "number" && reward.discountPercent > 0),
+      discountPercent: reward.discountEnabled === false ? null : reward.discountPercent ?? null,
+      bogoEnabled: reward.bogoEnabled ?? (typeof reward.buyQuantity === "number" && typeof reward.freeQuantity === "number"),
+      buyQuantity: reward.bogoEnabled === false ? null : reward.buyQuantity ?? null,
+      freeQuantity: reward.bogoEnabled === false ? null : reward.freeQuantity ?? null,
+      capacityLimited: reward.capacityLimited ?? ((reward.capacity ?? 0) > 0),
+      capacity: reward.capacityLimited === false || reward.capacity === 0 ? null : reward.capacity ?? null,
       availableCount: existingReward
-        ? Math.max(0, (existingReward.availableCount ?? existingReward.capacity) + (reward.capacity - existingReward.capacity))
-        : reward.capacity,
+        ? this.getNextRewardAvailableCount(existingReward, reward)
+        : reward.capacityLimited === false || reward.capacity === 0
+          ? null
+          : reward.capacity ?? null,
+      disabledAt: reward.disabledAt ?? existingReward?.disabledAt ?? null,
     };
+
+    this.assertRewardBenefitConfiguration(baseReward);
 
     if (rewardType === "ticket") {
       const ticketId = reward.ticketId?.trim() || existingReward?.ticketId || null;
@@ -2232,6 +2374,8 @@ export class EventService {
       if (!ticket || !ticketId) {
         throw new AppError("Select a valid event ticket for this reward.", httpStatus.BAD_REQUEST);
       }
+
+      this.assertRewardBundleFitsTicketAvailability(baseReward, ticket);
 
       return {
         ...baseReward,
@@ -2283,6 +2427,10 @@ export class EventService {
       throw new AppError("Reward not found.", httpStatus.NOT_FOUND);
     }
 
+    if (reward.rewardType === "ticket") {
+      throw new AppError("Ticket offers are applied during checkout.", httpStatus.GONE);
+    }
+
     if (reward.expiresAt && new Date() > reward.expiresAt) {
       throw new AppError("This reward has expired.", httpStatus.GONE);
     }
@@ -2316,10 +2464,10 @@ export class EventService {
       throw new AppError("You have already claimed this reward.", httpStatus.CONFLICT);
     }
 
-    if (reward.capacity > 0) {
+    if (this.isCapacityLimited(reward)) {
       const claimedCount = await this.rewardClaimRepository.countByReward(eventId, rewardId);
 
-      if (claimedCount >= reward.capacity) {
+      if (claimedCount >= (reward.capacity ?? 0)) {
         throw new AppError("This reward has no remaining capacity.", httpStatus.GONE);
       }
     }
@@ -2340,8 +2488,22 @@ export class EventService {
     }
 
     const claims = await this.rewardClaimRepository.findByUserAndEvent(user.id, eventId);
+    const rewardById = new Map(this.normalizeExistingRewards(event.rewards).map((reward) => [reward.id, reward]));
 
-    return claims.map((claim) => this.toClaimResponse(claim));
+    return claims
+      .filter((claim) => {
+        if (claim.status === "pending" || claim.status === "released") {
+          return false;
+        }
+
+        const reward = rewardById.get(claim.rewardId);
+        if (reward?.rewardType === "ticket") {
+          return claim.source === "checkout" && claim.status === "redeemed";
+        }
+
+        return claim.status === "redeemed" || claim.status === "legacy_claim";
+      })
+      .map((claim) => this.toClaimResponse(claim));
   }
 
   private async assertPostingWindowsFitSchedule(

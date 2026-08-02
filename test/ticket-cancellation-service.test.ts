@@ -17,6 +17,7 @@ const buyerId = new Types.ObjectId("64f000000000000000000103");
 const recipientId = new Types.ObjectId("64f000000000000000000104");
 const hostId = new Types.ObjectId("64f000000000000000000105");
 const ticketId = "standard";
+const rewardId = "reward-1";
 const payload = {
   eventId: eventId.toString(),
   ticketId,
@@ -24,6 +25,94 @@ const payload = {
   ticketIndex: 1,
 };
 const buyer = { id: buyerId.toString(), name: "Buyer" };
+
+const createRewardedOrder = (overrides: Record<string, unknown> = {}) => ({
+  _id: orderId,
+  userId: buyerId,
+  kind: "ticket",
+  paymentStatus: "paid",
+  currency: "usd",
+  platformFeeAmount: 9,
+  taxAmount: 0,
+  amountMinor: 9900,
+  lineItems: [{
+    itemType: "ticket",
+    eventId: eventId.toString(),
+    itemId: ticketId,
+    name: "Standard",
+    quantity: 2,
+    paidQuantity: 2,
+    freeQuantity: 1,
+    totalQuantity: 3,
+    rewardId,
+    rewardSnapshot: {
+      rewardId,
+      rewardType: "ticket",
+      name: "Buy 2 get 1",
+      discountEnabled: false,
+      discountPercent: null,
+      bogoEnabled: true,
+      buyQuantity: 2,
+      freeQuantity: 1,
+      capacityLimited: true,
+      originalUnitAmount: 45,
+      discountedUnitAmount: 45,
+      discountAmount: 0,
+      paidQuantity: 2,
+      freeQuantityIssued: 1,
+      totalQuantityIssued: 3,
+      platformFeeAmount: 9,
+      finalAmount: 99,
+      currency: "usd",
+      appliedAt: new Date("2026-07-30T09:00:00.000Z"),
+    },
+    unitAmount: 45,
+    totalAmount: 90,
+  }],
+  ticketPasses: [
+    { eventId: eventId.toString(), ticketId, ticketIndex: 1, checkInCode: "MOM-26-ABCD-EFG1" },
+    { eventId: eventId.toString(), ticketId, ticketIndex: 2, checkInCode: "MOM-26-ABCD-EFG2" },
+    { eventId: eventId.toString(), ticketId, ticketIndex: 3, checkInCode: "MOM-26-ABCD-EFG3" },
+  ],
+  ...overrides,
+});
+
+const createRewardedEvent = () => ({
+  _id: eventId,
+  userId: hostId,
+  name: "Launch Night",
+  status: "published",
+  scheduledAt: new Date("2026-08-01T12:00:00.000Z"),
+  tickets: [{ id: ticketId, name: "Standard", type: "pay", price: 45, capacity: 10 }],
+  rewards: [{ id: rewardId, name: "Buy 2 get 1", capacityLimited: true, capacity: 10, availableCount: 9 }],
+});
+
+const createRewardClaim = () => ({
+  _id: new Types.ObjectId("64f000000000000000000199"),
+  userId: buyerId,
+  eventId,
+  rewardId,
+  ticketId,
+  checkoutOrderId: orderId,
+  status: "released",
+  source: "checkout",
+  claimedAt: new Date("2026-07-30T09:00:00.000Z"),
+  redeemedAt: new Date("2026-07-30T09:00:00.000Z"),
+  releasedAt: new Date("2026-07-30T10:00:00.000Z"),
+  createdAt: new Date("2026-07-30T09:00:00.000Z"),
+  updatedAt: new Date("2026-07-30T10:00:00.000Z"),
+});
+
+const createCompletedRewardedCancellation = (ticketIndex: number): ITicketCancellation => createCancellation({
+  _id: new Types.ObjectId(`64f0000000000000000001${String(ticketIndex).padStart(2, "0")}`),
+  ticketIndex,
+  ticketType: ticketIndex === 3 ? "rewarded" : "paid",
+  requestedAmountMinor: ticketIndex === 3 ? 0 : 4950,
+  completedAmountMinor: 0,
+  remainingRefundableAmountMinor: ticketIndex === 3 ? 0 : 4950,
+  capacityReleaseStatus: "completed",
+  refundStatus: ticketIndex === 3 ? "not_required" : "pending",
+});
 
 const createPassClaimRepository = (overrides: {
   claimForCancellation?: () => Promise<{ claimed: true } | { claimed: false; reason: "cancelled" | "used" | "busy" }>;
@@ -91,7 +180,7 @@ test("existing cancellation response remains scoped to the original buyer", asyn
   const cancellation = createCancellation();
   const service = new TicketCancellationService(
     { findByPass: async () => cancellation } as never,
-    { findById: async () => { throw new Error("order lookup should not run"); } } as never,
+    { findById: async () => null } as never,
     {} as never,
     {} as never,
     {} as never,
@@ -415,6 +504,706 @@ test("accepted paid cancellation releases one capacity unit and adjusts creator 
     assert.equal(response.requestedAmountMinor, 5175);
     assert.deepEqual(releaseCall, [eventId.toString(), ticketId, 1, null, 0]);
     assert.deepEqual(earningCall, [orderId.toString(), `ticket:${eventId.toString()}:${ticketId}`, 45]);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("partial rewarded paid-pass cancellation keeps the reward claim redeemed", async () => {
+  const order = createRewardedOrder();
+  const event = createRewardedEvent();
+  const cancellations: ITicketCancellation[] = [];
+  const releaseCalls: unknown[][] = [];
+  let rewardReleaseCalls = 0;
+  const service = new TicketCancellationService(
+    {
+      findByPass: async () => null,
+      findByOrderId: async () => cancellations,
+      sumRequestedAmountByOrderId: async () => 0,
+      createOrGet: async (createPayload: Omit<ITicketCancellation, "_id" | "createdAt" | "updatedAt">) => {
+        const created = createCancellation({
+          ...createPayload,
+          _id: new Types.ObjectId("64f000000000000000000201"),
+          capacityReleaseStatus: "pending",
+        });
+        cancellations.push(created);
+        return { cancellation: created, created: true };
+      },
+      update: async (_id: string, update: { $set?: Partial<ITicketCancellation> }) => {
+        const cancellation = cancellations.find((item) => item._id.toString() === _id);
+        assert.ok(cancellation);
+        Object.assign(cancellation, update.$set ?? {});
+        return cancellation;
+      },
+    } as never,
+    { findById: async () => order } as never,
+    {
+      findById: async () => event,
+      releaseTicketAndRewardCapacity: async (...args: unknown[]) => {
+        releaseCalls.push(args);
+      },
+    } as never,
+    { findActiveByTicketPass: async () => null } as never,
+    { findByTicketPass: async () => null } as never,
+    { findRefundItemsByOrderIds: async () => [] } as never,
+    { sendSystemNotification: async () => undefined } as never,
+    {} as never,
+    createPassClaimRepository() as never,
+    {} as never,
+    {} as never,
+    {
+      releaseCheckoutRewardRedemptionAndRestoreCapacity: async () => {
+        rewardReleaseCalls += 1;
+        return createRewardClaim();
+      },
+    } as never,
+  );
+  const originalNow = Date.now;
+
+  try {
+    Date.now = () => new Date("2026-08-01T08:59:59.000Z").getTime();
+    await service.cancelTicketPass(buyer as never, { ...payload, ticketIndex: 1 });
+
+    assert.equal(rewardReleaseCalls, 0);
+    assert.deepEqual(releaseCalls, [[eventId.toString(), ticketId, 1, null, 0]]);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("rewarded purchase remains redeemed when all paid passes are cancelled but the free pass remains", async () => {
+  const order = createRewardedOrder();
+  const event = createRewardedEvent();
+  const cancellations = [createCompletedRewardedCancellation(1)];
+  let rewardReleaseCalls = 0;
+  const service = new TicketCancellationService(
+    {
+      findByPass: async () => null,
+      findByOrderId: async () => cancellations,
+      sumRequestedAmountByOrderId: async () => 4950,
+      createOrGet: async (createPayload: Omit<ITicketCancellation, "_id" | "createdAt" | "updatedAt">) => {
+        const created = createCancellation({
+          ...createPayload,
+          _id: new Types.ObjectId("64f000000000000000000202"),
+          ticketIndex: 2,
+          capacityReleaseStatus: "pending",
+        });
+        cancellations.push(created);
+        return { cancellation: created, created: true };
+      },
+      update: async (_id: string, update: { $set?: Partial<ITicketCancellation> }) => {
+        const cancellation = cancellations.find((item) => item._id.toString() === _id);
+        assert.ok(cancellation);
+        Object.assign(cancellation, update.$set ?? {});
+        return cancellation;
+      },
+    } as never,
+    { findById: async () => order } as never,
+    { findById: async () => event, releaseTicketAndRewardCapacity: async () => undefined } as never,
+    { findActiveByTicketPass: async () => null } as never,
+    { findByTicketPass: async () => null } as never,
+    { findRefundItemsByOrderIds: async () => [] } as never,
+    { sendSystemNotification: async () => undefined } as never,
+    {} as never,
+    createPassClaimRepository() as never,
+    {} as never,
+    {} as never,
+    {
+      releaseCheckoutRewardRedemptionAndRestoreCapacity: async () => {
+        rewardReleaseCalls += 1;
+        return createRewardClaim();
+      },
+    } as never,
+  );
+  const originalNow = Date.now;
+
+  try {
+    Date.now = () => new Date("2026-08-01T08:59:59.000Z").getTime();
+    await service.cancelTicketPass(buyer as never, { ...payload, ticketIndex: 2 });
+
+    assert.equal(rewardReleaseCalls, 0);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("rewarded purchase remains redeemed when the free pass is cancelled but a paid pass remains", async () => {
+  const order = createRewardedOrder();
+  const event = createRewardedEvent();
+  const cancellations = [createCompletedRewardedCancellation(1)];
+  let rewardReleaseCalls = 0;
+  const service = new TicketCancellationService(
+    {
+      findByPass: async () => null,
+      findByOrderId: async () => cancellations,
+      sumRequestedAmountByOrderId: async () => 4950,
+      createOrGet: async (createPayload: Omit<ITicketCancellation, "_id" | "createdAt" | "updatedAt">) => {
+        const created = createCancellation({
+          ...createPayload,
+          _id: new Types.ObjectId("64f000000000000000000203"),
+          ticketIndex: 3,
+          capacityReleaseStatus: "pending",
+        });
+        cancellations.push(created);
+        return { cancellation: created, created: true };
+      },
+      update: async (_id: string, update: { $set?: Partial<ITicketCancellation> }) => {
+        const cancellation = cancellations.find((item) => item._id.toString() === _id);
+        assert.ok(cancellation);
+        Object.assign(cancellation, update.$set ?? {});
+        return cancellation;
+      },
+    } as never,
+    { findById: async () => order } as never,
+    { findById: async () => event, releaseTicketAndRewardCapacity: async () => undefined } as never,
+    { findActiveByTicketPass: async () => null } as never,
+    { findByTicketPass: async () => null } as never,
+    { findRefundItemsByOrderIds: async () => [] } as never,
+    { sendSystemNotification: async () => undefined } as never,
+    {} as never,
+    createPassClaimRepository() as never,
+    {} as never,
+    {} as never,
+    {
+      releaseCheckoutRewardRedemptionAndRestoreCapacity: async () => {
+        rewardReleaseCalls += 1;
+        return createRewardClaim();
+      },
+    } as never,
+  );
+  const originalNow = Date.now;
+
+  try {
+    Date.now = () => new Date("2026-08-01T08:59:59.000Z").getTime();
+    await service.cancelTicketPass(buyer as never, { ...payload, ticketIndex: 3 });
+
+    assert.equal(rewardReleaseCalls, 0);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("full rewarded per-pass cancellation releases the claim and restores one limited reward slot", async () => {
+  const order = createRewardedOrder();
+  const event = createRewardedEvent();
+  const cancellations = [createCompletedRewardedCancellation(1), createCompletedRewardedCancellation(2)];
+  const releaseCalls: unknown[][] = [];
+  let rewardReleaseCalls = 0;
+  const service = new TicketCancellationService(
+    {
+      findByPass: async () => null,
+      findByOrderId: async () => cancellations,
+      sumRequestedAmountByOrderId: async () => 9900,
+      createOrGet: async (createPayload: Omit<ITicketCancellation, "_id" | "createdAt" | "updatedAt">) => {
+        const created = createCancellation({
+          ...createPayload,
+          _id: new Types.ObjectId("64f000000000000000000204"),
+          ticketIndex: 3,
+          capacityReleaseStatus: "pending",
+        });
+        cancellations.push(created);
+        return { cancellation: created, created: true };
+      },
+      update: async (_id: string, update: { $set?: Partial<ITicketCancellation> }) => {
+        const cancellation = cancellations.find((item) => item._id.toString() === _id);
+        assert.ok(cancellation);
+        Object.assign(cancellation, update.$set ?? {});
+        return cancellation;
+      },
+    } as never,
+    { findById: async () => order } as never,
+    {
+      findById: async () => event,
+      releaseTicketAndRewardCapacity: async (...args: unknown[]) => {
+        releaseCalls.push(args);
+      },
+    } as never,
+    { findActiveByTicketPass: async () => null } as never,
+    { findByTicketPass: async () => null } as never,
+    { findRefundItemsByOrderIds: async () => [] } as never,
+    { sendSystemNotification: async () => undefined } as never,
+    {} as never,
+    createPassClaimRepository() as never,
+    {} as never,
+    {} as never,
+    {
+      releaseCheckoutRewardRedemptionAndRestoreCapacity: async (releaseIdentity: { orderId: string; eventId: string; ticketId: string; rewardId: string }) => {
+        rewardReleaseCalls += 1;
+        assert.deepEqual(releaseIdentity, {
+          orderId: orderId.toString(),
+          eventId: eventId.toString(),
+          ticketId,
+          rewardId,
+        });
+        return createRewardClaim();
+      },
+    } as never,
+  );
+  const originalNow = Date.now;
+
+  try {
+    Date.now = () => new Date("2026-08-01T08:59:59.000Z").getTime();
+    await service.cancelTicketPass(buyer as never, { ...payload, ticketIndex: 3 });
+
+    assert.equal(rewardReleaseCalls, 1);
+    assert.deepEqual(releaseCalls, [[eventId.toString(), ticketId, 1, null, 0]]);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("rewarded cancellation order is independent when the final paid pass is cancelled after the free pass", async () => {
+  const order = createRewardedOrder();
+  const event = createRewardedEvent();
+  const cancellations = [createCompletedRewardedCancellation(1), createCompletedRewardedCancellation(3)];
+  const ticketReleaseCalls: unknown[][] = [];
+  let rewardReleased = false;
+  const service = new TicketCancellationService(
+    {
+      findByPass: async () => null,
+      findByOrderId: async () => cancellations,
+      sumRequestedAmountByOrderId: async () => 4950,
+      createOrGet: async (createPayload: Omit<ITicketCancellation, "_id" | "createdAt" | "updatedAt">) => {
+        const created = createCancellation({
+          ...createPayload,
+          _id: new Types.ObjectId("64f000000000000000000205"),
+          ticketIndex: 2,
+          capacityReleaseStatus: "pending",
+        });
+        cancellations.push(created);
+        return { cancellation: created, created: true };
+      },
+      update: async (_id: string, update: { $set?: Partial<ITicketCancellation> }) => {
+        const cancellation = cancellations.find((item) => item._id.toString() === _id);
+        assert.ok(cancellation);
+        Object.assign(cancellation, update.$set ?? {});
+        return cancellation;
+      },
+    } as never,
+    { findById: async () => order } as never,
+    {
+      findById: async () => event,
+      releaseTicketAndRewardCapacity: async (...args: unknown[]) => {
+        ticketReleaseCalls.push(args);
+      },
+    } as never,
+    { findActiveByTicketPass: async () => null } as never,
+    { findByTicketPass: async () => null } as never,
+    { findRefundItemsByOrderIds: async () => [] } as never,
+    { sendSystemNotification: async () => undefined } as never,
+    {} as never,
+    createPassClaimRepository() as never,
+    {} as never,
+    {} as never,
+    {
+      releaseCheckoutRewardRedemptionAndRestoreCapacity: async () => {
+        rewardReleased = true;
+        return createRewardClaim();
+      },
+    } as never,
+  );
+  const originalNow = Date.now;
+
+  try {
+    Date.now = () => new Date("2026-08-01T08:59:59.000Z").getTime();
+    await service.cancelTicketPass(buyer as never, { ...payload, ticketIndex: 2 });
+
+    assert.equal(rewardReleased, true);
+    assert.deepEqual(ticketReleaseCalls, [[eventId.toString(), ticketId, 1, null, 0]]);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("duplicate final cancellation retry does not restore ticket or reward capacity twice", async () => {
+  const order = createRewardedOrder();
+  const existing = createCompletedRewardedCancellation(3);
+  const cancellations = [
+    createCompletedRewardedCancellation(1),
+    createCompletedRewardedCancellation(2),
+    existing,
+  ];
+  const releaseCalls: unknown[][] = [];
+  let rewardReleaseCalls = 0;
+  const service = new TicketCancellationService(
+    {
+      findByPass: async () => existing,
+      findByOrderId: async () => cancellations,
+    } as never,
+    { findById: async () => order } as never,
+    {
+      releaseTicketAndRewardCapacity: async (...args: unknown[]) => {
+        releaseCalls.push(args);
+      },
+    } as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    createPassClaimRepository() as never,
+    {} as never,
+    {} as never,
+    {
+      releaseCheckoutRewardRedemptionAndRestoreCapacity: async () => {
+        rewardReleaseCalls += 1;
+        return rewardReleaseCalls === 1
+          ? { status: "released", claim: createRewardClaim() }
+          : { status: "alreadyReleased", claim: createRewardClaim() };
+      },
+    } as never,
+  );
+
+  await service.cancelTicketPass(buyer as never, { ...payload, ticketIndex: 3 });
+  await service.cancelTicketPass(buyer as never, { ...payload, ticketIndex: 3 });
+
+  assert.equal(rewardReleaseCalls, 2);
+  assert.deepEqual(releaseCalls, []);
+});
+
+test("concurrent final rewarded cancellations release the reward slot once", async () => {
+  const order = createRewardedOrder();
+  const event = createRewardedEvent();
+  const cancellations = [createCompletedRewardedCancellation(1)];
+  const releaseCalls: unknown[][] = [];
+  let rewardReleaseCalls = 0;
+  let completedCapacityUpdates = 0;
+  let releaseBarrier: (() => void) | null = null;
+  const bothCapacityUpdatesCompleted = new Promise<void>((resolve) => {
+    releaseBarrier = resolve;
+  });
+  const service = new TicketCancellationService(
+    {
+      findByPass: async () => null,
+      findByOrderId: async () => cancellations,
+      sumRequestedAmountByOrderId: async () => 4950,
+      createOrGet: async (createPayload: Omit<ITicketCancellation, "_id" | "createdAt" | "updatedAt">) => {
+        const created = createCancellation({
+          ...createPayload,
+          _id: new Types.ObjectId(`64f00000000000000000020${createPayload.ticketIndex}`),
+          capacityReleaseStatus: "pending",
+        });
+        cancellations.push(created);
+        return { cancellation: created, created: true };
+      },
+      update: async (_id: string, update: { $set?: Partial<ITicketCancellation> }) => {
+        const cancellation = cancellations.find((item) => item._id.toString() === _id);
+        assert.ok(cancellation);
+        Object.assign(cancellation, update.$set ?? {});
+        if (update.$set?.capacityReleaseStatus === "completed") {
+          completedCapacityUpdates += 1;
+          if (completedCapacityUpdates === 2) releaseBarrier?.();
+          await bothCapacityUpdatesCompleted;
+        }
+        return cancellation;
+      },
+    } as never,
+    { findById: async () => order } as never,
+    {
+      findById: async () => event,
+      releaseTicketAndRewardCapacity: async (...args: unknown[]) => {
+        releaseCalls.push(args);
+      },
+    } as never,
+    { findActiveByTicketPass: async () => null } as never,
+    { findByTicketPass: async () => null } as never,
+    { findRefundItemsByOrderIds: async () => [] } as never,
+    { sendSystemNotification: async () => undefined } as never,
+    {} as never,
+    createPassClaimRepository() as never,
+    {} as never,
+    {} as never,
+    {
+      releaseCheckoutRewardRedemptionAndRestoreCapacity: async () => {
+        rewardReleaseCalls += 1;
+        return rewardReleaseCalls === 1
+          ? { status: "released", claim: createRewardClaim() }
+          : { status: "alreadyReleased", claim: createRewardClaim() };
+      },
+    } as never,
+  );
+  const originalNow = Date.now;
+
+  try {
+    Date.now = () => new Date("2026-08-01T08:59:59.000Z").getTime();
+    await Promise.all([
+      service.cancelTicketPass(buyer as never, { ...payload, ticketIndex: 2 }),
+      service.cancelTicketPass(buyer as never, { ...payload, ticketIndex: 3 }),
+    ]);
+
+    assert.equal(rewardReleaseCalls, 2);
+    assert.equal(releaseCalls.filter((args) => args[2] === 0 && args[4] === 1).length, 0);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("unlimited rewarded purchase releases the claim without restoring reward capacity", async () => {
+  const order = createRewardedOrder({
+    lineItems: [{
+      ...(createRewardedOrder().lineItems[0] as Record<string, unknown>),
+      rewardSnapshot: {
+        ...(createRewardedOrder().lineItems[0] as { rewardSnapshot: Record<string, unknown> }).rewardSnapshot,
+        capacityLimited: false,
+      },
+    }],
+  });
+  const event = createRewardedEvent();
+  const cancellations = [createCompletedRewardedCancellation(1), createCompletedRewardedCancellation(2)];
+  const releaseCalls: unknown[][] = [];
+  let rewardReleaseCalls = 0;
+  const service = new TicketCancellationService(
+    {
+      findByPass: async () => null,
+      findByOrderId: async () => cancellations,
+      sumRequestedAmountByOrderId: async () => 9900,
+      createOrGet: async (createPayload: Omit<ITicketCancellation, "_id" | "createdAt" | "updatedAt">) => {
+        const created = createCancellation({
+          ...createPayload,
+          _id: new Types.ObjectId("64f000000000000000000208"),
+          ticketIndex: 3,
+          capacityReleaseStatus: "pending",
+        });
+        cancellations.push(created);
+        return { cancellation: created, created: true };
+      },
+      update: async (_id: string, update: { $set?: Partial<ITicketCancellation> }) => {
+        const cancellation = cancellations.find((item) => item._id.toString() === _id);
+        assert.ok(cancellation);
+        Object.assign(cancellation, update.$set ?? {});
+        return cancellation;
+      },
+    } as never,
+    { findById: async () => order } as never,
+    {
+      findById: async () => event,
+      releaseTicketAndRewardCapacity: async (...args: unknown[]) => {
+        releaseCalls.push(args);
+      },
+    } as never,
+    { findActiveByTicketPass: async () => null } as never,
+    { findByTicketPass: async () => null } as never,
+    { findRefundItemsByOrderIds: async () => [] } as never,
+    { sendSystemNotification: async () => undefined } as never,
+    {} as never,
+    createPassClaimRepository() as never,
+    {} as never,
+    {} as never,
+    {
+      releaseCheckoutRewardRedemptionAndRestoreCapacity: async () => {
+        rewardReleaseCalls += 1;
+        return createRewardClaim();
+      },
+    } as never,
+  );
+  const originalNow = Date.now;
+
+  try {
+    Date.now = () => new Date("2026-08-01T08:59:59.000Z").getTime();
+    await service.cancelTicketPass(buyer as never, { ...payload, ticketIndex: 3 });
+
+    assert.equal(rewardReleaseCalls, 1);
+    assert.deepEqual(releaseCalls, [[eventId.toString(), ticketId, 1, null, 0]]);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("already released reward claim is idempotent and does not restore reward capacity again", async () => {
+  const order = createRewardedOrder();
+  const event = createRewardedEvent();
+  const cancellations = [createCompletedRewardedCancellation(1), createCompletedRewardedCancellation(2)];
+  const releaseCalls: unknown[][] = [];
+  const service = new TicketCancellationService(
+    {
+      findByPass: async () => null,
+      findByOrderId: async () => cancellations,
+      sumRequestedAmountByOrderId: async () => 9900,
+      createOrGet: async (createPayload: Omit<ITicketCancellation, "_id" | "createdAt" | "updatedAt">) => {
+        const created = createCancellation({
+          ...createPayload,
+          _id: new Types.ObjectId("64f000000000000000000209"),
+          ticketIndex: 3,
+          capacityReleaseStatus: "pending",
+        });
+        cancellations.push(created);
+        return { cancellation: created, created: true };
+      },
+      update: async (_id: string, update: { $set?: Partial<ITicketCancellation> }) => {
+        const cancellation = cancellations.find((item) => item._id.toString() === _id);
+        assert.ok(cancellation);
+        Object.assign(cancellation, update.$set ?? {});
+        return cancellation;
+      },
+    } as never,
+    { findById: async () => order } as never,
+    {
+      findById: async () => event,
+      releaseTicketAndRewardCapacity: async (...args: unknown[]) => {
+        releaseCalls.push(args);
+      },
+    } as never,
+    { findActiveByTicketPass: async () => null } as never,
+    { findByTicketPass: async () => null } as never,
+    { findRefundItemsByOrderIds: async () => [] } as never,
+    { sendSystemNotification: async () => undefined } as never,
+    {} as never,
+    createPassClaimRepository() as never,
+    {} as never,
+    {} as never,
+    { releaseCheckoutRewardRedemptionAndRestoreCapacity: async () => null } as never,
+  );
+  const originalNow = Date.now;
+
+  try {
+    Date.now = () => new Date("2026-08-01T08:59:59.000Z").getTime();
+    await service.cancelTicketPass(buyer as never, { ...payload, ticketIndex: 3 });
+
+    assert.deepEqual(releaseCalls, [[eventId.toString(), ticketId, 1, null, 0]]);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("normal non-rewarded cancellation has no reward claim side effects", async () => {
+  const scheduledAt = new Date("2026-08-01T12:00:00.000Z");
+  const order = {
+    _id: orderId,
+    userId: buyerId,
+    kind: "ticket",
+    paymentStatus: "paid",
+    currency: "usd",
+    platformFeeAmount: 4.5,
+    taxAmount: 2.25,
+    amountMinor: 5175,
+    lineItems: [{
+      itemType: "ticket",
+      eventId: eventId.toString(),
+      itemId: ticketId,
+      name: "Standard",
+      quantity: 1,
+      paidQuantity: 1,
+      freeQuantity: 0,
+      totalQuantity: 1,
+      unitAmount: 45,
+      totalAmount: 45,
+    }],
+    ticketPasses: [{ eventId: eventId.toString(), ticketId, ticketIndex: 1, checkInCode: "MOM-26-ABCD-EFGH" }],
+  };
+  const event = {
+    _id: eventId,
+    userId: hostId,
+    name: "Launch Night",
+    status: "published",
+    scheduledAt,
+    tickets: [{ id: ticketId, name: "Standard", type: "pay", price: 45, capacity: 10 }],
+    rewards: [],
+  };
+  const cancellations: ITicketCancellation[] = [];
+  let rewardReleaseCalls = 0;
+  const service = new TicketCancellationService(
+    {
+      findByPass: async () => null,
+      findByOrderId: async () => cancellations,
+      sumRequestedAmountByOrderId: async () => 0,
+      createOrGet: async (createPayload: Omit<ITicketCancellation, "_id" | "createdAt" | "updatedAt">) => {
+        const created = createCancellation({
+          ...createPayload,
+          _id: new Types.ObjectId("64f000000000000000000210"),
+          capacityReleaseStatus: "pending",
+        });
+        cancellations.push(created);
+        return { cancellation: created, created: true };
+      },
+      update: async (_id: string, update: { $set?: Partial<ITicketCancellation> }) => {
+        const cancellation = cancellations.find((item) => item._id.toString() === _id);
+        assert.ok(cancellation);
+        Object.assign(cancellation, update.$set ?? {});
+        return cancellation;
+      },
+    } as never,
+    { findById: async () => order } as never,
+    { findById: async () => event, releaseTicketAndRewardCapacity: async () => undefined } as never,
+    { findActiveByTicketPass: async () => null } as never,
+    { findByTicketPass: async () => null } as never,
+    { findRefundItemsByOrderIds: async () => [] } as never,
+    { sendSystemNotification: async () => undefined } as never,
+    {} as never,
+    createPassClaimRepository() as never,
+    {} as never,
+    {} as never,
+    {
+      releaseCheckoutRewardRedemptionAndRestoreCapacity: async () => {
+        rewardReleaseCalls += 1;
+        return createRewardClaim();
+      },
+    } as never,
+  );
+  const originalNow = Date.now;
+
+  try {
+    Date.now = () => new Date("2026-08-01T08:59:59.000Z").getTime();
+    await service.cancelTicketPass(buyer as never, payload);
+
+    assert.equal(rewardReleaseCalls, 0);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("legacy rewarded order without a checkout reward snapshot is not guessed as releasable", async () => {
+  const legacyLineItem = { ...(createRewardedOrder().lineItems[0] as Record<string, unknown>) };
+  delete legacyLineItem.rewardSnapshot;
+  const order = createRewardedOrder({ lineItems: [legacyLineItem] });
+  const event = createRewardedEvent();
+  const cancellations = [createCompletedRewardedCancellation(1), createCompletedRewardedCancellation(2)];
+  let rewardReleaseCalls = 0;
+  const service = new TicketCancellationService(
+    {
+      findByPass: async () => null,
+      findByOrderId: async () => cancellations,
+      sumRequestedAmountByOrderId: async () => 9900,
+      createOrGet: async (createPayload: Omit<ITicketCancellation, "_id" | "createdAt" | "updatedAt">) => {
+        const created = createCancellation({
+          ...createPayload,
+          _id: new Types.ObjectId("64f000000000000000000211"),
+          ticketIndex: 3,
+          capacityReleaseStatus: "pending",
+        });
+        cancellations.push(created);
+        return { cancellation: created, created: true };
+      },
+      update: async (_id: string, update: { $set?: Partial<ITicketCancellation> }) => {
+        const cancellation = cancellations.find((item) => item._id.toString() === _id);
+        assert.ok(cancellation);
+        Object.assign(cancellation, update.$set ?? {});
+        return cancellation;
+      },
+    } as never,
+    { findById: async () => order } as never,
+    { findById: async () => event, releaseTicketAndRewardCapacity: async () => undefined } as never,
+    { findActiveByTicketPass: async () => null } as never,
+    { findByTicketPass: async () => null } as never,
+    { findRefundItemsByOrderIds: async () => [] } as never,
+    { sendSystemNotification: async () => undefined } as never,
+    {} as never,
+    createPassClaimRepository() as never,
+    {} as never,
+    {} as never,
+    {
+      releaseCheckoutRewardRedemptionAndRestoreCapacity: async () => {
+        rewardReleaseCalls += 1;
+        return createRewardClaim();
+      },
+    } as never,
+  );
+  const originalNow = Date.now;
+
+  try {
+    Date.now = () => new Date("2026-08-01T08:59:59.000Z").getTime();
+    await service.cancelTicketPass(buyer as never, { ...payload, ticketIndex: 3 });
+
+    assert.equal(rewardReleaseCalls, 0);
   } finally {
     Date.now = originalNow;
   }

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { env } from "../../config/env.js";
 import { momentAudiences, momentMediaSources, momentMediaTypes, momentModes } from "./moment.interface.js";
 
 const objectId = z
@@ -59,7 +60,6 @@ const mediaItem = z
       })
       .finite("Media duration must be finite")
       .min(0, "Media duration cannot be negative")
-      .max(60 * 60 * 24, "Media duration cannot exceed 24 hours")
       .optional()
       .nullable()
       .transform((value) => value ?? null),
@@ -73,9 +73,56 @@ const mediaItem = z
         message: "A media URL or storage key is required",
       });
     }
+
+    if (value.type === "video" && value.durationSeconds !== null && value.durationSeconds > env.MOMENT_VIDEO_MAX_DURATION_SECONDS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["durationSeconds"],
+        message: "Create Post videos can be up to 1 minute",
+      });
+    }
+
+    if (value.type !== "video" && value.contentType?.toLowerCase().trim().startsWith("video/")) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["type"],
+        message: "Video files must be submitted as video media",
+      });
+    }
   });
 
 export const momentValidation = {
+  createVideoUpload: z.object({
+    body: z.object({
+      contentType: z
+        .string({
+          required_error: "Content type is required",
+          invalid_type_error: "Content type must be a string",
+        })
+        .trim()
+        .min(1, "Content type is required")
+        .max(100, "Content type cannot exceed 100 characters"),
+    }).strict(),
+  }),
+  uploadVideo: z.object({
+    query: z.object({
+      key: z
+        .string({
+          required_error: "Storage key is required",
+          invalid_type_error: "Storage key must be a string",
+        })
+        .trim()
+        .min(1, "Storage key is required")
+        .max(300, "Storage key cannot exceed 300 characters"),
+      contentType: z
+        .string({
+          invalid_type_error: "Content type must be a string",
+        })
+        .trim()
+        .max(100, "Content type cannot exceed 100 characters")
+        .optional(),
+    }).strict(),
+  }),
   feedShares: z.object({
     query: z.object({
       limit: z.coerce.number().int().min(1).max(100).default(50),

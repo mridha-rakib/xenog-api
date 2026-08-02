@@ -191,4 +191,12 @@ const userSchema = new Schema<IUser>(
   },
 );
 
+// Additive: backs the Admin Dashboard Overview's all-time/growth user aggregation
+// ($match on role + deletedAt, ranged on createdAt).
+userSchema.index({ role: 1, deletedAt: 1, createdAt: -1 });
+
 export const UserModel = model<IUser>("User", userSchema);
+
+export const ensureUserIndexes = async (): Promise<void> => {
+  await UserModel.syncIndexes();
+};

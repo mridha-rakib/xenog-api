@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { cartRoutes } from "../modules/cart/cart.route.js";
 import { chatRoutes } from "../modules/chat/chat.route.js";
+import { dashboardRoutes } from "../modules/dashboard/dashboard.route.js";
 import { groupRoutes } from "../modules/chat/group.route.js";
 import { eventRoutes } from "../modules/events/event.route.js";
 import { eventWindowRoutes } from "../modules/event-windows/event-window.route.js";
@@ -25,6 +26,7 @@ router.use("/auth", authRoutes);
 router.use("/cart", cartRoutes);
 router.use("/notifications", notificationRoutes);
 router.use("/chat", chatRoutes);
+router.use("/dashboard", dashboardRoutes);
 router.use("/groups", groupRoutes);
 router.use("/events", eventWindowRoutes);
 router.use("/events", eventRoutes);

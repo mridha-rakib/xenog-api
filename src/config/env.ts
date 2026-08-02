@@ -29,6 +29,13 @@ const envSchema = z.object({
   AWS_S3_BUCKET: z.string().min(1, "AWS_S3_BUCKET is required"),
   AWS_S3_PUBLIC_BASE_URL: z.string().url().optional(),
 
+  FFPROBE_PATH: z.string().default(process.platform === "win32" ? "ffprobe" : "/usr/bin/ffprobe"),
+  MOMENT_VIDEO_MAX_DURATION_SECONDS: z.coerce.number().positive().default(60),
+  MEDIA_PROBE_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+  MEDIA_PROBE_MAX_CONCURRENCY: z.coerce.number().int().positive().default(1),
+  MEDIA_PROBE_TMP_DIR: z.string().default("/tmp"),
+  MEDIA_PROBE_MAX_BYTES: z.coerce.number().int().positive().default(250 * 1024 * 1024),
+
   JWT_ACCESS_SECRET: z.string().min(32).default("development-access-secret-change-before-production"),
   JWT_REFRESH_SECRET: z.string().min(32).optional(),
   JWT_ACCESS_TTL_SECONDS: z.coerce.number().int().positive().default(60 * 60 * 24),

@@ -1,7 +1,9 @@
 import { Router } from "express";
+import express from "express";
 import { catchAsync } from "../../core/http/catch-async.js";
 import { authenticate } from "../../core/middlewares/auth.middleware.js";
 import { validate } from "../../core/middlewares/validate.middleware.js";
+import { env } from "../../config/env.js";
 import { MomentController } from "./moment.controller.js";
 import { momentValidation } from "./moment.validation.js";
 
@@ -9,6 +11,18 @@ const router = Router();
 const controller = new MomentController();
 
 router.use(authenticate);
+
+router.post(
+  "/video-upload-url",
+  validate(momentValidation.createVideoUpload),
+  catchAsync(controller.createVideoUpload),
+);
+router.put(
+  "/video-upload",
+  validate(momentValidation.uploadVideo),
+  express.raw({ type: "*/*", limit: env.MEDIA_PROBE_MAX_BYTES }),
+  catchAsync(controller.uploadVideo),
+);
 
 router.post(
   "/",

@@ -137,6 +137,12 @@ ticketCancellationSchema.index(
   { stripeRefundId: 1 },
   { unique: true, partialFilterExpression: { stripeRefundId: { $type: "string" } } },
 );
+// Additive: backs the Admin Dashboard Overview's successful-refund aggregation
+// ($match on refundStatus + currency, ranged on refundCompletedAt).
+ticketCancellationSchema.index({ refundStatus: 1, currency: 1, refundCompletedAt: -1 });
+// Additive: backs the Admin Dashboard Overview's User-Cancelled Passes count
+// ($match on status, ranged on createdAt).
+ticketCancellationSchema.index({ status: 1, createdAt: -1 });
 
 export const TicketCancellationModel = model<ITicketCancellation>(
   "TicketCancellation",

@@ -17,6 +17,7 @@ ENV PORT=5000
 COPY package*.json ./
 RUN npm ci --no-audit --no-fund --omit=dev
 COPY --from=builder --chown=node:node /app/dist ./dist
+RUN apk add --no-cache ffmpeg
 USER node
 EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD node -e "const port=process.env.PORT||5000; const prefix=process.env.API_PREFIX||'/api/v1'; const url='http://127.0.0.1:'+port+prefix+'/health'; fetch(url).then((res)=>{if(!res.ok)process.exit(1)}).catch(()=>process.exit(1))"

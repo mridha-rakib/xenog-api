@@ -19,6 +19,36 @@ export class MomentController {
     });
   };
 
+  public createVideoUpload = async (req: Request, res: Response): Promise<void> => {
+    const upload = await this.momentService.createVideoUpload(
+      req.authUser as AuthUser,
+      req.body.contentType as string,
+    );
+
+    ApiResponse.success(res, {
+      statusCode: httpStatus.CREATED,
+      message: "Moment video upload created",
+      data: upload,
+    });
+  };
+
+  public uploadVideo = async (req: Request, res: Response): Promise<void> => {
+    const { key, contentType } = req.query as { key: string; contentType?: string };
+    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.from([]);
+    const upload = await this.momentService.uploadVideo({
+      user: req.authUser as AuthUser,
+      key,
+      contentType: contentType || req.headers["content-type"] || "application/octet-stream",
+      body,
+    });
+
+    ApiResponse.success(res, {
+      statusCode: httpStatus.CREATED,
+      message: "Moment video uploaded",
+      data: upload,
+    });
+  };
+
   public listMyMoments = async (req: Request, res: Response): Promise<void> => {
     const moments = await this.momentService.listMyMoments(req.authUser as AuthUser);
 

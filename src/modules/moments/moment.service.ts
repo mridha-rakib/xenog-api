@@ -1,6 +1,7 @@
 import type { AuthUser } from "../auth/auth.interface.js";
 import httpStatus from "http-status";
 import { AppError } from "../../core/errors/app-error.js";
+import { logger } from "../../core/logger/logger.js";
 import { createPaginationMeta, getPaginationOptions } from "../../core/utils/pagination.js";
 import { StorageService } from "../storage/storage.service.js";
 import type { IUser } from "../user/user.interface.js";
@@ -35,8 +36,11 @@ import { MomentSaveRepository } from "./moment-save.repository.js";
 import { EventRepository } from "../events/event.repository.js";
 import { CheckoutPaymentRepository } from "../payments/checkout-payment.repository.js";
 import { TicketShareRepository } from "../payments/ticket-share.repository.js";
+import { isOwnedMomentVideoStorageKey, MomentVideoService } from "./moment-video.service.js";
 
 const MOMENT_ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
+
+const nowMs = (): number => Number(process.hrtime.bigint() / 1000000n);
 
 interface MomentInteractionContext {
   likeCounts: Map<string, number>;
@@ -61,9 +65,25 @@ export class MomentService {
     private readonly eventRepository = new EventRepository(),
     private readonly checkoutPaymentRepository = new CheckoutPaymentRepository(),
     private readonly ticketShareRepository = new TicketShareRepository(),
+    private readonly momentVideoService = new MomentVideoService(storageService),
   ) {}
 
+  public async createVideoUpload(user: AuthUser, contentType: string): Promise<Record<string, unknown>> {
+    return this.momentVideoService.createUpload(user, contentType);
+  }
+
+  public async uploadVideo(payload: {
+    user: AuthUser;
+    key: string;
+    contentType: string;
+    body: Buffer;
+  }): Promise<{ key: string }> {
+    return this.momentVideoService.uploadObject(payload);
+  }
+
   public async createMoment(payload: CreateMomentDto, user: AuthUser): Promise<MomentResponse> {
+    const startedAt = nowMs();
+    const hasVideo = payload.mediaItems?.some((mediaItem) => mediaItem.type === "video") ?? false;
     let resolvedEventTitle = payload.eventTitle?.trim() || null;
     const resolvedEventId = payload.eventId?.trim() || null;
 
@@ -112,6 +132,11 @@ export class MomentService {
       }
     }
 
+    const validationStartedAt = nowMs();
+    const mediaItems = await this.validateCreateMomentMediaItems(payload.mediaItems ?? [], user);
+    const mediaValidationMs = nowMs() - validationStartedAt;
+
+    const persistenceStartedAt = nowMs();
     const moment = await this.momentRepository.create({
       userId: user.id,
       mode: payload.mode,
@@ -123,8 +148,21 @@ export class MomentService {
       eventTitle: resolvedEventTitle,
       eventId: resolvedEventId,
       eventCode: payload.eventCode?.trim() || null,
-      mediaItems: payload.mediaItems ?? [],
+      mediaItems,
     });
+    const persistenceMs = nowMs() - persistenceStartedAt;
+
+    if (hasVideo) {
+      logger.info(
+        {
+          userId: user.id,
+          mediaValidationMs,
+          persistenceMs,
+          totalMs: nowMs() - startedAt,
+        },
+        "Create Post video Moment persisted",
+      );
+    }
 
     return this.toResponse(moment, undefined, user, new Set(), this.emptyInteractionContext());
   }
@@ -139,6 +177,25 @@ export class MomentService {
     }
 
     return scheduled === null || scheduled >= now - MOMENT_ACTIVE_EVENT_WINDOW_MS;
+  }
+
+  private async validateCreateMomentMediaItems(mediaItems: MomentMediaItem[], user: AuthUser): Promise<MomentMediaItem[]> {
+    const validatedMediaItems: MomentMediaItem[] = [];
+
+    for (const mediaItem of mediaItems) {
+      if (mediaItem.type === "video") {
+        validatedMediaItems.push(await this.momentVideoService.validateCreateMomentVideo(mediaItem, user));
+        continue;
+      }
+
+      if (mediaItem.storageKey && isOwnedMomentVideoStorageKey(mediaItem.storageKey, user.id)) {
+        throw new AppError("Video files must be submitted as video media.", httpStatus.BAD_REQUEST);
+      }
+
+      validatedMediaItems.push(mediaItem);
+    }
+
+    return validatedMediaItems;
   }
 
   public async listEventMoments(eventId: string, user: AuthUser): Promise<MomentResponse[]> {

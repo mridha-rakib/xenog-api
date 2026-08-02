@@ -1,4 +1,4 @@
-import { GetObjectCommand, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { Readable } from "node:stream";
 import { env } from "../../config/env.js";
@@ -133,5 +133,15 @@ export class StorageService {
       contentLength: response.ContentLength,
       contentType: response.ContentType,
     };
+  }
+
+  public async deleteObject(key: string): Promise<void> {
+    const client = S3ClientManager.getClient();
+    await client.send(
+      new DeleteObjectCommand({
+        Bucket: env.AWS_S3_BUCKET,
+        Key: key,
+      }),
+    );
   }
 }

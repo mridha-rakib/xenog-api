@@ -112,6 +112,9 @@ eventCancellationRefundSchema.index(
   { stripeRefundId: 1 },
   { unique: true, partialFilterExpression: { stripeRefundId: { $type: "string" } } },
 );
+// Additive: backs the Admin Dashboard Overview's successful-refund aggregation
+// ($match on status + currency, ranged on completedAt).
+eventCancellationRefundSchema.index({ status: 1, currency: 1, completedAt: -1 });
 
 const eventCancellationTaxReversalSchema = new Schema<IEventCancellationTaxReversal>(
   {

@@ -309,6 +309,9 @@ checkoutOrderSchema.index(
 );
 checkoutOrderSchema.index({ paymentStatus: 1, reservedUntil: 1 });
 checkoutOrderSchema.index({ "ticketPasses.checkInCode": 1 }, { unique: true, sparse: true });
+// Additive: backs the Admin Dashboard Overview's ticket gross-sales/issuance aggregation
+// ($match on kind + paymentStatus + currency, ranged on paidAt).
+checkoutOrderSchema.index({ kind: 1, paymentStatus: 1, currency: 1, paidAt: -1 });
 
 export const CheckoutOrderModel = model<ICheckoutOrder>("CheckoutOrder", checkoutOrderSchema);
 

@@ -71,6 +71,9 @@ const ticketUsageSchema = new Schema<ITicketUsage>(
 ticketUsageSchema.index({ eventId: 1, ticketId: 1, orderId: 1, ticketIndex: 1 }, { unique: true });
 ticketUsageSchema.index({ eventId: 1, holderUserId: 1, usedAt: -1 });
 ticketUsageSchema.index({ holderUserId: 1, usedAt: -1 });
+// Additive: backs the Admin Dashboard Overview's checked-in-passes count
+// ($match ranged on usedAt alone, with no other filter).
+ticketUsageSchema.index({ usedAt: 1 });
 
 export const TicketUsageModel = model<ITicketUsage>("TicketUsage", ticketUsageSchema);
 

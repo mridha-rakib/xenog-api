@@ -762,7 +762,9 @@ test("pending, failed, and reconciliation-required refund states use requestedAm
       hostUserId,
       status: "cancelled",
       refundStatus,
-      currency: "usd",
+      currency: "xd1", // dedicated fake currency: backlog totals are intentionally
+      // not date-bounded, so they must be isolated by currency instead to avoid
+      // colliding with the same-shaped backlog fixtures other test files create.
       providerIdempotencyKey: `${runId}-backlog-${refundStatus}`,
       requestedAmountMinor: 500,
       completedAmountMinor: 0,
@@ -779,7 +781,7 @@ test("pending, failed, and reconciliation-required refund states use requestedAm
   const current = dateWindow(new Date(now.getTime() - 1000), new Date(now.getTime() + 1000));
   const previous = dateWindow(new Date(0), new Date(0));
 
-  const totals = await repository.getTicketCancellationRefundTotals("usd", current, previous);
+  const totals = await repository.getTicketCancellationRefundTotals("xd1", current, previous);
   assert.equal(totals.pending.amountMinor, 500);
   assert.equal(totals.failed.amountMinor, 500);
   assert.equal(totals.reconciliationRequired.amountMinor, 500);

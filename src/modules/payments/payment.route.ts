@@ -14,6 +14,8 @@ import { PayoutSettingsController } from "./payout-settings.controller.js";
 import { payoutSettingsValidation } from "./payout-settings.validation.js";
 import { EventCancellationRefundController } from "./event-cancellation-refund.controller.js";
 import { TicketCancellationController } from "./ticket-cancellation.controller.js";
+import { PaymentManagementController } from "./payment-management.controller.js";
+import { paymentManagementValidation } from "./payment-management.validation.js";
 
 const router = Router();
 const stripeConnectController = new StripeConnectController();
@@ -22,6 +24,7 @@ const creatorEarningController = new CreatorEarningController();
 const payoutSettingsController = new PayoutSettingsController();
 const eventCancellationRefundController = new EventCancellationRefundController();
 const ticketCancellationController = new TicketCancellationController();
+const paymentManagementController = new PaymentManagementController();
 const ticketScanRateLimit = rateLimit({
   windowMs: 60_000,
   limit: 120,
@@ -103,6 +106,12 @@ router.post(
   catchAsync(ticketCancellationController.cancelTicketPass),
 );
 
+router.get(
+  "/admin/management",
+  authorizeRoles("admin"),
+  validate(paymentManagementValidation.list),
+  catchAsync(paymentManagementController.list),
+);
 router.get(
   "/admin/refund-batches",
   authorizeRoles("admin"),

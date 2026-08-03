@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { analyticsRoutes } from "../modules/analytics/analytics.route.js";
 import { cartRoutes } from "../modules/cart/cart.route.js";
 import { chatRoutes } from "../modules/chat/chat.route.js";
 import { dashboardRoutes } from "../modules/dashboard/dashboard.route.js";
@@ -22,6 +23,7 @@ import { reportRoutes } from "../modules/reports/report.route.js";
 
 const router = Router();
 
+router.use("/analytics", analyticsRoutes);
 router.use("/auth", authRoutes);
 router.use("/cart", cartRoutes);
 router.use("/notifications", notificationRoutes);

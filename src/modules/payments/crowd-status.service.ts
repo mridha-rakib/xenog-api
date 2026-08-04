@@ -51,19 +51,71 @@ export class CrowdStatusService {
       liveCapacityResults.map((item) => [item.eventId, item.capacity]),
     );
     const liveEventIds = [...capacityByEventId.keys()];
+    const eventById = this.buildEventById(events);
+    const checkedInCountByEventId = await this.computeCheckedInCounts(liveEventIds, eventById);
+
+    for (const [eventId, capacity] of capacityByEventId) {
+      const checkedInCount = checkedInCountByEventId.get(eventId) ?? 0;
+      const percentage = (checkedInCount / capacity) * 100;
+      result.set(eventId, this.classify(percentage));
+    }
+
+    return result;
+  }
+
+  /**
+   * Raw authoritative checked-in pass count per event (no live/capacity gating,
+   * no percentage classification) — reuses the same valid-pass-key semantics as
+   * getCrowdStatusByEventId (duplicate-scan prevention, cancelled/refunded pass
+   * exclusion, BOGO-aware quantity validation) for every event supplied, not
+   * just live ones.
+   */
+  public async getCheckedInCountsByEventId(events: CrowdStatusEventInput[]): Promise<Map<string, number>> {
+    const result = new Map<string, number>();
+    const eventById = this.buildEventById(events);
+
+    for (const eventId of eventById.keys()) {
+      result.set(eventId, 0);
+    }
+
+    const checkedInCountByEventId = await this.computeCheckedInCounts([...eventById.keys()], eventById);
+
+    for (const [eventId, count] of checkedInCountByEventId) {
+      result.set(eventId, count);
+    }
+
+    return result;
+  }
+
+  private buildEventById(events: CrowdStatusEventInput[]): Map<string, CrowdStatusEventInput> {
     const eventById = new Map<string, CrowdStatusEventInput>();
+
     for (const event of events) {
       const eventId = getEventId(event);
       if (eventId) {
         eventById.set(eventId, event);
       }
     }
+
+    return eventById;
+  }
+
+  private async computeCheckedInCounts(
+    eventIds: string[],
+    eventById: Map<string, CrowdStatusEventInput>,
+  ): Promise<Map<string, number>> {
+    const checkedInCountByEventId = new Map<string, number>();
+
+    if (eventIds.length === 0) {
+      return checkedInCountByEventId;
+    }
+
     const [orders, cancellations] = await Promise.all([
-      this.checkoutPaymentRepository.findIssuedTicketOrdersByEventIds(liveEventIds),
-      this.ticketCancellationRepository.findByEventIds(liveEventIds),
+      this.checkoutPaymentRepository.findIssuedTicketOrdersByEventIds(eventIds),
+      this.ticketCancellationRepository.findByEventIds(eventIds),
     ]);
     const orderIds = [...new Set(orders.map((order) => order._id.toString()))];
-    const usages = await this.ticketUsageRepository.findByEventIdsAndOrderIds(liveEventIds, orderIds);
+    const usages = await this.ticketUsageRepository.findByEventIdsAndOrderIds(eventIds, orderIds);
     const cancelledPassKeys = new Set(
       cancellations.map((cancellation) =>
         toTicketPassKey(
@@ -82,7 +134,7 @@ export class CrowdStatusService {
       for (const ticketPass of order.ticketPasses) {
         const event = eventById.get(ticketPass.eventId);
 
-        if (!event || !capacityByEventId.has(ticketPass.eventId)) {
+        if (!event) {
           continue;
         }
 
@@ -116,7 +168,6 @@ export class CrowdStatusService {
       }
     }
 
-    const checkedInCountByEventId = new Map<string, number>();
     const countedUsageKeys = new Set<string>();
 
     for (const usage of usages) {
@@ -138,13 +189,7 @@ export class CrowdStatusService {
       );
     }
 
-    for (const [eventId, capacity] of capacityByEventId) {
-      const checkedInCount = checkedInCountByEventId.get(eventId) ?? 0;
-      const percentage = (checkedInCount / capacity) * 100;
-      result.set(eventId, this.classify(percentage));
-    }
-
-    return result;
+    return checkedInCountByEventId;
   }
 
   private getCanonicalCapacity(event: CrowdStatusEventInput): CapacityResult | null {

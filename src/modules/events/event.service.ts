@@ -1396,14 +1396,19 @@ export class EventService {
     const pageEvents = events.slice(0, pageLimit);
     const nextCursor = events.length > pageLimit ? encodeMapCursor(pageEvents[pageEvents.length - 1]!) : null;
     const hostById = await this.getHostById(pageEvents);
+    const responseEvents = pageEvents.map((event) =>
+      this.toResponse(event, hostById.get(event.userId.toString()) ?? null),
+    );
+    const [eventsWithCrowdStatus, checkedInCountByEventId] = await Promise.all([
+      this.withCrowdStatuses(pageEvents, responseEvents),
+      this.crowdStatusService.getCheckedInCountsByEventId(pageEvents),
+    ]);
 
     return {
-      events: await this.withCrowdStatuses(
-        pageEvents,
-        pageEvents.map((event) =>
-          this.toResponse(event, hostById.get(event.userId.toString()) ?? null),
-        ),
-      ),
+      events: eventsWithCrowdStatus.map((event) => ({
+        ...event,
+        checkedInCount: checkedInCountByEventId.get(event.id) ?? 0,
+      })),
       nextCursor,
     };
   }

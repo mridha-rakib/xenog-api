@@ -145,6 +145,14 @@ const createEventService = (privateEventsForUser: Record<string, unknown[]> = {}
     getPublicEventGoingSummaries: async () => new Map(),
   };
   const noopRepository = {};
+  // listMapEvents now computes checkedInCount for every returned event (not
+  // just live ones, unlike crowdStatus), so this unit test must mock
+  // crowdStatusService like every other dependency here instead of falling
+  // through to the real, DB-backed default.
+  const crowdStatusService = {
+    getCrowdStatusByEventId: async () => new Map(),
+    getCheckedInCountsByEventId: async () => new Map(),
+  };
 
   return new EventService(
     eventRepository as never,
@@ -167,8 +175,10 @@ const createEventService = (privateEventsForUser: Record<string, unknown[]> = {}
     noopRepository as never,
     countRepository as never,
     momentSaveRepository as never,
-    noopRepository as never,
-    noopRepository as never,
+    noopRepository as never, // ticketUsageRepository
+    noopRepository as never, // eventHostReviewRepository
+    noopRepository as never, // eventWindowRepository
+    crowdStatusService as never, // crowdStatusService
   );
 };
 

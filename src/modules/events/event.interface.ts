@@ -459,6 +459,12 @@ export interface EventResponse {
   canReport?: boolean;
   status: EventStatus;
   crowdStatus: CrowdStatus | null;
+  /**
+   * Authoritative raw checked-in ticket/pass count (TicketUsage rows, deduped
+   * per pass, not per user). Only populated on the Map list response; other
+   * endpoints leave this undefined.
+   */
+  checkedInCount?: number;
   name?: string | null;
   description?: string | null;
   bannerImageKey?: string | null;

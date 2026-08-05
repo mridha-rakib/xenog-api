@@ -1,6 +1,13 @@
 import { Schema, model } from "mongoose";
 import type { IMoment, MomentMediaItem } from "./moment.interface.js";
-import { momentAudiences, momentMediaSources, momentMediaTypes, momentModes } from "./moment.interface.js";
+import {
+  momentAudiences,
+  momentMediaProcessingErrorCodes,
+  momentMediaProcessingStatuses,
+  momentMediaSources,
+  momentMediaTypes,
+  momentModes,
+} from "./moment.interface.js";
 
 const momentMediaItemSchema = new Schema<MomentMediaItem>(
   {
@@ -37,6 +44,38 @@ const momentMediaItemSchema = new Schema<MomentMediaItem>(
       type: Number,
       min: 0,
       default: null,
+    },
+    // Additive Phase 1 video-transcoding-pipeline fields. Deliberately have no
+    // `default`, unlike the fields above: current/existing media documents must
+    // not gain these keys (not even as `null`) until a later phase's worker
+    // actually starts a processing lifecycle for that specific media item.
+    processingStatus: {
+      type: String,
+      enum: momentMediaProcessingStatuses,
+    },
+    thumbnailStorageKey: {
+      type: String,
+      trim: true,
+      maxlength: 300,
+    },
+    width: {
+      type: Number,
+      min: 0,
+    },
+    height: {
+      type: Number,
+      min: 0,
+    },
+    fileSize: {
+      type: Number,
+      min: 0,
+    },
+    processedAt: {
+      type: Date,
+    },
+    processingErrorCode: {
+      type: String,
+      enum: momentMediaProcessingErrorCodes,
     },
   },
   {

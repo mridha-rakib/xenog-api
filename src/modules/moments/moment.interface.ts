@@ -12,6 +12,24 @@ export type MomentMediaType = (typeof momentMediaTypes)[number];
 export const momentMediaSources = ["gallery", "camera", "upload", "external"] as const;
 export type MomentMediaSource = (typeof momentMediaSources)[number];
 
+// User-facing video processing lifecycle for a media item. Left unset (not just
+// defaulted to a value) on any media item until a later phase's worker actually
+// starts a transcoding job for it, so existing/current media stay unaffected.
+export const momentMediaProcessingStatuses = ["queued", "processing", "ready", "failed"] as const;
+export type MomentMediaProcessingStatus = (typeof momentMediaProcessingStatuses)[number];
+
+// Safe, coarse, user-facing failure classification. Never a raw FFmpeg/S3 error,
+// stack trace, or storage key. Internal job diagnostics live only on TranscodingJob.
+export const momentMediaProcessingErrorCodes = [
+  "source_invalid",
+  "source_too_large",
+  "encode_failed",
+  "storage_failed",
+  "timeout",
+  "unknown",
+] as const;
+export type MomentMediaProcessingErrorCode = (typeof momentMediaProcessingErrorCodes)[number];
+
 export interface MomentMediaItem {
   type: MomentMediaType;
   source: MomentMediaSource;
@@ -19,6 +37,15 @@ export interface MomentMediaItem {
   storageKey?: string | null;
   contentType?: string | null;
   durationSeconds?: number | null;
+  // Additive, optional, Phase 1 foundation fields for the future video
+  // transcoding pipeline. Not set by any current create/upload flow.
+  processingStatus?: MomentMediaProcessingStatus | null;
+  thumbnailStorageKey?: string | null;
+  width?: number | null;
+  height?: number | null;
+  fileSize?: number | null;
+  processedAt?: Date | null;
+  processingErrorCode?: MomentMediaProcessingErrorCode | null;
 }
 
 export interface IMoment {

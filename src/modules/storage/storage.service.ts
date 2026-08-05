@@ -78,14 +78,27 @@ export class StorageService {
     };
   }
 
-  public async uploadObject(payload: { body: Buffer; contentType: string; key: string }): Promise<{ key: string }> {
+  /**
+   * `body` may be a Buffer (existing callers, unchanged behavior — content
+   * length is inferred) or a Readable stream (e.g. a large local file via
+   * `createReadStream`), in which case `contentLength` is required since it
+   * cannot be inferred without buffering. Passing a stream body straight to
+   * PutObjectCommand — never buffering it into a Buffer first — is what lets
+   * a caller upload a large local file without holding the whole thing in
+   * process memory.
+   */
+  public async uploadObject(
+    payload: { body: Buffer; contentType: string; key: string; contentLength?: number }
+      | { body: Readable; contentType: string; key: string; contentLength: number },
+  ): Promise<{ key: string }> {
     const client = S3ClientManager.getClient();
+    const contentLength = Buffer.isBuffer(payload.body) ? payload.body.length : payload.contentLength;
 
     const command = new PutObjectCommand({
       Bucket: env.AWS_S3_BUCKET,
       Key: payload.key,
       Body: payload.body,
-      ContentLength: payload.body.length,
+      ContentLength: contentLength,
       ContentType: payload.contentType,
     });
 

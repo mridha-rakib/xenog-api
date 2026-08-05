@@ -37,6 +37,7 @@ import { EventRepository } from "../events/event.repository.js";
 import { CheckoutPaymentRepository } from "../payments/checkout-payment.repository.js";
 import { TicketShareRepository } from "../payments/ticket-share.repository.js";
 import { isOwnedMomentVideoStorageKey, MomentVideoService } from "./moment-video.service.js";
+import { TranscodingMomentSyncService } from "../transcoding/transcoding-moment-sync.service.js";
 
 const MOMENT_ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
 
@@ -66,6 +67,7 @@ export class MomentService {
     private readonly checkoutPaymentRepository = new CheckoutPaymentRepository(),
     private readonly ticketShareRepository = new TicketShareRepository(),
     private readonly momentVideoService = new MomentVideoService(storageService),
+    private readonly transcodingMomentSyncService = new TranscodingMomentSyncService(),
   ) {}
 
   public async createVideoUpload(user: AuthUser, contentType: string): Promise<Record<string, unknown>> {
@@ -137,7 +139,7 @@ export class MomentService {
     const mediaValidationMs = nowMs() - validationStartedAt;
 
     const persistenceStartedAt = nowMs();
-    const moment = await this.momentRepository.create({
+    let moment = await this.momentRepository.create({
       userId: user.id,
       mode: payload.mode,
       caption: payload.caption?.trim() || null,
@@ -153,6 +155,8 @@ export class MomentService {
     const persistenceMs = nowMs() - persistenceStartedAt;
 
     if (hasVideo) {
+      moment = await this.queueVideoProcessingJobs(moment, user);
+
       logger.info(
         {
           userId: user.id,
@@ -165,6 +169,39 @@ export class MomentService {
     }
 
     return this.toResponse(moment, undefined, user, new Set(), this.emptyInteractionContext());
+  }
+
+  /**
+   * Queues a Phase 2 transcoding job for every eligible video media item on
+   * a just-created Moment, and folds each resulting "queued" write back onto
+   * the in-memory Moment so the response reflects it without a re-fetch.
+   * Only ever called for a freshly created Moment (never on existing/legacy
+   * records) — every video item here already passed
+   * validateCreateMomentVideo() (owned Moment-video storage key, no client
+   * URL, no processing fields), so no further eligibility filtering beyond
+   * type/storageKey is needed.
+   */
+  private async queueVideoProcessingJobs(moment: IMoment, user: AuthUser): Promise<IMoment> {
+    let current = moment;
+
+    for (const mediaItem of moment.mediaItems) {
+      if (mediaItem.type !== "video" || !mediaItem.storageKey) {
+        continue;
+      }
+
+      const updated = await this.transcodingMomentSyncService.queueNewVideoJob({
+        momentId: current._id.toString(),
+        userId: user.id,
+        sourceStorageKey: mediaItem.storageKey,
+        sourceContentType: mediaItem.contentType ?? null,
+      });
+
+      if (updated) {
+        current = updated;
+      }
+    }
+
+    return current;
   }
 
   private isPostTaggableEvent(event: { scheduledAt?: Date | null; endAt?: Date | null }): boolean {
@@ -505,7 +542,67 @@ export class MomentService {
       this.momentCommentReactionRepository.deleteByCommentIds(commentIds),
       this.momentShareRepository.deleteByMomentId(momentId),
       this.momentSaveRepository.deleteByMomentId(momentId),
+      // Only reached after ownership is already confirmed and the Moment is
+      // already successfully hard-deleted above — stops any queued/active
+      // transcoding work for its video media and prevents a later crash-
+      // recovery sweep from ever repointing a Moment that no longer exists.
+      this.transcodingMomentSyncService.cancelForDeletedMoment(momentId),
     ]);
+  }
+
+  /**
+   * Phase 3B2B: owner-authorized manual retry for a Moment's failed video
+   * processing. Reuses the exact same existence/event-announcement/ownership
+   * checks as deleteMoment() above. Media items carry no stable server-issued
+   * id (see MomentMediaItem/_id:false on the schema), so eligibility is
+   * determined entirely server-side — every video media item currently
+   * `processingStatus:"failed"` is retried by its own immutable source
+   * storage key; the client never supplies a job id or a storage key.
+   * Currently a Moment realistically has at most one such item, but every
+   * eligible one is retried so this stays correct if that ever changes.
+   */
+  public async retryMomentVideoProcessing(momentId: string, user: AuthUser): Promise<MomentResponse> {
+    const moment = await this.momentRepository.findById(momentId);
+
+    if (!moment) {
+      throw new AppError("Moment not found", httpStatus.NOT_FOUND);
+    }
+
+    if (moment.isEventAnnouncement) {
+      throw new AppError("Moment not found", httpStatus.NOT_FOUND);
+    }
+
+    if (moment.userId.toString() !== user.id) {
+      throw new AppError("You can only retry your own posts", httpStatus.FORBIDDEN);
+    }
+
+    const eligibleSourceKeys = moment.mediaItems
+      .filter((item): item is MomentMediaItem & { storageKey: string } => (
+        item.type === "video" && item.processingStatus === "failed" && Boolean(item.storageKey)
+      ))
+      .map((item) => item.storageKey);
+
+    if (eligibleSourceKeys.length === 0) {
+      throw new AppError("There is no failed video to retry for this post", httpStatus.CONFLICT);
+    }
+
+    let current = moment;
+    let retriedAny = false;
+
+    for (const sourceStorageKey of eligibleSourceKeys) {
+      const result = await this.transcodingMomentSyncService.retryFailedVideoProcessing(momentId, sourceStorageKey, user.id);
+
+      if (result.outcome === "retried") {
+        current = result.moment;
+        retriedAny = true;
+      }
+    }
+
+    if (!retriedAny) {
+      throw new AppError("This video is no longer available to retry", httpStatus.CONFLICT);
+    }
+
+    return this.toResponse(current, undefined, user, new Set(), this.emptyInteractionContext());
   }
 
   public async listMomentComments(momentId: string, user: AuthUser): Promise<MomentCommentResponse[]> {

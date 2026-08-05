@@ -7,7 +7,6 @@ import { Readable } from "node:stream";
 import test from "node:test";
 import express from "express";
 import { Types } from "mongoose";
-import { env } from "../src/config/env.js";
 import { AppError } from "../src/core/errors/app-error.js";
 import { MomentService } from "../src/modules/moments/moment.service.js";
 import {
@@ -46,6 +45,11 @@ const user = {
 class FakeStorageService {
   public readonly deletedKeys: string[] = [];
   public readonly metadataCalls: string[] = [];
+  // Deliberately still tracked: every test below that reaches a "valid"
+  // classification must assert this stays empty — POST /moments now proves
+  // its HEAD-only availability check (see MomentVideoService's
+  // checkStorageVideoAvailability) never calls getObject() to download the
+  // source, unlike the removed synchronous full-file ffprobe path.
   public readonly objectCalls: string[] = [];
   public readonly uploads: Array<{ key: string; contentType: string; bytes: number }> = [];
   public metadata = new Map<string, { contentLength?: number; contentType?: string }>();
@@ -84,28 +88,6 @@ class FakeStorageService {
 
   public async deleteObject(key: string) {
     this.deletedKeys.push(key);
-  }
-}
-
-class StubMomentVideoService extends MomentVideoService {
-  public constructor(
-    storageService: FakeStorageService,
-    private readonly nextProbe: { classification: string; durationSeconds?: number } = {
-      classification: "valid",
-      durationSeconds: 60,
-    },
-  ) {
-    super(storageService as never);
-  }
-
-  protected override async probeFile() {
-    return this.nextProbe as never;
-  }
-}
-
-class ExposedMomentVideoService extends MomentVideoService {
-  public async probeLocalFile(filePath: string) {
-    return this.probeFile(filePath);
   }
 }
 
@@ -153,6 +135,11 @@ const createMomentService = (momentVideoService: MomentVideoService, repositoryO
     {} as never,
     {} as never,
     momentVideoService,
+    // Fake TranscodingMomentSyncService: none of these tests exercise
+    // Phase 3A job creation (see test/moment-video-transcoding.test.ts for
+    // that), so this stays offline and simply reports "no job created" —
+    // createMoment() must fall back to the moment as originally persisted.
+    { queueNewVideoJob: async () => null } as never,
   );
 };
 
@@ -224,8 +211,7 @@ test("Moment video upload object requires an owned Moment-video key", async () =
 
 test("User A cannot create a Moment with User B or non-Moment video keys", async () => {
   const storage = new FakeStorageService();
-  const videoService = new StubMomentVideoService(storage);
-  const service = createMomentService(videoService);
+  const service = createMomentService(new MomentVideoService(storage as never));
 
   await assert.rejects(
     service.createMoment(createPayload(createMomentVideoStorageKey(otherUserId, "video/mp4")), user as never),
@@ -241,7 +227,7 @@ test("User A cannot create a Moment with User B or non-Moment video keys", async
 
 test("arbitrary URLs are rejected and not probed", async () => {
   const storage = new FakeStorageService();
-  const service = createMomentService(new StubMomentVideoService(storage));
+  const service = createMomentService(new MomentVideoService(storage as never));
 
   await assert.rejects(
     service.createMoment(createPayload("", { storageKey: null, url: "https://example.com/video.mp4" }), user as never),
@@ -250,12 +236,12 @@ test("arbitrary URLs are rejected and not probed", async () => {
   assert.deepEqual(storage.metadataCalls, []);
 });
 
-test("valid owned Moment video proceeds through S3 metadata, probe, and persistence", async () => {
+test("valid owned Moment video is created from S3 HEAD metadata alone — no full source download, and client-declared duration is never trusted", async () => {
   const key = createMomentVideoStorageKey(userId, "video/mp4");
   const storage = new FakeStorageService();
   storage.metadata.set(key, { contentLength: 1000, contentType: "video/mp4" });
   let persisted: Record<string, unknown> | null = null;
-  const service = createMomentService(new StubMomentVideoService(storage, { classification: "valid", durationSeconds: 60 }), {
+  const service = createMomentService(new MomentVideoService(storage as never), {
     create: async (payload: Record<string, unknown>) => {
       persisted = payload;
       return {
@@ -279,21 +265,28 @@ test("valid owned Moment video proceeds through S3 metadata, probe, and persiste
 
   await service.createMoment(createPayload(key, { durationSeconds: 999 }), user as never);
   assert.deepEqual(storage.metadataCalls, [key]);
-  assert.deepEqual(storage.objectCalls, [key]);
+  // The core latency fix: POST /moments must never call getObject() (a full
+  // source download) merely to validate a video upload — the transcoding
+  // worker performs the authoritative ffprobe validation on its own
+  // downloaded copy instead.
+  assert.deepEqual(storage.objectCalls, []);
   assert.deepEqual(storage.deletedKeys, []);
-  const mediaItems = persisted?.mediaItems as Array<{ durationSeconds?: number }> | undefined;
-  assert.equal(mediaItems?.[0]?.durationSeconds, 60);
+  const mediaItems = persisted?.mediaItems as Array<{ durationSeconds?: number | null }> | undefined;
+  // Never the client-supplied 999 — no bytes were decoded here to verify it,
+  // so it stays unset until the worker's authoritative probe repoints it at
+  // "ready" (see MomentMediaLifecycleService.markReady).
+  assert.equal(mediaItems?.[0]?.durationSeconds, null);
 });
 
-test("generic camera upload MIME metadata is probed instead of rejected before ffprobe", async () => {
+test("generic camera upload MIME metadata is accepted based on the client-declared content type, without downloading the object", async () => {
   const key = createMomentVideoStorageKey(userId, "video/mp4");
   const storage = new FakeStorageService();
   storage.metadata.set(key, { contentLength: 1000, contentType: "application/octet-stream" });
-  const service = createMomentService(new StubMomentVideoService(storage, { classification: "valid", durationSeconds: 5 }));
+  const service = createMomentService(new MomentVideoService(storage as never));
 
   await service.createMoment(createPayload(key), user as never);
   assert.deepEqual(storage.metadataCalls, [key]);
-  assert.deepEqual(storage.objectCalls, [key]);
+  assert.deepEqual(storage.objectCalls, []);
   assert.deepEqual(storage.deletedKeys, []);
 });
 
@@ -301,11 +294,30 @@ test("zero-byte object is rejected as unreadable and cleaned up after ownership 
   const key = createMomentVideoStorageKey(userId, "video/mp4");
   const storage = new FakeStorageService();
   storage.metadata.set(key, { contentLength: 0, contentType: "video/mp4" });
-  const service = createMomentService(new StubMomentVideoService(storage, { classification: "valid", durationSeconds: 5 }));
+  const service = createMomentService(new MomentVideoService(storage as never));
 
   await assert.rejects(service.createMoment(createPayload(key), user as never), /could not read/);
   assert.deepEqual(storage.objectCalls, []);
   assert.deepEqual(storage.deletedKeys, [key]);
+});
+
+test("an unexpected (non-AWS-shaped) metadata error is treated as unreadable, not silently allowed through", async () => {
+  const key = createMomentVideoStorageKey(userId, "video/mp4");
+  const storage = new FakeStorageService();
+  storage.getObjectMetadata = async () => {
+    throw new Error("totally unexpected failure shape");
+  };
+  let createCalled = false;
+  const service = createMomentService(new MomentVideoService(storage as never), {
+    create: async () => {
+      createCalled = true;
+      throw new Error("should not persist");
+    },
+  });
+
+  await assert.rejects(service.createMoment(createPayload(key), user as never), /could not read/);
+  assert.deepEqual(storage.deletedKeys, [key]);
+  assert.equal(createCalled, false);
 });
 
 test("retryable AWS metadata failure does not masquerade as unreadable video", async () => {
@@ -317,7 +329,7 @@ test("retryable AWS metadata failure does not masquerade as unreadable video", a
     error.Code = "SlowDown";
     throw error;
   };
-  const service = createMomentService(new StubMomentVideoService(storage, { classification: "valid", durationSeconds: 5 }));
+  const service = createMomentService(new MomentVideoService(storage as never));
 
   await assert.rejects(
     service.createMoment(createPayload(key), user as never),
@@ -335,110 +347,48 @@ test("retryable AWS metadata failure does not masquerade as unreadable video", a
 test("missing S3 object rejects without deleting", async () => {
   const key = createMomentVideoStorageKey(userId, "video/mp4");
   const storage = new FakeStorageService();
-  const service = createMomentService(new StubMomentVideoService(storage));
+  const service = createMomentService(new MomentVideoService(storage as never));
 
   await assert.rejects(service.createMoment(createPayload(key), user as never), /could not be found/);
   assert.deepEqual(storage.deletedKeys, []);
 });
 
-test("over-60-second video and fake client duration are rejected and deleted after ownership is proven", async () => {
-  const key = createMomentVideoStorageKey(userId, "video/mp4");
-  const storage = new FakeStorageService();
-  storage.metadata.set(key, { contentLength: 1000, contentType: "video/mp4" });
-  let createCalled = false;
-  const service = createMomentService(new StubMomentVideoService(storage, { classification: "duration_too_long", durationSeconds: 60.001 }), {
-    create: async () => {
-      createCalled = true;
-      throw new Error("should not persist");
-    },
-  });
+test("oversized upload is rejected and deleted, while a normally-sized upload is not deleted", async () => {
+  const oversizedKey = createMomentVideoStorageKey(userId, "video/mp4");
+  const normalKey = createMomentVideoStorageKey(userId, "video/mp4");
+  const { env } = await import("../src/config/env.js");
 
-  await assert.rejects(service.createMoment(createPayload(key, { durationSeconds: 1 }), user as never), /up to 1 minute/);
-  assert.deepEqual(storage.deletedKeys, [key]);
-  assert.equal(createCalled, false);
-});
+  const oversizedStorage = new FakeStorageService();
+  oversizedStorage.metadata.set(oversizedKey, { contentLength: env.MEDIA_PROBE_MAX_BYTES + 1, contentType: "video/mp4" });
+  const oversizedService = createMomentService(new MomentVideoService(oversizedStorage as never));
 
-test("invalid owned upload is deleted, while valid video is not deleted", async () => {
-  const invalidKey = createMomentVideoStorageKey(userId, "video/mp4");
-  const validKey = createMomentVideoStorageKey(userId, "video/mp4");
-  const invalidStorage = new FakeStorageService();
-  invalidStorage.metadata.set(invalidKey, { contentLength: 1000, contentType: "video/mp4" });
-  const invalidService = createMomentService(new StubMomentVideoService(invalidStorage, { classification: "not_video" }));
+  await assert.rejects(oversizedService.createMoment(createPayload(oversizedKey), user as never), /too large/);
+  assert.deepEqual(oversizedStorage.deletedKeys, [oversizedKey]);
+  assert.deepEqual(oversizedStorage.objectCalls, []);
 
-  await assert.rejects(invalidService.createMoment(createPayload(invalidKey), user as never), /valid video/);
-  assert.deepEqual(invalidStorage.deletedKeys, [invalidKey]);
-
-  const validStorage = new FakeStorageService();
-  validStorage.metadata.set(validKey, { contentLength: 1000, contentType: "video/mp4" });
-  const validService = createMomentService(new StubMomentVideoService(validStorage, { classification: "valid", durationSeconds: 59.9 }));
-  await validService.createMoment(createPayload(validKey), user as never);
-  assert.deepEqual(validStorage.deletedKeys, []);
+  const normalStorage = new FakeStorageService();
+  normalStorage.metadata.set(normalKey, { contentLength: 1000, contentType: "video/mp4" });
+  const normalService = createMomentService(new MomentVideoService(normalStorage as never));
+  await normalService.createMoment(createPayload(normalKey), user as never);
+  assert.deepEqual(normalStorage.deletedKeys, []);
 });
 
 test("unowned object is never deleted", async () => {
   const storage = new FakeStorageService();
-  const service = createMomentService(new StubMomentVideoService(storage, { classification: "duration_too_long", durationSeconds: 61 }));
+  const service = createMomentService(new MomentVideoService(storage as never));
 
   await assert.rejects(
     service.createMoment(createPayload(createMomentVideoStorageKey(otherUserId, "video/mp4")), user as never),
     /not available/,
   );
   assert.deepEqual(storage.deletedKeys, []);
-});
-
-test("corrupted or non-video media is rejected before persistence", async () => {
-  const key = createMomentVideoStorageKey(userId, "video/mp4");
-  const storage = new FakeStorageService();
-  storage.metadata.set(key, { contentLength: 1000, contentType: "video/mp4" });
-  let createCalled = false;
-  const service = createMomentService(new StubMomentVideoService(storage, { classification: "probe_failed" }), {
-    create: async () => {
-      createCalled = true;
-      throw new Error("should not persist");
-    },
-  });
-
-  await assert.rejects(service.createMoment(createPayload(key), user as never), /could not read/);
-  assert.equal(createCalled, false);
-});
-
-test("ffprobe spawn failure is classified as temporary verification unavailable", async () => {
-  const tempFile = `./tmp-probe-${Date.now()}.bin`;
-  const previousPath = env.FFPROBE_PATH;
-  await fs.writeFile(tempFile, Buffer.from("not video"));
-  env.FFPROBE_PATH = "/definitely/missing/ffprobe";
-
-  try {
-    const result = await new ExposedMomentVideoService({} as never).probeLocalFile(tempFile);
-    assert.equal(result.classification, "probe_unavailable");
-  } finally {
-    env.FFPROBE_PATH = previousPath;
-    await fs.rm(tempFile, { force: true });
-  }
-});
-
-test("temporary probe infrastructure failures do not use the unreadable-video message", async () => {
-  const key = createMomentVideoStorageKey(userId, "video/mp4");
-  const storage = new FakeStorageService();
-  storage.metadata.set(key, { contentLength: 1000, contentType: "application/octet-stream" });
-  const service = createMomentService(new StubMomentVideoService(storage, { classification: "probe_unavailable" }));
-
-  await assert.rejects(
-    service.createMoment(createPayload(key), user as never),
-    (error: unknown) => {
-      assert.ok(error instanceof AppError);
-      assert.equal(error.statusCode, 503);
-      assert.match(error.message, /verify this video right now/);
-      assert.doesNotMatch(error.message, /could not read/);
-      return true;
-    },
-  );
+  assert.deepEqual(storage.metadataCalls, []);
 });
 
 test("Moment-video namespace cannot be submitted as image media", async () => {
   const key = createMomentVideoStorageKey(userId, "video/mp4");
   const storage = new FakeStorageService();
-  const service = createMomentService(new StubMomentVideoService(storage));
+  const service = createMomentService(new MomentVideoService(storage as never));
 
   await assert.rejects(
     service.createMoment({

@@ -55,6 +55,11 @@ router.post(
   validate(momentValidation.momentIdParam),
   catchAsync(controller.toggleMomentReaction),
 );
+router.post(
+  "/:id/retry-video-processing",
+  validate(momentValidation.momentIdParam),
+  catchAsync(controller.retryMomentVideoProcessing),
+);
 router.delete(
   "/:id",
   validate(momentValidation.momentIdParam),

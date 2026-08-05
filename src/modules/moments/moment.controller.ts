@@ -136,6 +136,18 @@ export class MomentController {
     });
   };
 
+  public retryMomentVideoProcessing = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const moment = await this.momentService.retryMomentVideoProcessing(id, req.authUser as AuthUser);
+
+    ApiResponse.success(res, {
+      message: "Moment video processing retried",
+      data: {
+        moment,
+      },
+    });
+  };
+
   public listMomentComments = async (req: Request, res: Response): Promise<void> => {
     const { id } = req.params as { id: string };
     const comments = await this.momentService.listMomentComments(id, req.authUser as AuthUser);

@@ -1,11 +1,4 @@
-import { createWriteStream } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
-import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import httpStatus from "http-status";
 import { AppError } from "../../core/errors/app-error.js";
 import { env } from "../../config/env.js";
@@ -14,12 +7,9 @@ import { StorageService } from "../storage/storage.service.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import type { MomentMediaItem } from "./moment.interface.js";
 
-const execFileAsync = promisify(execFile);
-
 export const MOMENT_VIDEO_STORAGE_PREFIX = "moments";
 const MOMENT_VIDEO_SEGMENT = "video";
 const VIDEO_UPLOAD_URL_TTL_SECONDS = 60 * 30;
-const MAX_PROBE_OUTPUT_BYTES = 1024 * 1024;
 const SAFE_VIDEO_EXTENSIONS_BY_CONTENT_TYPE = new Map<string, string>([
   ["video/mp4", "mp4"],
   ["video/quicktime", "mov"],
@@ -32,77 +22,26 @@ const SAFE_VIDEO_EXTENSIONS_BY_CONTENT_TYPE = new Map<string, string>([
 
 type StorageFailureCode = string | undefined;
 
-export type MomentVideoProbeClassification =
+// Lightweight, HEAD-only availability check run synchronously inside
+// POST /moments. Deliberately narrower than the full ffprobe-based
+// validation the transcoding worker performs on its own downloaded copy
+// (see modules/transcoding/video-probe.ts's classifySourceProbe): this only
+// ever inspects S3 object metadata, never downloads or decodes bytes, so it
+// cannot detect a corrupt/non-video/over-duration file — those are permanent
+// failures the worker classifies authoritatively after its own download,
+// and which the Moment media item surfaces as "failed" once it does.
+export type MomentVideoAvailabilityClassification =
   | "valid"
   | "missing"
   | "too_large"
   | "not_video"
-  | "duration_unavailable"
-  | "duration_too_long"
-  | "probe_unavailable"
-  | "probe_timeout"
-  | "probe_failed"
+  | "unreadable"
   | "storage_unavailable";
 
-export interface MomentVideoProbeResult {
-  classification: MomentVideoProbeClassification;
-  durationSeconds?: number;
-  width?: number | null;
-  height?: number | null;
-  formatName?: string | null;
-  videoCodec?: string | null;
+export interface MomentVideoAvailabilityResult {
+  classification: MomentVideoAvailabilityClassification;
+  contentLength?: number;
 }
-
-interface FfprobeStream {
-  codec_type?: string;
-  codec_name?: string;
-  width?: number;
-  height?: number;
-  duration?: string;
-}
-
-interface FfprobeOutput {
-  streams?: FfprobeStream[];
-  format?: {
-    duration?: string;
-    format_name?: string;
-  };
-}
-
-class AsyncGate {
-  private active = 0;
-  private readonly waiting: Array<() => void> = [];
-
-  public constructor(private readonly limit: number) {}
-
-  public async run<T>(operation: () => Promise<T>): Promise<T> {
-    await this.acquire();
-
-    try {
-      return await operation();
-    } finally {
-      this.release();
-    }
-  }
-
-  private async acquire(): Promise<void> {
-    if (this.active < this.limit) {
-      this.active += 1;
-      return;
-    }
-
-    await new Promise<void>((resolve) => this.waiting.push(resolve));
-    this.active += 1;
-  }
-
-  private release(): void {
-    this.active = Math.max(0, this.active - 1);
-    const next = this.waiting.shift();
-    next?.();
-  }
-}
-
-const probeGate = new AsyncGate(env.MEDIA_PROBE_MAX_CONCURRENCY);
 
 const getStorageErrorCode = (error: unknown): StorageFailureCode => {
   if (!error || typeof error !== "object") {
@@ -148,15 +87,6 @@ const isRetryableStorageError = (error: unknown): boolean => {
     || code === "TimeoutError";
 };
 
-const parseDuration = (value: string | undefined): number | null => {
-  if (!value) {
-    return null;
-  }
-
-  const duration = Number(value);
-  return Number.isFinite(duration) && duration >= 0 ? duration : null;
-};
-
 const toSafeExtension = (contentType: string): string => {
   const normalized = contentType.toLowerCase().split(";")[0]?.trim() ?? "";
   return SAFE_VIDEO_EXTENSIONS_BY_CONTENT_TYPE.get(normalized) ?? "mp4";
@@ -165,20 +95,6 @@ const toSafeExtension = (contentType: string): string => {
 const normalizeContentType = (contentType: string): string => contentType.toLowerCase().split(";")[0]?.trim() ?? "";
 
 const redactStorageKey = (key: string): string => createHash("sha256").update(key).digest("hex").slice(0, 12);
-
-const nowMs = (): number => Number(process.hrtime.bigint() / 1000000n);
-
-const createByteCounter = (onCount: (bytes: number) => void) => {
-  let bytes = 0;
-
-  return new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      bytes += chunk.length;
-      onCount(bytes);
-      callback(null, chunk);
-    },
-  });
-};
 
 const assertVideoContentType = (contentType: string): string => {
   const normalized = normalizeContentType(contentType);
@@ -208,7 +124,7 @@ export const isOwnedMomentVideoStorageKey = (key: string, userId: string): boole
     && /^[a-f\d-]{36}\.[a-z0-9]+$/i.test(key.split("/").at(-1) ?? "");
 };
 
-const toMomentVideoError = (classification: MomentVideoProbeClassification): AppError => {
+const toMomentVideoError = (classification: MomentVideoAvailabilityClassification): AppError => {
   switch (classification) {
     case "missing":
       return new AppError("The uploaded video could not be found. Please upload it again.", httpStatus.BAD_REQUEST);
@@ -216,14 +132,7 @@ const toMomentVideoError = (classification: MomentVideoProbeClassification): App
       return new AppError("Create Post videos are too large. Please choose a shorter video.", httpStatus.BAD_REQUEST);
     case "not_video":
       return new AppError("Create Post videos must be valid video files.", httpStatus.BAD_REQUEST);
-    case "duration_unavailable":
-      return new AppError("We could not verify this video duration. Please choose another video.", httpStatus.BAD_REQUEST);
-    case "duration_too_long":
-      return new AppError("Create Post videos can be up to 1 minute. Please record a shorter video.", httpStatus.BAD_REQUEST);
-    case "probe_unavailable":
-    case "probe_timeout":
-      return new AppError("We could not verify this video right now. Please try again.", httpStatus.SERVICE_UNAVAILABLE);
-    case "probe_failed":
+    case "unreadable":
       return new AppError("We could not read this video. Please record or choose another video.", httpStatus.BAD_REQUEST);
     case "storage_unavailable":
       return new AppError("We could not verify this video right now. Please try again.", httpStatus.SERVICE_UNAVAILABLE);
@@ -282,14 +191,14 @@ export class MomentVideoService {
     this.assertOwnedKey(storageKey, user);
 
     const contentType = assertVideoContentType(mediaItem.contentType ?? "");
-    const probe = await this.probeStorageVideo(storageKey, contentType);
+    const availability = await this.checkStorageVideoAvailability(storageKey, contentType);
 
-    if (probe.classification !== "valid") {
-      if (probe.classification !== "missing" && probe.classification !== "storage_unavailable") {
+    if (availability.classification !== "valid") {
+      if (availability.classification !== "missing" && availability.classification !== "storage_unavailable") {
         await this.safeDeleteOwnedUpload(storageKey, user);
       }
 
-      throw toMomentVideoError(probe.classification);
+      throw toMomentVideoError(availability.classification);
     }
 
     return {
@@ -299,14 +208,37 @@ export class MomentVideoService {
       url: null,
       storageKey,
       contentType,
-      durationSeconds: probe.durationSeconds ?? null,
+      // Not yet known: no bytes have been downloaded or decoded at this
+      // point (that is deliberately deferred to the transcoding worker — see
+      // checkStorageVideoAvailability's doc comment). Never trust the
+      // client-supplied durationSeconds as authoritative — moment.validation.ts
+      // only uses it for a fast, non-authoritative pre-check, never persists
+      // it. The worker's authoritative ffprobe result repoints this field
+      // once the media reaches "ready" (see
+      // MomentMediaLifecycleService.markReady).
+      durationSeconds: null,
     };
   }
 
-  public async probeStorageVideo(key: string, contentType: string): Promise<MomentVideoProbeResult> {
+  /**
+   * Confirms the uploaded object exists, belongs to this Moment-video
+   * namespace's expected shape, and is within the allowed upload size —
+   * entirely from S3 HEAD metadata, never downloading or decoding the
+   * object. This intentionally cannot detect a corrupt file, a non-video
+   * container, or an over-duration clip: those require ffprobe to actually
+   * decode the bytes, which is exactly the authoritative check the
+   * transcoding worker already performs on its own downloaded copy before
+   * transcoding (see modules/transcoding/video-probe.ts's classifySourceProbe
+   * and video-processor.ts's processClaimedJob) — running that same
+   * decode-requiring check again here, synchronously inside POST /moments,
+   * would mean downloading the entire source video twice for every upload
+   * for no additional safety. A file that slips past this check but fails
+   * the worker's later validation transitions the Moment media item to
+   * "failed" (see TranscodingMomentSyncService.syncAfterJobAttempt) — it
+   * never reaches "ready".
+   */
+  public async checkStorageVideoAvailability(key: string, contentType: string): Promise<MomentVideoAvailabilityResult> {
     const keyHash = redactStorageKey(key);
-    const startedAt = nowMs();
-    const phaseTimings: Record<string, number> = {};
 
     if (!normalizeContentType(contentType).startsWith("video/")) {
       return { classification: "not_video" };
@@ -315,176 +247,44 @@ export class MomentVideoService {
     let metadata: Awaited<ReturnType<StorageService["getObjectMetadata"]>>;
 
     try {
-      const phaseStartedAt = nowMs();
       metadata = await this.storageService.getObjectMetadata(key);
-      phaseTimings.headObjectMs = nowMs() - phaseStartedAt;
     } catch (error) {
       if (isMissingObjectError(error)) {
         logger.info({ keyHash, classification: "missing" }, "Moment video storage object is missing");
         return { classification: "missing" };
       }
 
-      const classification = isRetryableStorageError(error) ? "storage_unavailable" : "probe_failed";
+      const classification = isRetryableStorageError(error) ? "storage_unavailable" : "unreadable";
       logger.warn({ keyHash, classification }, "Moment video metadata check failed");
       return { classification };
     }
 
     if (metadata.contentLength === undefined || metadata.contentLength <= 0) {
-      logger.info({ keyHash, contentLength: metadata.contentLength ?? null, classification: "probe_failed" }, "Moment video upload is empty");
-      return { classification: "probe_failed" };
+      logger.info({ keyHash, contentLength: metadata.contentLength ?? null, classification: "unreadable" }, "Moment video upload is empty");
+      return { classification: "unreadable" };
     }
 
     if (metadata.contentLength > env.MEDIA_PROBE_MAX_BYTES) {
-      logger.info({ keyHash, contentLength: metadata.contentLength, classification: "too_large" }, "Moment video exceeds probe byte limit");
+      logger.info({ keyHash, contentLength: metadata.contentLength, classification: "too_large" }, "Moment video exceeds allowed upload size");
       return { classification: "too_large" };
     }
 
-    return probeGate.run(async () => {
-      const tempDir = path.resolve(env.MEDIA_PROBE_TMP_DIR, "xenog-moment-video-probes");
-      const tempFile = path.join(tempDir, `${randomUUID()}.media`);
-      let downloadedBytes = 0;
+    logger.info(
+      {
+        keyHash,
+        classification: "valid",
+        contentLength: metadata.contentLength,
+        metadataContentType: metadata.contentType ?? null,
+        requestContentType: contentType,
+      },
+      "Moment video storage availability check completed",
+    );
 
-      try {
-        await mkdir(tempDir, { recursive: true });
-        const downloadStartedAt = nowMs();
-        const object = await this.storageService.getObject(key);
-        await pipeline(
-          object.body,
-          createByteCounter((bytes) => {
-            downloadedBytes = bytes;
-          }),
-          createWriteStream(tempFile),
-        );
-        phaseTimings.downloadMs = nowMs() - downloadStartedAt;
-
-        const probeStartedAt = nowMs();
-        const result = await this.probeFile(tempFile);
-        phaseTimings.ffprobeMs = nowMs() - probeStartedAt;
-        logger.info(
-          {
-            keyHash,
-            classification: result.classification,
-            contentLength: metadata.contentLength,
-            downloadedBytes,
-            metadataContentType: metadata.contentType ?? null,
-            requestContentType: contentType,
-            durationSeconds: result.durationSeconds ?? null,
-            totalMs: nowMs() - startedAt,
-            ...phaseTimings,
-          },
-          "Moment video probe completed",
-        );
-        return result;
-      } catch (error) {
-        if (isMissingObjectError(error)) {
-          return { classification: "missing" };
-        }
-
-        if (isRetryableStorageError(error)) {
-          return { classification: "storage_unavailable" };
-        }
-
-        logger.warn(
-          {
-            keyHash,
-            downloadedBytes,
-            totalMs: nowMs() - startedAt,
-            ...phaseTimings,
-          },
-          "Moment video probe failed before ffprobe completed",
-        );
-        return { classification: "probe_failed" };
-      } finally {
-        await rm(tempFile, { force: true }).catch(() => undefined);
-      }
-    });
+    return { classification: "valid", contentLength: metadata.contentLength };
   }
 
   public async safeDeleteOwnedUpload(key: string, user: AuthUser): Promise<void> {
     this.assertOwnedKey(key, user);
     await this.storageService.deleteObject(key).catch(() => undefined);
-  }
-
-  protected async probeFile(filePath: string): Promise<MomentVideoProbeResult> {
-    let stdout: string;
-
-    try {
-      const result = await execFileAsync(
-        env.FFPROBE_PATH,
-        [
-          "-v",
-          "error",
-          "-print_format",
-          "json",
-          "-show_format",
-          "-show_streams",
-          filePath,
-        ],
-        {
-          encoding: "utf8",
-          maxBuffer: MAX_PROBE_OUTPUT_BYTES,
-          shell: false,
-          timeout: env.MEDIA_PROBE_TIMEOUT_MS,
-          windowsHide: true,
-        },
-      );
-      stdout = result.stdout;
-    } catch (error) {
-      const code = getStorageErrorCode(error);
-      const killed = Boolean(error && typeof error === "object" && (error as { killed?: boolean }).killed);
-      const signal = error && typeof error === "object" ? (error as { signal?: string }).signal : undefined;
-
-      if (code === "ENOENT" || code === "EACCES") {
-        logger.error({ code, ffprobePath: env.FFPROBE_PATH }, "Moment video ffprobe executable unavailable");
-        return { classification: "probe_unavailable" };
-      }
-
-      if (code === "ETIMEDOUT" || killed || signal === "SIGTERM") {
-        logger.warn({ code, signal, timeoutMs: env.MEDIA_PROBE_TIMEOUT_MS }, "Moment video ffprobe timed out");
-        return { classification: "probe_timeout" };
-      }
-
-      return { classification: "probe_failed" };
-    }
-
-    let parsed: FfprobeOutput;
-
-    try {
-      parsed = JSON.parse(stdout) as FfprobeOutput;
-    } catch {
-      return { classification: "probe_failed" };
-    }
-
-    const videoStream = parsed.streams?.find((stream) => stream.codec_type === "video");
-
-    if (!videoStream) {
-      return { classification: "not_video" };
-    }
-
-    const durationSeconds = parseDuration(videoStream.duration) ?? parseDuration(parsed.format?.duration);
-
-    if (durationSeconds === null) {
-      return { classification: "duration_unavailable" };
-    }
-
-    if (durationSeconds > env.MOMENT_VIDEO_MAX_DURATION_SECONDS) {
-      return {
-        classification: "duration_too_long",
-        durationSeconds,
-        width: videoStream.width ?? null,
-        height: videoStream.height ?? null,
-        formatName: parsed.format?.format_name ?? null,
-        videoCodec: videoStream.codec_name ?? null,
-      };
-    }
-
-    return {
-      classification: "valid",
-      durationSeconds,
-      width: videoStream.width ?? null,
-      height: videoStream.height ?? null,
-      formatName: parsed.format?.format_name ?? null,
-      videoCodec: videoStream.codec_name ?? null,
-    };
   }
 }

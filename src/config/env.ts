@@ -36,6 +36,24 @@ const envSchema = z.object({
   MEDIA_PROBE_TMP_DIR: z.string().default("/tmp"),
   MEDIA_PROBE_MAX_BYTES: z.coerce.number().int().positive().default(250 * 1024 * 1024),
 
+  // --- Phase 2 video-transcoding worker settings ---
+  // Worker concurrency (1) and FFmpeg thread count (1) are deliberately NOT
+  // configurable here — they are safety limits fixed in code
+  // (src/modules/transcoding/ffmpeg-args.ts / src/video-worker.ts), not
+  // provisional operational values, per the confirmed t3.small constraints.
+  FFMPEG_PATH: z.string().default(process.platform === "win32" ? "ffmpeg" : "/usr/bin/ffmpeg"),
+  TRANSCODING_TMP_ROOT: z.string().default(
+    process.platform === "win32" ? "./tmp/transcoding" : "/app/tmp/transcoding",
+  ),
+  TRANSCODING_MIN_FREE_DISK_BYTES: z.coerce.number().int().positive().default(15 * 1024 * 1024 * 1024),
+  TRANSCODING_MAX_SOURCE_BYTES: z.coerce.number().int().positive().default(200 * 1024 * 1024),
+  TRANSCODING_FFMPEG_TIMEOUT_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
+  TRANSCODING_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
+  TRANSCODING_DISK_BLOCKED_BACKOFF_MS: z.coerce.number().int().positive().default(5 * 60 * 1000),
+  TRANSCODING_LEASE_RENEWAL_INTERVAL_MS: z.coerce.number().int().positive().default(30 * 1000),
+  TRANSCODING_CRF: z.coerce.number().int().min(0).max(51).default(23),
+  TRANSCODING_PRESET: z.string().default("veryfast"),
+
   JWT_ACCESS_SECRET: z.string().min(32).default("development-access-secret-change-before-production"),
   JWT_REFRESH_SECRET: z.string().min(32).optional(),
   JWT_ACCESS_TTL_SECONDS: z.coerce.number().int().positive().default(60 * 60 * 24),

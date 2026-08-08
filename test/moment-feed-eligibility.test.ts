@@ -579,6 +579,7 @@ function createMomentService(overrides: {
     } as never,
     {
       findBlockedIds: async () => overrides.blockedUserIds ?? [],
+      findBlockerIds: async () => [],
       isBlocked: async (blockerId: string, blockedId: string) =>
         blockerId === viewer.id && (overrides.blockedUserIds ?? []).includes(blockedId),
     } as never,
@@ -586,6 +587,7 @@ function createMomentService(overrides: {
       countByMomentIds: async () => new Map<string, number>(),
       countByMomentId: async () => 0,
       findLikedMomentIds: async () => new Set<string>(),
+      findLikedUserIdsByMomentIds: async () => new Map<string, string[]>(),
     } as never,
     {
       countByMomentIds: async () => new Map<string, number>(),

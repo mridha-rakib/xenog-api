@@ -140,7 +140,13 @@ export const momentValidation = {
           : []),
       limit: z.coerce.number().int().min(1).max(100).default(50),
       audience: z.enum(["discover", "friends"]).optional(),
-    }).strict(),
+      latitude: z.coerce.number().min(-90).max(90).optional(),
+      longitude: z.coerce.number().min(-180).max(180).optional(),
+      radiusKm: z.coerce.number().finite().positive().optional(),
+    }).strict().refine((query) => (query.latitude === undefined) === (query.longitude === undefined), {
+      message: "Latitude and longitude must be provided together",
+      path: ["longitude"],
+    }),
   }),
   hashtagMoments: z.object({
     params: z.object({

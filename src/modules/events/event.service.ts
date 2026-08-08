@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import httpStatus from "http-status";
 import { Types } from "mongoose";
 import { RedisClient } from "../../config/redis.js";
+import { env } from "../../config/env.js";
 import { AppError } from "../../core/errors/app-error.js";
 import { logger } from "../../core/logger/logger.js";
 import { createPaginationMeta, getPaginationOptions } from "../../core/utils/pagination.js";
@@ -20,7 +21,7 @@ import { MomentShareRepository } from "../moments/moment-share.repository.js";
 import { MomentSaveRepository } from "../moments/moment-save.repository.js";
 import type { IUser } from "../user/user.interface.js";
 import { ProductRepository } from "../products/product.repository.js";
-import { EventRepository } from "./event.repository.js";
+import { EventRepository, getDistanceKm } from "./event.repository.js";
 import { RewardClaimRepository } from "./reward-claim.repository.js";
 import type { IRewardClaim } from "./reward-claim.model.js";
 import { CheckoutPaymentRepository } from "../payments/checkout-payment.repository.js";
@@ -35,6 +36,19 @@ import { NotificationRepository } from "../notifications/notification.repository
 import { EventHostReviewRepository } from "./event-host-review.repository.js";
 import { EventWindowRepository } from "../event-windows/event-window.repository.js";
 import { ReportRepository } from "../reports/report.repository.js";
+import {
+  buildReactionSocialContext,
+  calculateFreshnessScore,
+  calculateSmartFeedNearbyScore,
+  calculateSmartFeedScore,
+  calculateSocialScore,
+  compareSmartFeedScoreDesc,
+  isValidSmartFeedCoordinate,
+  type SmartFeedScore,
+  type SmartFeedSocialContext,
+  type SmartFeedSocialUser,
+} from "../feed/smart-feed-ranking.js";
+import { GeoIpService } from "../geoip/geoip.service.js";
 import {
   EVENT_MEDIA_LIMITS_BYTES,
   MAX_EVENT_MEDIA_VIDEO_DURATION_SECONDS,
@@ -102,6 +116,15 @@ const REWARD_END_DATE_AFTER_TICKET_SALES_END_MESSAGE =
 const REWARD_END_TIME_AFTER_TICKET_SALES_END_MESSAGE =
   "Reward end time cannot be after the ticket sales end time.";
 const eventCategorySet = new Set<string>(eventCategories);
+
+type EventSmartFeedContext = {
+  scoreByEventId: Map<string, SmartFeedScore>;
+  socialContextByEventId: Map<string, SmartFeedSocialContext>;
+};
+
+type EventRequestContext = {
+  clientIp?: string | null;
+};
 
 type TicketValidationCode =
   | "EVENT_END_REQUIRED_FOR_TICKET_MANAGEMENT"
@@ -238,6 +261,7 @@ export class EventService {
     private readonly getServerNow = () => new Date(Date.now()),
     private readonly eventCancellationRefundService = new EventCancellationRefundService(),
     private readonly reportRepository = new ReportRepository(),
+    private readonly geoIpService = new GeoIpService(),
   ) {}
 
   public async saveDraft(
@@ -1065,11 +1089,15 @@ export class EventService {
   public async listFeedEvents(
     user?: AuthUser,
     query: EventFeedQuery = {},
+    context: EventRequestContext = {},
   ): Promise<EventResponse[]> {
-    const [excludeUserIds, followingIds, friendIds] = await Promise.all([
+    const isSmartFeedEnabled = env.ENABLE_SMART_FEED === true;
+    const shouldLoadFriendIds = Boolean(user && (isSmartFeedEnabled || query.audience === "friends"));
+    const [excludeUserIds, blockerUserIds, followingIds, friendIds] = await Promise.all([
       user ? this.userBlockRepository.findBlockedIds(user.id) : Promise.resolve([]),
+      user && isSmartFeedEnabled ? this.userBlockRepository.findBlockerIds(user.id) : Promise.resolve([]),
       user ? this.userFollowRepository.findFollowingIds(user.id) : Promise.resolve([]),
-      user && query.audience === "friends"
+      shouldLoadFriendIds && user
         ? this.userFollowRepository.findMutualFriendIds(user.id)
         : Promise.resolve([]),
     ]);
@@ -1108,7 +1136,10 @@ export class EventService {
       events.map((event) => ({ id: event._id.toString(), status: event.status })),
     );
     const eventIds = events.map((event) => event._id.toString());
-    const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds, publicGoingSummaries, reportedEventIds] =
+    const smartFeedFriendIds = isSmartFeedEnabled
+      ? friendIds.filter((id) => !excludeUserIds.includes(id) && !blockerUserIds.includes(id))
+      : [];
+    const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds, publicGoingSummaries, reportedEventIds, smartFeedContext] =
       await Promise.all([
         this.momentReactionRepository.countByMomentIds(momentIds),
         this.momentCommentRepository.countByMomentIds(momentIds),
@@ -1123,6 +1154,9 @@ export class EventService {
         user
           ? this.reportRepository.findReportedTargetIds(user.id, "event", eventIds)
           : Promise.resolve(new Set<string>()),
+        isSmartFeedEnabled
+          ? this.buildEventSmartFeedContext(events, momentIds, smartFeedFriendIds, query, context)
+          : Promise.resolve(undefined),
       ]);
 
     const responseEvents = events.map((event, index) => {
@@ -1140,10 +1174,21 @@ export class EventService {
         isSaved: savedMomentIds.has(interactionMomentId),
         hasReported: reportedEventIds.has(event._id.toString()),
         publicGoingSummary: publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },
+        ...(smartFeedContext?.socialContextByEventId.get(event._id.toString())
+          ? { socialContext: smartFeedContext.socialContextByEventId.get(event._id.toString()) }
+          : {}),
+        ...(smartFeedContext?.scoreByEventId.get(event._id.toString())
+          ? {
+              smartFeed: smartFeedContext.scoreByEventId.get(event._id.toString()),
+              smartFeedScore: smartFeedContext.scoreByEventId.get(event._id.toString())?.finalScore,
+            }
+          : {}),
       };
     });
 
-    return this.withCrowdStatuses(events, responseEvents);
+    const eventsWithCrowdStatuses = await this.withCrowdStatuses(events, responseEvents);
+
+    return isSmartFeedEnabled ? eventsWithCrowdStatuses.sort(compareSmartFeedScoreDesc) : eventsWithCrowdStatuses;
   }
 
   public async toggleSaveEvent(
@@ -3143,6 +3188,86 @@ export class EventService {
       eventTitle: event.name ?? null,
       caption: event.description ?? null,
     });
+  }
+
+  private async buildEventSmartFeedContext(
+    events: IEvent[],
+    interactionMomentIds: string[],
+    mutualFriendIds: string[],
+    query: EventFeedQuery,
+    context: EventRequestContext,
+  ): Promise<EventSmartFeedContext> {
+    const interactionMomentIdByEventId = new Map<string, string>();
+
+    interactionMomentIds.forEach((momentId, index) => {
+      const event = events[index];
+
+      if (event) {
+        interactionMomentIdByEventId.set(event._id.toString(), momentId);
+      }
+    });
+
+    const [reactedUserIdsByMomentId, attendeeIdsByEventId] = await Promise.all([
+      this.momentReactionRepository.findLikedUserIdsByMomentIds(interactionMomentIds, mutualFriendIds),
+      this.checkoutPaymentService.getMutualAttendeeIdsByEventIds(
+        events.map((event) => ({ id: event._id.toString(), status: event.status })),
+        mutualFriendIds,
+      ),
+    ]);
+    const reactedUserIds = [...new Set([...reactedUserIdsByMomentId.values()].flat())];
+    const reactedUsers = reactedUserIds.length > 0
+      ? await this.userRepository.findActiveUsersByIds(reactedUserIds, undefined, reactedUserIds.length)
+      : [];
+    const userById = new Map<string, SmartFeedSocialUser>(
+      reactedUsers.map((item) => [item._id.toString(), {
+        id: item._id.toString(),
+        name: item.name,
+        avatarKey: item.avatarKey ?? null,
+      }]),
+    );
+    const viewerLocation = isValidSmartFeedCoordinate(query.latitude, query.longitude)
+      ? { latitude: query.latitude, longitude: query.longitude }
+      : null;
+    const viewerRegionalLocation = viewerLocation
+      ? null
+      : await this.geoIpService.lookup(context.clientIp);
+    const scoreByEventId = new Map<string, SmartFeedScore>();
+    const socialContextByEventId = new Map<string, SmartFeedSocialContext>();
+    const now = new Date();
+
+    for (const event of events) {
+      const eventId = event._id.toString();
+      const interactionMomentId = interactionMomentIdByEventId.get(eventId);
+      const reactedUserIdsForEvent = interactionMomentId
+        ? reactedUserIdsByMomentId.get(interactionMomentId) ?? []
+        : [];
+      const socialContext = buildReactionSocialContext(reactedUserIdsForEvent, userById);
+
+      if (socialContext) {
+        socialContextByEventId.set(eventId, socialContext);
+      }
+
+      const score = calculateSmartFeedScore({
+        nearbyScore: calculateSmartFeedNearbyScore({
+          viewerExactLocation: viewerLocation,
+          viewerRegionalLocation,
+          itemLocation: event.location,
+          distanceKm: getDistanceKm,
+        }),
+        freshnessScore: calculateFreshnessScore(event.publishedAt ?? event.createdAt, now),
+        socialScore: calculateSocialScore({
+          mutualReactionUserCount: new Set(reactedUserIdsForEvent).size,
+          mutualAttendeeUserCount: attendeeIdsByEventId.get(eventId)?.size ?? 0,
+        }),
+      });
+
+      scoreByEventId.set(eventId, score);
+    }
+
+    return {
+      scoreByEventId,
+      socialContextByEventId,
+    };
   }
 
   private async ensureEventChatRoom(event: IEvent): Promise<void> {

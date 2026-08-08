@@ -75,7 +75,7 @@ const TIME_PERIOD_RANGES: Record<Exclude<EventTimePeriod, "any">, { start: numbe
 
 const toRadians = (value: number) => (value * Math.PI) / 180;
 
-const getDistanceKm = (
+export const getDistanceKm = (
   first: { latitude: number; longitude: number },
   second: { latitude: number; longitude: number },
 ) => {

@@ -120,10 +120,12 @@ const createEventService = (privateEventsForUser: Record<string, unknown[]> = {}
   };
   const userFollowRepository = {
     findFollowingIds: async () => [],
+    findMutualFriendIds: async () => [],
     isFollowing: async () => false,
   };
   const userBlockRepository = {
     findBlockedIds: async () => [],
+    findBlockerIds: async () => [],
   };
   const momentRepository = {
     ensureEventAnnouncement: async (payload: { eventId: string }) => ({
@@ -137,12 +139,14 @@ const createEventService = (privateEventsForUser: Record<string, unknown[]> = {}
   const momentReactionRepository = {
     countByMomentIds: async () => new Map(),
     findLikedMomentIds: async () => new Set<string>(),
+    findLikedUserIdsByMomentIds: async () => new Map<string, string[]>(),
   };
   const momentSaveRepository = {
     findSavedMomentIds: async () => new Set<string>(),
   };
   const checkoutPaymentService = {
     getPublicEventGoingSummaries: async () => new Map(),
+    getMutualAttendeeIdsByEventIds: async () => new Map<string, Set<string>>(),
   };
   const noopRepository = {};
   // listMapEvents now computes checkedInCount for every returned event (not

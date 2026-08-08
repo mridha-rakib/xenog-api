@@ -380,6 +380,7 @@ export class EventController {
     const events = await this.eventService.listFeedEvents(
       req.authUser as AuthUser | undefined,
       req.query as unknown as EventFeedQuery,
+      { clientIp: req.ip },
     );
 
     ApiResponse.success(res, {

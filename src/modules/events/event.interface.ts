@@ -364,6 +364,25 @@ export interface EventMemberResponse {
   avatarUrl?: string | null;
 }
 
+export interface EventSocialContextUserResponse {
+  id: string;
+  name: string;
+  avatarKey?: string | null;
+  avatarUrl?: string | null;
+}
+
+export interface EventSocialContextResponse {
+  previewUsers: EventSocialContextUserResponse[];
+  totalMutualReactions: number;
+}
+
+export interface EventSmartFeedResponse {
+  nearbyScore: number;
+  freshnessScore: number;
+  socialScore: number;
+  finalScore: number;
+}
+
 export interface JoinRequestResponse {
   userId: string;
   name: string;
@@ -489,6 +508,9 @@ export interface EventResponse {
   myJoinRequestStatus?: EventJoinRequestStatus | null;
   hostReviewEligibility?: EventHostReviewEligibilityResponse;
   publicGoingSummary?: PublicEventGoingSummaryResponse;
+  socialContext?: EventSocialContextResponse;
+  smartFeed?: EventSmartFeedResponse;
+  smartFeedScore?: number;
   publishedAt?: Date | null;
   startedAt?: Date | null;
   completedAt?: Date | null;

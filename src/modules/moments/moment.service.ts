@@ -2,6 +2,7 @@ import type { AuthUser } from "../auth/auth.interface.js";
 import httpStatus from "http-status";
 import { AppError } from "../../core/errors/app-error.js";
 import { logger } from "../../core/logger/logger.js";
+import { env } from "../../config/env.js";
 import { createPaginationMeta, getPaginationOptions } from "../../core/utils/pagination.js";
 import { StorageService } from "../storage/storage.service.js";
 import type { IUser } from "../user/user.interface.js";
@@ -21,6 +22,7 @@ import type {
   MomentCommentResponse,
   MomentAuthorResponse,
   MomentInteractionSummaryResponse,
+  MomentLocationSnapshot,
   MomentMediaItem,
   MomentResponse,
   MomentFeedQuery,
@@ -34,11 +36,25 @@ import { MomentCommentReactionRepository } from "./moment-comment-reaction.repos
 import { MomentReactionRepository } from "./moment-reaction.repository.js";
 import { MomentSaveRepository } from "./moment-save.repository.js";
 import { EventRepository } from "../events/event.repository.js";
+import { getDistanceKm } from "../events/event.repository.js";
 import { CheckoutPaymentRepository } from "../payments/checkout-payment.repository.js";
 import { TicketShareRepository } from "../payments/ticket-share.repository.js";
 import { isOwnedMomentVideoStorageKey, MomentVideoService } from "./moment-video.service.js";
 import { TranscodingMomentSyncService } from "../transcoding/transcoding-moment-sync.service.js";
 import { ReportRepository } from "../reports/report.repository.js";
+import {
+  buildReactionSocialContext,
+  calculateFreshnessScore,
+  calculateSmartFeedNearbyScore,
+  calculateSmartFeedScore,
+  calculateSocialScore,
+  compareSmartFeedScoreDesc,
+  isValidSmartFeedCoordinate,
+  type SmartFeedScore,
+  type SmartFeedSocialContext,
+  type SmartFeedSocialUser,
+} from "../feed/smart-feed-ranking.js";
+import { GeoIpService } from "../geoip/geoip.service.js";
 
 const MOMENT_ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
 
@@ -52,6 +68,15 @@ interface MomentInteractionContext {
   savedMomentIds: Set<string>;
   reportedMomentIds: Set<string>;
 }
+
+type MomentSmartFeedContext = {
+  scoreByMomentId: Map<string, SmartFeedScore>;
+  socialContextByMomentId: Map<string, SmartFeedSocialContext>;
+};
+
+type MomentRequestContext = {
+  clientIp?: string | null;
+};
 
 export class MomentService {
   public constructor(
@@ -71,6 +96,7 @@ export class MomentService {
     private readonly momentVideoService = new MomentVideoService(storageService),
     private readonly transcodingMomentSyncService = new TranscodingMomentSyncService(),
     private readonly reportRepository = new ReportRepository(),
+    private readonly geoIpService = new GeoIpService(),
   ) {}
 
   public async createVideoUpload(user: AuthUser, contentType: string): Promise<Record<string, unknown>> {
@@ -86,7 +112,11 @@ export class MomentService {
     return this.momentVideoService.uploadObject(payload);
   }
 
-  public async createMoment(payload: CreateMomentDto, user: AuthUser): Promise<MomentResponse> {
+  public async createMoment(
+    payload: CreateMomentDto,
+    user: AuthUser,
+    context: MomentRequestContext = {},
+  ): Promise<MomentResponse> {
     const startedAt = nowMs();
     const hasVideo = payload.mediaItems?.some((mediaItem) => mediaItem.type === "video") ?? false;
     let resolvedEventTitle = payload.eventTitle?.trim() || null;
@@ -140,6 +170,7 @@ export class MomentService {
     const validationStartedAt = nowMs();
     const mediaItems = await this.validateCreateMomentMediaItems(payload.mediaItems ?? [], user);
     const mediaValidationMs = nowMs() - validationStartedAt;
+    const location = await this.buildMomentLocationSnapshot(user.id, context.clientIp);
 
     const persistenceStartedAt = nowMs();
     let moment = await this.momentRepository.create({
@@ -154,6 +185,7 @@ export class MomentService {
       eventId: resolvedEventId,
       eventCode: payload.eventCode?.trim() || null,
       mediaItems,
+      location,
     });
     const persistenceMs = nowMs() - persistenceStartedAt;
 
@@ -278,11 +310,18 @@ export class MomentService {
     );
   }
 
-  public async listFeedMoments(user: AuthUser, query: MomentFeedQuery = {}): Promise<MomentResponse[]> {
+  public async listFeedMoments(
+    user: AuthUser,
+    query: MomentFeedQuery = {},
+    context: MomentRequestContext = {},
+  ): Promise<MomentResponse[]> {
     const hashtags = query.hashtags?.map(normalizeHashtag).filter(Boolean);
-    const [excludeUserIds, friendIds] = await Promise.all([
+    const isSmartFeedEnabled = env.ENABLE_SMART_FEED === true;
+    const shouldLoadFriendIds = isSmartFeedEnabled || query.audience === "friends";
+    const [excludeUserIds, blockerUserIds, friendIds] = await Promise.all([
       this.userBlockRepository.findBlockedIds(user.id),
-      query.audience === "friends"
+      isSmartFeedEnabled ? this.userBlockRepository.findBlockerIds(user.id) : Promise.resolve([]),
+      shouldLoadFriendIds
         ? this.userFollowRepository.findMutualFriendIds(user.id)
         : Promise.resolve([]),
     ]);
@@ -307,22 +346,30 @@ export class MomentService {
       authorUserIds,
     });
     const uniqueUserIds = [...new Set(moments.map((m) => m.userId.toString()))];
-    const [authors, viewerFollowingIds, interactionContext] = await Promise.all([
+    const smartFeedFriendIds = isSmartFeedEnabled
+      ? friendIds.filter((id) => !excludeUserIds.includes(id) && !blockerUserIds.includes(id))
+      : [];
+    const [authors, viewerFollowingIds, interactionContext, smartFeedContext] = await Promise.all([
       this.userRepository.findByIds(uniqueUserIds),
       this.getViewerFollowingIdSet(user),
       this.buildInteractionContext(moments, user),
+      isSmartFeedEnabled
+        ? this.buildMomentSmartFeedContext(moments, smartFeedFriendIds, query, context)
+        : Promise.resolve(undefined),
     ]);
     const authorById = new Map(authors.map((a) => [a._id.toString(), a]));
-
-    return Promise.all(
+    const responses = await Promise.all(
       moments.map((moment) => this.toResponse(
         moment,
         authorById.get(moment.userId.toString()) ?? null,
         user,
         viewerFollowingIds,
         interactionContext,
+        smartFeedContext,
       )),
     );
+
+    return isSmartFeedEnabled ? responses.sort(compareSmartFeedScoreDesc) : responses;
   }
 
   public async listHashtagMoments(hashtagValue: string, user: AuthUser, limit = 100): Promise<MomentResponse[]> {
@@ -786,6 +833,7 @@ export class MomentService {
     viewer?: AuthUser,
     viewerFollowingIds = new Set<string>(),
     interactionContext?: MomentInteractionContext,
+    smartFeedContext?: MomentSmartFeedContext,
   ): Promise<MomentResponse> {
     const momentId = moment._id.toString();
     const taggedFriendIds = (moment.taggedFriendIds ?? []).map((id) => id.toString());
@@ -826,14 +874,134 @@ export class MomentService {
       eventId: moment.eventId?.toString() ?? null,
       eventCode: moment.eventCode ?? null,
       mediaItems,
+      ...(moment.location ? { location: moment.location } : {}),
       likesCount: interactionSummary.likesCount,
       commentsCount: interactionSummary.commentsCount,
       sharesCount: interactionSummary.sharesCount,
       isLiked: interactionSummary.isLiked,
       isSaved,
       hasReported,
+      ...(smartFeedContext?.socialContextByMomentId.get(momentId)
+        ? { socialContext: smartFeedContext.socialContextByMomentId.get(momentId) }
+        : {}),
+      ...(smartFeedContext?.scoreByMomentId.get(momentId)
+        ? {
+            smartFeed: smartFeedContext.scoreByMomentId.get(momentId),
+            smartFeedScore: smartFeedContext.scoreByMomentId.get(momentId)?.finalScore,
+          }
+        : {}),
       createdAt: moment.createdAt,
       updatedAt: moment.updatedAt,
+    };
+  }
+
+  private async buildMomentLocationSnapshot(
+    userId: string,
+    clientIp?: string | null,
+  ): Promise<MomentLocationSnapshot | null> {
+    try {
+      const user = await this.userRepository.findById(userId);
+      const currentLocation = user?.currentLocation;
+
+      if (
+        user?.currentLocationSharingEnabled === true &&
+        isValidSmartFeedCoordinate(currentLocation?.latitude, currentLocation?.longitude)
+      ) {
+        return {
+          source: "gps",
+          latitude: currentLocation.latitude,
+          longitude: currentLocation.longitude,
+          accuracy: currentLocation.accuracy ?? null,
+          capturedAt: currentLocation.updatedAt ?? new Date(),
+        };
+      }
+    } catch (error) {
+      logger.warn({ err: error, userId }, "Skipping Moment location snapshot");
+    }
+
+    return this.buildIpLocationSnapshot(clientIp);
+  }
+
+  private async buildIpLocationSnapshot(clientIp?: string | null): Promise<MomentLocationSnapshot | null> {
+    try {
+      const geoIpLocation = await this.geoIpService.lookup(clientIp);
+
+      if (!geoIpLocation) {
+        return null;
+      }
+
+      return {
+        ...geoIpLocation,
+        capturedAt: new Date(),
+      };
+    } catch (error) {
+      logger.warn({ err: error }, "Skipping GeoIP Moment location snapshot");
+      return null;
+    }
+  }
+
+  private async buildMomentSmartFeedContext(
+    moments: IMoment[],
+    mutualFriendIds: string[],
+    query: MomentFeedQuery,
+    context: MomentRequestContext,
+  ): Promise<MomentSmartFeedContext> {
+    const momentIds = moments.map((moment) => moment._id.toString());
+    const reactedUserIdsByMomentId = await this.momentReactionRepository.findLikedUserIdsByMomentIds(
+      momentIds,
+      mutualFriendIds,
+    );
+    const reactedUserIds = [...new Set([...reactedUserIdsByMomentId.values()].flat())];
+    const reactedUsers = reactedUserIds.length > 0
+      ? await this.userRepository.findActiveUsersByIds(reactedUserIds, undefined, reactedUserIds.length)
+      : [];
+    const userById = new Map<string, SmartFeedSocialUser>(
+      reactedUsers.map((item) => [item._id.toString(), {
+        id: item._id.toString(),
+        name: item.name,
+        avatarKey: item.avatarKey ?? null,
+      }]),
+    );
+    const mutualFriendSet = new Set(mutualFriendIds);
+    const viewerLocation = isValidSmartFeedCoordinate(query.latitude, query.longitude)
+      ? { latitude: query.latitude, longitude: query.longitude }
+      : null;
+    const viewerRegionalLocation = viewerLocation
+      ? null
+      : await this.geoIpService.lookup(context.clientIp);
+    const scoreByMomentId = new Map<string, SmartFeedScore>();
+    const socialContextByMomentId = new Map<string, SmartFeedSocialContext>();
+    const now = new Date();
+
+    for (const moment of moments) {
+      const momentId = moment._id.toString();
+      const reactedUserIdsForMoment = reactedUserIdsByMomentId.get(momentId) ?? [];
+      const socialContext = buildReactionSocialContext(reactedUserIdsForMoment, userById);
+
+      if (socialContext) {
+        socialContextByMomentId.set(momentId, socialContext);
+      }
+
+      const score = calculateSmartFeedScore({
+        nearbyScore: calculateSmartFeedNearbyScore({
+          viewerExactLocation: viewerLocation,
+          viewerRegionalLocation,
+          itemLocation: moment.location,
+          distanceKm: getDistanceKm,
+        }),
+        freshnessScore: calculateFreshnessScore(moment.createdAt, now),
+        socialScore: calculateSocialScore({
+          mutualAuthor: mutualFriendSet.has(moment.userId.toString()),
+          mutualReactionUserCount: new Set(reactedUserIdsForMoment).size,
+        }),
+      });
+
+      scoreByMomentId.set(momentId, score);
+    }
+
+    return {
+      scoreByMomentId,
+      socialContextByMomentId,
     };
   }
 

@@ -63,4 +63,44 @@ export class MomentReactionRepository {
 
     return new Set(reactions.map((reaction) => reaction.momentId.toString()));
   }
+
+  public async findLikedUserIdsByMomentIds(
+    momentIds: string[],
+    userIds: string[],
+  ): Promise<Map<string, string[]>> {
+    const uniqueMomentIds = [...new Set(momentIds.filter(Boolean))];
+    const uniqueUserIds = [...new Set(userIds.filter(Boolean))];
+
+    if (uniqueMomentIds.length === 0 || uniqueUserIds.length === 0) {
+      return new Map();
+    }
+
+    const reactions = await MomentReactionModel.find({
+      momentId: { $in: toObjectIds(uniqueMomentIds) },
+      userId: { $in: toObjectIds(uniqueUserIds) },
+      type: "like",
+    })
+      .select("momentId userId")
+      .sort({ createdAt: -1, _id: -1 });
+
+    const userIdsByMomentId = new Map<string, string[]>();
+    const seenKeys = new Set<string>();
+
+    for (const reaction of reactions) {
+      const momentId = reaction.momentId.toString();
+      const userId = reaction.userId.toString();
+      const key = `${momentId}:${userId}`;
+
+      if (seenKeys.has(key)) {
+        continue;
+      }
+
+      const existing = userIdsByMomentId.get(momentId) ?? [];
+      existing.push(userId);
+      userIdsByMomentId.set(momentId, existing);
+      seenKeys.add(key);
+    }
+
+    return userIdsByMomentId;
+  }
 }

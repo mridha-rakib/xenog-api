@@ -8,7 +8,9 @@ export class MomentController {
   public constructor(private readonly momentService = new MomentService()) {}
 
   public createMoment = async (req: Request, res: Response): Promise<void> => {
-    const moment = await this.momentService.createMoment(req.body, req.authUser as AuthUser);
+    const moment = await this.momentService.createMoment(req.body, req.authUser as AuthUser, {
+      clientIp: req.ip,
+    });
 
     ApiResponse.success(res, {
       statusCode: httpStatus.CREATED,
@@ -64,6 +66,7 @@ export class MomentController {
     const moments = await this.momentService.listFeedMoments(
       req.authUser as AuthUser,
       req.query as { hashtags?: string[]; limit?: number; audience?: "discover" | "friends" },
+      { clientIp: req.ip },
     );
 
     ApiResponse.success(res, {

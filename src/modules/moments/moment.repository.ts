@@ -1,11 +1,12 @@
 import { MomentModel } from "./moment.model.js";
-import type { CreateMomentDto, IMoment, MomentFeedQuery } from "./moment.interface.js";
+import type { CreateMomentDto, IMoment, MomentFeedQuery, MomentLocationSnapshot } from "./moment.interface.js";
 
 interface CreateMomentRecord extends CreateMomentDto {
   userId: string;
   hashtags: string[];
   sourceStoryId?: string | null;
   sourceClientRequestId?: string | null;
+  location?: MomentLocationSnapshot | null;
 }
 
 export class MomentRepository {
@@ -25,6 +26,7 @@ export class MomentRepository {
       sourceStoryId: payload.sourceStoryId ?? null,
       sourceClientRequestId: payload.sourceClientRequestId ?? null,
       mediaItems: payload.mediaItems ?? [],
+      ...(payload.location ? { location: payload.location } : {}),
     });
   }
 

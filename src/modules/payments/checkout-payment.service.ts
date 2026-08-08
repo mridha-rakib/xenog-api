@@ -507,6 +507,52 @@ export class CheckoutPaymentService {
     return summaries;
   }
 
+  public async getMutualAttendeeIdsByEventIds(
+    eventRefs: PublicGoingEventRef[],
+    mutualFriendIds: string[],
+  ): Promise<Map<string, Set<string>>> {
+    const friendIdSet = new Set(mutualFriendIds.map((id) => id.trim()).filter(Boolean));
+    const eventById = new Map(
+      eventRefs
+        .map((event) => ({ ...event, id: event.id.trim() }))
+        .filter((event) => event.id)
+        .map((event) => [event.id, event]),
+    );
+    const attendeeIdsByEventId = new Map<string, Set<string>>();
+
+    for (const event of eventById.values()) {
+      attendeeIdsByEventId.set(event.id, new Set());
+    }
+
+    if (friendIdSet.size === 0) {
+      return attendeeIdsByEventId;
+    }
+
+    const activeEventIds = [...eventById.values()]
+      .filter((event) => this.canExposePublicGoingForStatus(event.status))
+      .map((event) => event.id);
+
+    if (activeEventIds.length === 0) {
+      return attendeeIdsByEventId;
+    }
+
+    const passes = await this.getPublicGoingPasses(activeEventIds);
+
+    for (const pass of passes) {
+      if (!friendIdSet.has(pass.holderUserId)) {
+        continue;
+      }
+
+      const attendeeIds = attendeeIdsByEventId.get(pass.eventId);
+
+      if (attendeeIds) {
+        attendeeIds.add(pass.holderUserId);
+      }
+    }
+
+    return attendeeIdsByEventId;
+  }
+
   public async getPublicEventGoingItems(
     user: AuthUser,
     eventId: string,

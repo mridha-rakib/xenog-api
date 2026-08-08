@@ -12,6 +12,9 @@ export type MomentMediaType = (typeof momentMediaTypes)[number];
 export const momentMediaSources = ["gallery", "camera", "upload", "external"] as const;
 export type MomentMediaSource = (typeof momentMediaSources)[number];
 
+export const momentLocationSources = ["gps", "ip", "none"] as const;
+export type MomentLocationSource = (typeof momentLocationSources)[number];
+
 // User-facing video processing lifecycle for a media item. Left unset (not just
 // defaulted to a value) on any media item until a later phase's worker actually
 // starts a transcoding job for it, so existing/current media stay unaffected.
@@ -48,6 +51,38 @@ export interface MomentMediaItem {
   processingErrorCode?: MomentMediaProcessingErrorCode | null;
 }
 
+export interface MomentLocationSnapshot {
+  source: MomentLocationSource;
+  latitude?: number | null;
+  longitude?: number | null;
+  city?: string | null;
+  region?: string | null;
+  regionCode?: string | null;
+  country?: string | null;
+  countryCode?: string | null;
+  accuracy?: number | null;
+  capturedAt?: Date | null;
+}
+
+export interface MomentSocialContextUserResponse {
+  id: string;
+  name: string;
+  avatarKey?: string | null;
+  avatarUrl?: string | null;
+}
+
+export interface MomentSocialContextResponse {
+  previewUsers: MomentSocialContextUserResponse[];
+  totalMutualReactions: number;
+}
+
+export interface MomentSmartFeedResponse {
+  nearbyScore: number;
+  freshnessScore: number;
+  socialScore: number;
+  finalScore: number;
+}
+
 export interface IMoment {
   _id: Types.ObjectId;
   userId: Types.ObjectId;
@@ -64,6 +99,7 @@ export interface IMoment {
   sourceStoryId?: Types.ObjectId | null;
   sourceClientRequestId?: string | null;
   mediaItems: MomentMediaItem[];
+  location?: MomentLocationSnapshot | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -159,6 +195,7 @@ export interface MomentResponse {
   eventId?: string | null;
   eventCode?: string | null;
   mediaItems: MomentMediaItem[];
+  location?: MomentLocationSnapshot | null;
   likesCount: number;
   commentsCount: number;
   sharesCount: number;
@@ -167,6 +204,9 @@ export interface MomentResponse {
   // Current viewer only — never another user's report status, and never
   // moderation/report content. false for unauthenticated/public contexts.
   hasReported: boolean;
+  socialContext?: MomentSocialContextResponse;
+  smartFeed?: MomentSmartFeedResponse;
+  smartFeedScore?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -178,6 +218,9 @@ export interface MomentFeedQuery {
   excludeUserIds?: string[];
   visibleEventIds?: string[];
   authorUserIds?: string[];
+  latitude?: number;
+  longitude?: number;
+  radiusKm?: number;
 }
 
 export interface MomentTimelineItemResponse {

@@ -95,6 +95,11 @@ const envSchema = z.object({
   STRIPE_TAX_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
 
   AI_ENGINE_MODE: z.string().default("rules"),
+  GEOIP_DB_PATH: z.string().optional(),
+  ENABLE_SMART_FEED: z
+    .string()
+    .optional()
+    .transform((value) => value?.trim().toLowerCase() !== "false"),
 
   FIREBASE_SERVICE_ACCOUNT_PATH: z.string().optional(),
   FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),

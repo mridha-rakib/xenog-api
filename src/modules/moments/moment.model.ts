@@ -1,6 +1,7 @@
 import { Schema, model } from "mongoose";
-import type { IMoment, MomentMediaItem } from "./moment.interface.js";
+import type { IMoment, MomentLocationSnapshot, MomentMediaItem } from "./moment.interface.js";
 import {
+  momentLocationSources,
   momentAudiences,
   momentMediaProcessingErrorCodes,
   momentMediaProcessingStatuses,
@@ -76,6 +77,62 @@ const momentMediaItemSchema = new Schema<MomentMediaItem>(
     processingErrorCode: {
       type: String,
       enum: momentMediaProcessingErrorCodes,
+    },
+  },
+  {
+    _id: false,
+  },
+);
+
+const momentLocationSnapshotSchema = new Schema<MomentLocationSnapshot>(
+  {
+    source: {
+      type: String,
+      enum: momentLocationSources,
+      required: true,
+    },
+    latitude: {
+      type: Number,
+      min: -90,
+      max: 90,
+    },
+    longitude: {
+      type: Number,
+      min: -180,
+      max: 180,
+    },
+    city: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+    },
+    region: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+    },
+    regionCode: {
+      type: String,
+      trim: true,
+      maxlength: 32,
+    },
+    country: {
+      type: String,
+      trim: true,
+      maxlength: 120,
+    },
+    countryCode: {
+      type: String,
+      trim: true,
+      maxlength: 2,
+      uppercase: true,
+    },
+    accuracy: {
+      type: Number,
+      min: 0,
+    },
+    capturedAt: {
+      type: Date,
     },
   },
   {
@@ -172,6 +229,9 @@ const momentSchema = new Schema<IMoment>(
     mediaItems: {
       type: [momentMediaItemSchema],
       default: [],
+    },
+    location: {
+      type: momentLocationSnapshotSchema,
     },
   },
   {

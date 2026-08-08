@@ -83,6 +83,7 @@ router.get("/:id/members", validate(eventValidation.listEventMembers), catchAsyn
 router.post("/:id/members", validate(eventValidation.addEventMember), catchAsync(controller.addEventMember));
 router.delete("/:id/members/:userId", validate(eventValidation.removeEventMember), catchAsync(controller.removeEventMember));
 router.get("/admin/users/:userId/events", authorizeRoles("admin"), validate(eventValidation.adminUserEvents), catchAsync(controller.listUserEventsForAdmin));
+router.get("/admin/:id", authorizeRoles("admin"), validate(eventValidation.adminEvent), catchAsync(controller.getEventForAdmin));
 router.post("/:id/join-requests", validate(eventValidation.submitJoinRequest), catchAsync(controller.submitJoinRequest));
 router.get("/:id/join-requests", validate(eventValidation.listJoinRequests), catchAsync(controller.listJoinRequests));
 router.post("/:id/join-requests/:requestUserId/accept", validate(eventValidation.joinRequestAction), catchAsync(controller.acceptJoinRequest));

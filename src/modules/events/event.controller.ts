@@ -424,6 +424,15 @@ export class EventController {
     });
   };
 
+  public getEventForAdmin = async (req: Request, res: Response): Promise<void> => {
+    const event = await this.eventService.getEventForAdmin(req.params.id as string);
+
+    ApiResponse.success(res, {
+      message: "Admin event retrieved",
+      data: { event },
+    });
+  };
+
   public listMyProfileEvents = async (req: Request, res: Response): Promise<void> => {
     const events = await this.eventService.listMyProfileEvents(req.authUser as AuthUser);
 

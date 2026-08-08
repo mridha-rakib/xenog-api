@@ -66,6 +66,7 @@ import type {
   EventMediaType,
   EventReward,
   EventRewardInput,
+  EventStatus,
   JoinRequestResponse,
   ProfileEventGroupsResponse,
   ProfileEventsQuery,
@@ -171,6 +172,7 @@ const NOW_MODE_LOOKAHEAD_MS = 3 * 60 * 60 * 1000;
 const STARTING_SOON_MS = 60 * 60 * 1000;
 const PROFILE_EVENTS_CACHE_VERSION = "v1";
 const PROFILE_EVENTS_CACHE_TTL_SECONDS = 30;
+const ADMIN_EVENT_DETAIL_STATUSES = new Set<EventStatus>(["published", "live", "completed", "cancelled"]);
 
 const normalizeEventHashtag = (value: string): string => {
   const normalized = value.normalize("NFKC").trim().replace(/^#+/, "").toLocaleLowerCase();
@@ -1274,6 +1276,31 @@ export class EventService {
 
   public async listUserEventsForAdmin(userId: string): Promise<ProfileEventGroupsResponse> {
     return this.listProfileEventsByUserId(userId, true);
+  }
+
+  public async getEventForAdmin(eventId: string): Promise<EventResponse> {
+    const event = await this.eventRepository.findById(eventId);
+
+    if (!event || !ADMIN_EVENT_DETAIL_STATUSES.has(event.status)) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    const host = await this.userRepository.findById(event.userId.toString());
+    const avatarUrl = host?.avatarKey
+      ? await this.storageService
+          .createDownloadUrl(host.avatarKey)
+          .then((download) => download.url)
+          .catch(() => null)
+      : null;
+    const response = this.toResponse(event, host, { avatarUrl }, undefined, { includeEventMedia: true });
+    const [eventWithGoing] = await this.withPublicGoingSummaries([response]);
+    const [eventWithCrowdStatus] = await this.withCrowdStatuses([event], eventWithGoing ? [eventWithGoing] : []);
+
+    if (!eventWithCrowdStatus) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    return eventWithCrowdStatus;
   }
 
   public async listProfileEventsByUserId(

@@ -787,6 +787,11 @@ export const eventValidation = {
       userId: objectId,
     }),
   }),
+  adminEvent: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+  }),
   submitJoinRequest: z.object({
     params: z.object({
       id: objectId,

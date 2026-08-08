@@ -15,6 +15,7 @@ import type {
   IReport,
   ListReportsQuery,
   ReportAction,
+  ReportContentMediaType,
   ReportTargetType,
 } from "./report.interface.js";
 import { ReportRepository } from "./report.repository.js";
@@ -25,6 +26,7 @@ type TargetSnapshot = {
   description?: string | null;
   imageKey?: string | null;
   imageUrl?: string | null;
+  mediaType?: ReportContentMediaType | null;
 };
 
 export class ReportService {
@@ -60,7 +62,7 @@ export class ReportService {
       }
     }
 
-    const report = await this.reportRepository.create({
+    const reportPayload = {
       reporterUserId: reporter.id,
       reportedUserId: reportedUser._id,
       targetType: payload.targetType,
@@ -79,9 +81,28 @@ export class ReportService {
       contentDescription: target.description ?? null,
       contentImageKey: target.imageKey ?? null,
       contentImageUrl: target.imageUrl ?? null,
+      contentMediaType: target.mediaType ?? null,
       resolvedBy: null,
       resolvedAt: null,
-    });
+    };
+
+    // One-report-per-user-per-target is only an approved requirement for
+    // Post/Event targets (see report.model.ts's partial unique index) — User
+    // and Room reports keep their existing unrestricted behavior.
+    if (payload.targetType === "post" || payload.targetType === "event") {
+      const result = await this.reportRepository.createUnique(reportPayload);
+
+      if (result.status === "duplicate") {
+        throw new AppError(
+          "You have already reported this content.",
+          httpStatus.CONFLICT,
+        );
+      }
+
+      return this.toResponse(result.report);
+    }
+
+    const report = await this.reportRepository.create(reportPayload);
 
     return this.toResponse(report);
   }
@@ -154,12 +175,12 @@ export class ReportService {
         }
       }
       const media = post.mediaItems[0];
-      return { ownerId: post.userId.toString(), title: "Post", description: post.caption, imageKey: media?.storageKey, imageUrl: media?.url };
+      return { ownerId: post.userId.toString(), title: "Post", description: post.caption, imageKey: media?.storageKey, imageUrl: media?.url, mediaType: media?.type ?? null };
     }
     if (type === "event") {
       const event = await EventModel.findById(id);
       if (!event || event.status === "draft") throw new AppError("Reported event not found", httpStatus.NOT_FOUND);
-      return { ownerId: event.userId.toString(), title: event.name, description: event.description, imageKey: event.bannerImageKey };
+      return { ownerId: event.userId.toString(), title: event.name, description: event.description, imageKey: event.bannerImageKey, mediaType: event.bannerImageKey ? "image" : null };
     }
     if (type === "room") {
       const room = await LiveRoomModel.findById(id);
@@ -168,7 +189,7 @@ export class ReportService {
     }
     const user = await this.userRepository.findById(id);
     if (!user) throw new AppError("Reported user not found", httpStatus.NOT_FOUND);
-    return { ownerId: user._id.toString(), title: user.name, description: user.bio, imageKey: user.avatarKey };
+    return { ownerId: user._id.toString(), title: user.name, description: user.bio, imageKey: user.avatarKey, mediaType: user.avatarKey ? "image" : null };
   }
 
   private async removeContent(report: IReport): Promise<void> {
@@ -208,7 +229,7 @@ export class ReportService {
       details: report.details ?? null,
       status: report.status,
       resolutionAction: report.resolutionAction ?? null,
-      content: { title: report.contentTitle ?? null, description: report.contentDescription ?? null, imageUrl: contentImage ?? report.contentImageUrl ?? null },
+      content: { title: report.contentTitle ?? null, description: report.contentDescription ?? null, imageUrl: contentImage ?? report.contentImageUrl ?? null, mediaType: report.contentMediaType ?? null },
       createdAt: report.createdAt.toISOString(),
       updatedAt: report.updatedAt.toISOString(),
     };

@@ -179,6 +179,9 @@ const createEventService = (privateEventsForUser: Record<string, unknown[]> = {}
     noopRepository as never, // eventHostReviewRepository
     noopRepository as never, // eventWindowRepository
     crowdStatusService as never, // crowdStatusService
+    undefined, // getServerNow
+    undefined, // eventCancellationRefundService
+    { findReportedTargetIds: async () => new Set<string>(), hasReported: async () => false } as never, // reportRepository
   );
 };
 

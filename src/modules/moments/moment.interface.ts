@@ -164,6 +164,9 @@ export interface MomentResponse {
   sharesCount: number;
   isLiked: boolean;
   isSaved: boolean;
+  // Current viewer only — never another user's report status, and never
+  // moderation/report content. false for unauthenticated/public contexts.
+  hasReported: boolean;
   createdAt: Date;
   updatedAt: Date;
 }

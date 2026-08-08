@@ -506,12 +506,57 @@ test("profile timeline keeps authored event-tagged posts", async () => {
   assert.equal(timeline.items[0]?.moment.eventId, publicEventId.toString());
 });
 
+test("feed marks hasReported true only for the viewer's own already-reported post, batched in a single query", async () => {
+  const reportedPost = makeMoment({ caption: "Reported by viewer" });
+  const otherPost = makeMoment({ caption: "Not reported by viewer" });
+  const callCount = { findReportedTargetIds: 0 };
+  const service = createMomentService({
+    momentRepository: new MomentRepository() as never,
+    eventRepository: new EventRepository() as never,
+    reportedMomentIds: [reportedPost._id.toString()],
+    reportRepositoryCallCount: callCount,
+  });
+
+  await withMockedMomentFind([reportedPost, otherPost], async () => {
+    const moments = await service.listFeedMoments(viewer as never);
+    const reportedResult = moments.find((moment) => moment.id === reportedPost._id.toString());
+    const otherResult = moments.find((moment) => moment.id === otherPost._id.toString());
+
+    assert.equal(reportedResult?.hasReported, true);
+    assert.equal(otherResult?.hasReported, false);
+    // One batched query for the whole page — never one query per Feed item
+    // (no N+1), regardless of how many moments were returned.
+    assert.equal(callCount.findReportedTargetIds, 1);
+  });
+});
+
+test("another user's report of a post does not mark the current viewer as having reported it", async () => {
+  const post = makeMoment({ caption: "Reported by someone else, not the viewer" });
+  const service = createMomentService({
+    momentRepository: new MomentRepository() as never,
+    eventRepository: new EventRepository() as never,
+    // Simulates a different reporter's Report row existing for this post —
+    // the fake only returns ids for the id set explicitly passed in for
+    // *this* viewer's own reported ids, so a non-empty reportedMomentIds
+    // list scoped to a different id proves cross-viewer isolation.
+    reportedMomentIds: [new Types.ObjectId().toString()],
+  });
+
+  await withMockedMomentFind([post], async () => {
+    const moments = await service.listFeedMoments(viewer as never);
+
+    assert.equal(moments[0]?.hasReported, false);
+  });
+});
+
 function createMomentService(overrides: {
   momentRepository?: Record<string, unknown>;
   momentShareRepository?: Record<string, unknown>;
   eventRepository?: Record<string, unknown>;
   blockedUserIds?: string[];
   friendUserIds?: string[];
+  reportedMomentIds?: string[];
+  reportRepositoryCallCount?: { findReportedTargetIds: number };
 } = {}): MomentService {
   const momentShareRepository = {
     findByUserId: async () => [],
@@ -551,5 +596,16 @@ function createMomentService(overrides: {
     overrides.eventRepository as never,
     {} as never,
     {} as never,
+    undefined,
+    undefined,
+    {
+      findReportedTargetIds: async () => {
+        if (overrides.reportRepositoryCallCount) {
+          overrides.reportRepositoryCallCount.findReportedTargetIds += 1;
+        }
+        return new Set(overrides.reportedMomentIds ?? []);
+      },
+      hasReported: async () => false,
+    } as never,
   );
 }

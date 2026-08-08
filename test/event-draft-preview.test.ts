@@ -135,6 +135,8 @@ const createEventService = (overrides: {
   }) as never,
   {} as never,
   () => now,
+  undefined,
+  { findReportedTargetIds: async () => new Set<string>(), hasReported: async () => false } as never,
 );
 
 const createTicket = (overrides: Record<string, unknown> = {}) => ({

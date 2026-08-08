@@ -6,6 +6,12 @@ export const reportStatuses = ["pending", "resolved", "dismissed"] as const;
 export type ReportStatus = (typeof reportStatuses)[number];
 export const reportActions = ["warn", "remove_content", "suspend_user", "dismiss"] as const;
 export type ReportAction = (typeof reportActions)[number];
+// Discriminates how contentImageKey/contentImageUrl should be rendered — mirrors
+// MomentMediaItem.type (see moments/moment.interface.ts) since a reported post's
+// snapshot is taken from its first media item, which may be a video or audio file
+// rather than an image.
+export const reportContentMediaTypes = ["image", "video", "audio"] as const;
+export type ReportContentMediaType = (typeof reportContentMediaTypes)[number];
 
 export interface IReport {
   _id: Types.ObjectId;
@@ -27,6 +33,7 @@ export interface IReport {
   contentDescription?: string | null;
   contentImageKey?: string | null;
   contentImageUrl?: string | null;
+  contentMediaType?: ReportContentMediaType | null;
   resolvedBy?: Types.ObjectId | null;
   resolvedAt?: Date | null;
   createdAt: Date;
@@ -70,6 +77,7 @@ export interface AdminReportResponse {
     title?: string | null;
     description?: string | null;
     imageUrl?: string | null;
+    mediaType?: ReportContentMediaType | null;
   };
   createdAt: string;
   updatedAt: string;

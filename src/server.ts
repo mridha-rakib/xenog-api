@@ -27,6 +27,7 @@ import { ensureTicketPassClaimIndexes } from "./modules/payments/ticket-pass-cla
 import { ensureTicketCancellationIndexes } from "./modules/payments/ticket-cancellation.model.js";
 import { ensureEventHostReviewIndexes } from "./modules/events/event-host-review.model.js";
 import { ensureUserIndexes } from "./modules/user/user.model.js";
+import { ensureReportIndexes } from "./modules/reports/report.model.js";
 import { createApp } from "./app.js";
 
 const startServer = async (): Promise<void> => {
@@ -43,6 +44,7 @@ const startServer = async (): Promise<void> => {
   await ensureTicketCancellationIndexes();
   await ensureEventHostReviewIndexes();
   await ensureUserIndexes();
+  await ensureReportIndexes();
   await seedAdminUser();
   startEventScheduler();
   startPaymentScheduler();

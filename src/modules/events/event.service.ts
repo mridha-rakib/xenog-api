@@ -34,6 +34,7 @@ import { TicketUsageRepository } from "../payments/ticket-usage.repository.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
 import { EventHostReviewRepository } from "./event-host-review.repository.js";
 import { EventWindowRepository } from "../event-windows/event-window.repository.js";
+import { ReportRepository } from "../reports/report.repository.js";
 import {
   EVENT_MEDIA_LIMITS_BYTES,
   MAX_EVENT_MEDIA_VIDEO_DURATION_SECONDS,
@@ -234,6 +235,7 @@ export class EventService {
     private readonly crowdStatusService = new CrowdStatusService(),
     private readonly getServerNow = () => new Date(Date.now()),
     private readonly eventCancellationRefundService = new EventCancellationRefundService(),
+    private readonly reportRepository = new ReportRepository(),
   ) {}
 
   public async saveDraft(
@@ -1103,7 +1105,8 @@ export class EventService {
     const publicGoingSummariesPromise = this.checkoutPaymentService.getPublicEventGoingSummaries(
       events.map((event) => ({ id: event._id.toString(), status: event.status })),
     );
-    const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds, publicGoingSummaries] =
+    const eventIds = events.map((event) => event._id.toString());
+    const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds, publicGoingSummaries, reportedEventIds] =
       await Promise.all([
         this.momentReactionRepository.countByMomentIds(momentIds),
         this.momentCommentRepository.countByMomentIds(momentIds),
@@ -1115,6 +1118,9 @@ export class EventService {
           ? this.momentSaveRepository.findSavedMomentIds(user.id, momentIds)
           : Promise.resolve(new Set<string>()),
         publicGoingSummariesPromise,
+        user
+          ? this.reportRepository.findReportedTargetIds(user.id, "event", eventIds)
+          : Promise.resolve(new Set<string>()),
       ]);
 
     const responseEvents = events.map((event, index) => {
@@ -1130,6 +1136,7 @@ export class EventService {
         sharesCount: shareCounts.get(interactionMomentId) ?? 0,
         isLiked: likedMomentIds.has(interactionMomentId),
         isSaved: savedMomentIds.has(interactionMomentId),
+        hasReported: reportedEventIds.has(event._id.toString()),
         publicGoingSummary: publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },
       };
     });
@@ -1557,6 +1564,7 @@ export class EventService {
         isLiked: false,
         isSaved: false,
         canReport: false,
+        hasReported: false,
         isMember: false,
         hostReviewEligibility: { canReview: false, hasReviewed: false },
       };
@@ -1588,6 +1596,7 @@ export class EventService {
       attendance,
       publicGoingSummaries,
       crowdStatusByEventId,
+      hasReported,
     ] = await Promise.all([
       this.momentReactionRepository.countByMomentIds([interactionMomentId]),
       this.momentCommentRepository.countByMomentIds([interactionMomentId]),
@@ -1599,6 +1608,7 @@ export class EventService {
         { id: event._id.toString(), status: event.status },
       ]),
       this.crowdStatusService.getCrowdStatusByEventId([event]),
+      this.reportRepository.hasReported(user.id, "event", event._id.toString()),
     ]);
 
     let myJoinRequestStatus: EventJoinRequestStatus | null = null;
@@ -1627,6 +1637,7 @@ export class EventService {
       isLiked: likedMomentIds.has(interactionMomentId),
       isSaved: savedMomentIds.has(interactionMomentId),
       canReport: Boolean(attendance),
+      hasReported,
       isMember: !isOwner && event.memberUserIds.some((id) => id.toString() === user.id),
       hostReviewEligibility,
       publicGoingSummary: publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },

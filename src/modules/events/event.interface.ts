@@ -457,6 +457,9 @@ export interface EventResponse {
   isLiked?: boolean;
   isSaved?: boolean;
   canReport?: boolean;
+  // Current viewer only — never another user's report status, and never
+  // moderation/report content. Populated alongside canReport.
+  hasReported?: boolean;
   status: EventStatus;
   crowdStatus: CrowdStatus | null;
   /**

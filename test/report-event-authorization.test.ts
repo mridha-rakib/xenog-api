@@ -34,16 +34,21 @@ const createReporter = (accountType: "personal" | "business"): AuthUser => ({
 
 const createService = (overrides: { hasAttendance?: boolean } = {}) => {
   const createdReports: unknown[] = [];
+  const buildReport = (payload: unknown) => ({
+    _id: reportId,
+    ...(payload as Record<string, unknown>),
+    createdAt: now,
+    updatedAt: now,
+  });
   const service = new ReportService(
     {
       create: async (payload: unknown) => {
         createdReports.push(payload);
-        return {
-          _id: reportId,
-          ...(payload as Record<string, unknown>),
-          createdAt: now,
-          updatedAt: now,
-        };
+        return buildReport(payload);
+      },
+      createUnique: async (payload: unknown) => {
+        createdReports.push(payload);
+        return { status: "created", report: buildReport(payload) };
       },
     } as never,
     {

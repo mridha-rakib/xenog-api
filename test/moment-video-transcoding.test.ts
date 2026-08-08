@@ -75,6 +75,8 @@ const createIntegrationMomentService = (momentVideoService: MomentVideoService, 
   {} as never,
   {} as never,
   momentVideoService,
+  undefined,
+  { findReportedTargetIds: async () => new Set<string>(), hasReported: async () => false } as never,
 );
 
 const createMomentPayload = (userId: string, videoKey?: string) => ({

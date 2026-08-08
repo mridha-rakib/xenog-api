@@ -1,6 +1,6 @@
 import { model, Schema } from "mongoose";
 import type { IReport } from "./report.interface.js";
-import { reportActions, reportStatuses, reportTargetTypes } from "./report.interface.js";
+import { reportActions, reportContentMediaTypes, reportStatuses, reportTargetTypes } from "./report.interface.js";
 
 const reportSchema = new Schema<IReport>(
   {
@@ -22,6 +22,7 @@ const reportSchema = new Schema<IReport>(
     contentDescription: { type: String, trim: true, maxlength: 5000, default: null },
     contentImageKey: { type: String, trim: true, default: null },
     contentImageUrl: { type: String, trim: true, default: null },
+    contentMediaType: { type: String, enum: reportContentMediaTypes, default: null },
     resolvedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
     resolvedAt: { type: Date, default: null },
   },
@@ -31,4 +32,25 @@ const reportSchema = new Schema<IReport>(
 reportSchema.index({ targetType: 1, targetId: 1, createdAt: -1 });
 reportSchema.index({ reporterName: "text", reporterEmail: "text", reportedUserName: "text", reportedUserEmail: "text" });
 
+// One report per (reporter, target) for Post/Event only — approved product
+// requirement. Scoped with a partial filter rather than a blanket unique
+// index so existing User/Room report semantics (multiple reports allowed)
+// are left untouched. Enforced at the DB layer so concurrent duplicate
+// submissions cannot both succeed (see ReportRepository.createUnique).
+reportSchema.index(
+  { reporterUserId: 1, targetType: 1, targetId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { targetType: { $in: ["post", "event"] } },
+    name: "reporter_target_unique_post_event",
+  },
+);
+
 export const ReportModel = model<IReport>("Report", reportSchema);
+
+// Mirrors the ensureUserIndexes / ensureTicketUsageIndexes convention used
+// elsewhere in this codebase (see src/server.ts) — there is no migration
+// framework, so new indexes are rolled out via syncIndexes() at startup.
+export const ensureReportIndexes = async (): Promise<void> => {
+  await ReportModel.syncIndexes();
+};

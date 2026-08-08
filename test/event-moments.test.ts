@@ -162,6 +162,9 @@ test("GET /moments/event/:eventId excludes event announcement moments and return
     { findById: async () => event },
     {},
     {},
+    undefined,
+    undefined,
+    { findReportedTargetIds: async () => new Set<string>(), hasReported: async () => false },
   );
   const controller = new MomentController(momentService);
   const app = express();
@@ -255,6 +258,12 @@ test("event detail keeps interactionMomentId and interaction stats on the announ
     { countByMomentIds: async () => new Map([[interactionMomentId.toString(), 2]]) },
     { findSavedMomentIds: async () => new Set<string>() },
     { findByEventIdAndHolderUserId: async () => null },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { findReportedTargetIds: async () => new Set<string>(), hasReported: async () => false },
   );
 
   const response = await eventService.getEventById(viewer, eventId.toString());

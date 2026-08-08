@@ -1261,6 +1261,10 @@ test("existing event moments and event interaction stats remain unaffected", asy
     { findByEventIdAndHolderUserId: async () => null },
     {},
     { findConflictingForEventSchedule: async () => [] },
+    undefined,
+    undefined,
+    undefined,
+    { findReportedTargetIds: async () => new Set<string>(), hasReported: async () => false },
   );
   const eventResponse = await eventService.getEventById(attendee, eventId.toString());
 

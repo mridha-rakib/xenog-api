@@ -38,6 +38,7 @@ import { CheckoutPaymentRepository } from "../payments/checkout-payment.reposito
 import { TicketShareRepository } from "../payments/ticket-share.repository.js";
 import { isOwnedMomentVideoStorageKey, MomentVideoService } from "./moment-video.service.js";
 import { TranscodingMomentSyncService } from "../transcoding/transcoding-moment-sync.service.js";
+import { ReportRepository } from "../reports/report.repository.js";
 
 const MOMENT_ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
 
@@ -49,6 +50,7 @@ interface MomentInteractionContext {
   shareCounts: Map<string, number>;
   likedMomentIds: Set<string>;
   savedMomentIds: Set<string>;
+  reportedMomentIds: Set<string>;
 }
 
 export class MomentService {
@@ -68,6 +70,7 @@ export class MomentService {
     private readonly ticketShareRepository = new TicketShareRepository(),
     private readonly momentVideoService = new MomentVideoService(storageService),
     private readonly transcodingMomentSyncService = new TranscodingMomentSyncService(),
+    private readonly reportRepository = new ReportRepository(),
   ) {}
 
   public async createVideoUpload(user: AuthUser, contentType: string): Promise<Record<string, unknown>> {
@@ -786,7 +789,7 @@ export class MomentService {
   ): Promise<MomentResponse> {
     const momentId = moment._id.toString();
     const taggedFriendIds = (moment.taggedFriendIds ?? []).map((id) => id.toString());
-    const [mediaItems, resolvedAuthor, taggedFriendUsers, interactionSummary, isSaved] = await Promise.all([
+    const [mediaItems, resolvedAuthor, taggedFriendUsers, interactionSummary, isSaved, hasReported] = await Promise.all([
       Promise.all(moment.mediaItems.map((mediaItem) => this.toMediaResponse(mediaItem))),
       author === undefined ? this.userRepository.findById(moment.userId.toString()) : Promise.resolve(author),
       taggedFriendIds.length > 0 ? this.userRepository.findByIds(taggedFriendIds) : Promise.resolve([]),
@@ -797,6 +800,11 @@ export class MomentService {
         ? Promise.resolve(interactionContext.savedMomentIds.has(momentId))
         : viewer
           ? this.momentSaveRepository.findSavedMomentIds(viewer.id, [momentId]).then((ids) => ids.has(momentId))
+          : Promise.resolve(false),
+      interactionContext
+        ? Promise.resolve(interactionContext.reportedMomentIds.has(momentId))
+        : viewer
+          ? this.reportRepository.hasReported(viewer.id, "post", momentId)
           : Promise.resolve(false),
     ]);
     const taggedFriendById = new Map(taggedFriendUsers.map((entry) => [entry._id.toString(), entry]));
@@ -823,6 +831,7 @@ export class MomentService {
       sharesCount: interactionSummary.sharesCount,
       isLiked: interactionSummary.isLiked,
       isSaved,
+      hasReported,
       createdAt: moment.createdAt,
       updatedAt: moment.updatedAt,
     };
@@ -1014,12 +1023,13 @@ export class MomentService {
 
   private async buildInteractionContext(moments: IMoment[], viewer?: AuthUser): Promise<MomentInteractionContext> {
     const momentIds = [...new Set(moments.map((moment) => moment._id.toString()))];
-    const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds] = await Promise.all([
+    const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds, reportedMomentIds] = await Promise.all([
       this.momentReactionRepository.countByMomentIds(momentIds),
       this.momentCommentRepository.countByMomentIds(momentIds),
       this.momentShareRepository.countByMomentIds(momentIds),
       viewer ? this.momentReactionRepository.findLikedMomentIds(viewer.id, momentIds) : Promise.resolve(new Set<string>()),
       viewer ? this.momentSaveRepository.findSavedMomentIds(viewer.id, momentIds) : Promise.resolve(new Set<string>()),
+      viewer ? this.reportRepository.findReportedTargetIds(viewer.id, "post", momentIds) : Promise.resolve(new Set<string>()),
     ]);
 
     return {
@@ -1028,6 +1038,7 @@ export class MomentService {
       shareCounts,
       likedMomentIds,
       savedMomentIds,
+      reportedMomentIds,
     };
   }
 
@@ -1038,6 +1049,7 @@ export class MomentService {
       shareCounts: new Map(),
       likedMomentIds: new Set(),
       savedMomentIds: new Set(),
+      reportedMomentIds: new Set(),
     };
   }
 

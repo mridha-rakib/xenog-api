@@ -8,17 +8,23 @@ import { AppError } from "../../core/errors/app-error.js";
 import { logger } from "../../core/logger/logger.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { AuthService } from "../auth/auth.service.js";
-import type { DirectMessageResponse } from "../chat/chat.interface.js";
 import { chatMessageAttachmentSchema, chatMessageBodySchema } from "../chat/chat.validation.js";
 import { ChatService } from "../chat/chat.service.js";
-import type { GroupMessageResponse } from "../chat/group.interface.js";
 import { GroupService } from "../chat/group.service.js";
-import { GroupRepository } from "../chat/group.repository.js";
 import type { LiveRoomMessageResponse } from "../live-rooms/live-room.interface.js";
 import { LiveRoomService } from "../live-rooms/live-room.service.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
 import { presenceService } from "./presence.service.js";
-import { sendPushNotifications } from "../notifications/fcm.service.js";
+import { notifyUserBoth, registerBroadcastTarget } from "./realtime-dual-emit.js";
+import {
+  createDirectMessageWithSideEffects,
+  createGroupMessageWithSideEffects,
+  notifyDirectMessageDeleted,
+  notifyDirectMessageEdited,
+  notifyDirectTyping,
+  notifyGroupMessageDeleted,
+  notifyGroupMessageEdited,
+} from "./chat-events.service.js";
 
 type RealtimeClient = {
   isAlive: boolean;
@@ -134,7 +140,6 @@ export class RealtimeGateway {
     private readonly authService = new AuthService(),
     private readonly chatService = new ChatService(),
     private readonly groupService = new GroupService(),
-    private readonly groupRepository = new GroupRepository(),
     private readonly liveRoomService = new LiveRoomService(),
     private readonly userFollowRepository = new UserFollowRepository(),
   ) {}
@@ -294,18 +299,21 @@ export class RealtimeGateway {
     }
   }
 
+  // Message creation, edit, delete, and typing all delegate to
+  // chat-events.service.ts — the single shared path also used by the
+  // Socket.IO gateway and the REST controllers, so persistence, realtime
+  // broadcast (to both transports), and push evaluation happen exactly once
+  // regardless of which entry point a client used.
   private async handleDirectMessage(
     client: RealtimeClient,
     message: Extract<ClientMessage, { type: "dm:message" }>,
   ): Promise<void> {
-    const recipientId = message.recipientId;
-    let savedMessage: DirectMessageResponse;
-
     try {
-      savedMessage = await this.chatService.createDirectMessage(client.user, recipientId, {
+      await createDirectMessageWithSideEffects(client.user, message.recipientId, {
         type: message.messageType,
         text: message.text,
         attachment: message.attachment,
+        clientMessageId: message.clientMessageId ?? null,
       });
     } catch (error) {
       if (error instanceof AppError && error.statusCode === httpStatus.FORBIDDEN) {
@@ -315,54 +323,19 @@ export class RealtimeGateway {
 
       throw error;
     }
-
-    const payload = {
-      type: "dm:message",
-      message: {
-        clientMessageId: message.clientMessageId ?? null,
-        conversationId: savedMessage.conversationId,
-        createdAt: savedMessage.createdAt.toISOString(),
-        id: savedMessage.id,
-        recipientId,
-        senderId: savedMessage.senderId,
-        senderName: client.user.name,
-        text: savedMessage.text,
-        type: savedMessage.type,
-        attachment: savedMessage.attachment ?? null,
-        editedAt: savedMessage.editedAt?.toISOString() ?? null,
-      },
-    };
-
-    this.broadcastToUser(client.user.id, payload);
-    this.broadcastToUser(recipientId, payload);
-
-    if (!this.isUserOnline(recipientId)) {
-      const notifBody = savedMessage.text?.trim() || "Sent an attachment";
-      void sendPushNotifications([recipientId], {
-        title: client.user.name,
-        body: notifBody,
-        data: {
-          type: "dm",
-          conversationPartnerId: client.user.id,
-          senderName: client.user.name,
-          conversationId: savedMessage.conversationId,
-        },
-      });
-    }
   }
 
   private async handleDirectMessageEdit(
     client: RealtimeClient,
     message: Extract<ClientMessage, { type: "dm:message:edit" }>,
   ): Promise<void> {
-    let updated: DirectMessageResponse;
-
     try {
-      updated = await this.chatService.editDirectMessage(
+      const updated = await this.chatService.editDirectMessage(
         client.user,
         message.messageId,
         message.text,
       );
+      notifyDirectMessageEdited(updated, client.user.name);
     } catch (error) {
       if (error instanceof AppError) {
         this.sendError(client.socket, "MESSAGE_EDIT_FAILED", error.message);
@@ -370,35 +343,15 @@ export class RealtimeGateway {
       }
       throw error;
     }
-
-    const payload = {
-      type: "dm:message:updated",
-      message: {
-        conversationId: updated.conversationId,
-        createdAt: updated.createdAt.toISOString(),
-        editedAt: updated.editedAt?.toISOString() ?? null,
-        id: updated.id,
-        recipientId: updated.recipientId,
-        senderId: updated.senderId,
-        senderName: client.user.name,
-        text: updated.text,
-        type: updated.type,
-        attachment: updated.attachment ?? null,
-      },
-    };
-
-    this.broadcastToUser(updated.senderId, payload);
-    this.broadcastToUser(updated.recipientId, payload);
   }
 
   private async handleDirectMessageDelete(
     client: RealtimeClient,
     message: Extract<ClientMessage, { type: "dm:message:delete" }>,
   ): Promise<void> {
-    let deleted: DirectMessageResponse;
-
     try {
-      deleted = await this.chatService.deleteDirectMessage(client.user, message.messageId);
+      const deleted = await this.chatService.deleteDirectMessage(client.user, message.messageId);
+      notifyDirectMessageDeleted(deleted);
     } catch (error) {
       if (error instanceof AppError) {
         this.sendError(client.socket, "MESSAGE_DELETE_FAILED", error.message);
@@ -406,15 +359,6 @@ export class RealtimeGateway {
       }
       throw error;
     }
-
-    const payload = {
-      type: "dm:message:deleted",
-      messageId: deleted.id,
-      conversationId: deleted.conversationId,
-    };
-
-    this.broadcastToUser(deleted.senderId, payload);
-    this.broadcastToUser(deleted.recipientId, payload);
   }
 
   private async handleDirectTyping(
@@ -436,15 +380,10 @@ export class RealtimeGateway {
       throw error;
     }
 
-    this.broadcastToUser(message.recipientId, {
-      type: "dm:typing",
-      typing: {
-        isTyping: message.isTyping,
-        recipientId: message.recipientId,
-        senderId: client.user.id,
-        senderName: client.user.name,
-        updatedAt: new Date().toISOString(),
-      },
+    notifyDirectTyping(message.recipientId, {
+      isTyping: message.isTyping,
+      senderId: client.user.id,
+      senderName: client.user.name,
     });
   }
 
@@ -452,13 +391,12 @@ export class RealtimeGateway {
     client: RealtimeClient,
     message: Extract<ClientMessage, { type: "group:message" }>,
   ): Promise<void> {
-    let savedMessage: GroupMessageResponse;
-
     try {
-      savedMessage = await this.groupService.createGroupMessage(client.user, message.groupId, {
+      await createGroupMessageWithSideEffects(client.user, message.groupId, {
         type: message.messageType,
         text: message.text,
         attachment: message.attachment,
+        clientMessageId: message.clientMessageId ?? null,
       });
     } catch (error) {
       if (error instanceof AppError) {
@@ -472,64 +410,19 @@ export class RealtimeGateway {
 
       throw error;
     }
-
-    const [memberIds, group] = await Promise.all([
-      this.groupService.getGroupMemberIds(message.groupId),
-      this.groupRepository.findById(message.groupId),
-    ]);
-
-    const payload = {
-      type: "group:message",
-      message: {
-        clientMessageId: message.clientMessageId ?? null,
-        groupId: message.groupId,
-        id: savedMessage.id,
-        senderId: savedMessage.senderId,
-        senderName: client.user.name,
-        text: savedMessage.text,
-        type: savedMessage.type,
-        attachment: savedMessage.attachment ?? null,
-        createdAt: savedMessage.createdAt.toISOString(),
-        editedAt: savedMessage.editedAt?.toISOString() ?? null,
-      },
-    };
-
-    for (const memberId of memberIds) {
-      this.broadcastToUser(memberId, payload);
-    }
-
-    const offlineMemberIds = memberIds.filter(
-      (memberId) => memberId !== client.user.id && !this.isUserOnline(memberId),
-    );
-
-    if (offlineMemberIds.length > 0) {
-      const groupName = group?.name ?? "Group";
-      const notifBody = savedMessage.text?.trim() || "Sent an attachment";
-      void sendPushNotifications(offlineMemberIds, {
-        title: groupName,
-        body: `${client.user.name}: ${notifBody}`,
-        data: {
-          type: "group",
-          groupId: message.groupId,
-          groupName: groupName,
-          senderName: client.user.name,
-        },
-      });
-    }
   }
 
   private async handleGroupMessageEdit(
     client: RealtimeClient,
     message: Extract<ClientMessage, { type: "group:message:edit" }>,
   ): Promise<void> {
-    let updated: GroupMessageResponse;
-
     try {
-      updated = await this.groupService.editGroupMessage(
+      const updated = await this.groupService.editGroupMessage(
         client.user,
         message.messageId,
         message.text,
       );
+      await notifyGroupMessageEdited(updated);
     } catch (error) {
       if (error instanceof AppError) {
         this.sendError(client.socket, "MESSAGE_EDIT_FAILED", error.message);
@@ -537,53 +430,21 @@ export class RealtimeGateway {
       }
       throw error;
     }
-
-    const memberIds = await this.groupService.getGroupMemberIds(updated.groupId);
-    const payload = {
-      type: "group:message:updated",
-      message: {
-        groupId: updated.groupId,
-        id: updated.id,
-        senderId: updated.senderId,
-        senderName: client.user.name,
-        text: updated.text,
-        type: updated.type,
-        attachment: updated.attachment ?? null,
-        createdAt: updated.createdAt.toISOString(),
-        editedAt: updated.editedAt?.toISOString() ?? null,
-      },
-    };
-
-    for (const memberId of memberIds) {
-      this.broadcastToUser(memberId, payload);
-    }
   }
 
   private async handleGroupMessageDelete(
     client: RealtimeClient,
     message: Extract<ClientMessage, { type: "group:message:delete" }>,
   ): Promise<void> {
-    let deleted: GroupMessageResponse;
-
     try {
-      deleted = await this.groupService.deleteGroupMessage(client.user, message.messageId);
+      const deleted = await this.groupService.deleteGroupMessage(client.user, message.messageId);
+      await notifyGroupMessageDeleted(deleted);
     } catch (error) {
       if (error instanceof AppError) {
         this.sendError(client.socket, "MESSAGE_DELETE_FAILED", error.message);
         return;
       }
       throw error;
-    }
-
-    const memberIds = await this.groupService.getGroupMemberIds(deleted.groupId);
-    const payload = {
-      type: "group:message:deleted",
-      messageId: deleted.id,
-      groupId: deleted.groupId,
-    };
-
-    for (const memberId of memberIds) {
-      this.broadcastToUser(memberId, payload);
     }
   }
 
@@ -684,13 +545,16 @@ export class RealtimeGateway {
 
   private addUserClient(client: RealtimeClient): void {
     const userClients = this.clientsByUserId.get(client.user.id) ?? new Set<RealtimeClient>();
-    const wasOffline = userClients.size === 0;
 
     userClients.add(client);
     this.clientsByUserId.set(client.user.id, userClients);
-    presenceService.markConnected(client.user.id);
 
-    if (wasOffline) {
+    // presenceService is shared with the Socket.IO gateway, so this reflects
+    // whether the user had ANY live connection on either transport — not
+    // just whether this transport had one — before this connection opened.
+    const isFirstConnectionGlobally = presenceService.markConnected(client.user.id);
+
+    if (isFirstConnectionGlobally) {
       void this.broadcastPresence(client.user.id, true);
     }
   }
@@ -702,7 +566,11 @@ export class RealtimeGateway {
 
     if (userClients?.size === 0) {
       this.clientsByUserId.delete(client.user.id);
-      presenceService.markDisconnected(client.user.id);
+    }
+
+    const wasLastConnectionGlobally = presenceService.markDisconnected(client.user.id);
+
+    if (wasLastConnectionGlobally) {
       void this.broadcastPresence(client.user.id, false);
     }
 
@@ -714,10 +582,12 @@ export class RealtimeGateway {
   private async broadcastPresence(userId: string, isOnline: boolean): Promise<void> {
     try {
       const friendIds = await this.userFollowRepository.findMutualFriendIds(userId);
-      const payload = { type: isOnline ? "user:online" : "user:offline", userId };
+      const event = isOnline ? "user:online" : "user:offline";
+      const payload = { userId };
+      const legacyEnvelope = { type: event, userId };
 
       for (const friendId of friendIds) {
-        this.broadcastToUser(friendId, payload);
+        notifyUserBoth(friendId, legacyEnvelope, event, payload);
       }
     } catch (error) {
       logger.warn({ error, userId }, "Failed to broadcast user presence");
@@ -782,3 +652,10 @@ export class RealtimeGateway {
 }
 
 export const realtimeGateway = new RealtimeGateway();
+
+// Register the legacy transport as a dual-emit target: it only understands
+// the pre-existing `{ type, ... }` envelope shape, so it ignores the
+// Socket.IO-specific (event, payload) arguments.
+registerBroadcastTarget({
+  notifyUser: (userId, legacyEnvelope) => realtimeGateway.notifyUser(userId, legacyEnvelope),
+});

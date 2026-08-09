@@ -8,6 +8,7 @@ import type {
   ListDirectMessagesQuery,
 } from "./chat.interface.js";
 import { ChatService } from "./chat.service.js";
+import { createDirectMessageWithSideEffects } from "../realtime/chat-events.service.js";
 
 export class ChatController {
   public constructor(private readonly chatService = new ChatService()) {}
@@ -42,7 +43,11 @@ export class ChatController {
   };
 
   public createDirectMessage = async (req: Request, res: Response): Promise<void> => {
-    const message = await this.chatService.createDirectMessage(
+    // Routed through the same shared side-effect path Socket.IO/raw-ws use,
+    // so a message created here (e.g. ShareModal's "share to DM") also
+    // broadcasts in realtime and evaluates push — it used to silently skip
+    // both.
+    const message = await createDirectMessageWithSideEffects(
       req.authUser as AuthUser,
       req.params.friendId as string,
       req.body as CreateDirectMessageDto,

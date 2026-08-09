@@ -10,6 +10,7 @@ import { RedisClient } from "./config/redis.js";
 import { logger } from "./core/logger/logger.js";
 import { seedAdminUser } from "./core/seed/admin.seed.js";
 import { realtimeGateway } from "./modules/realtime/realtime.gateway.js";
+import { socketIOGateway } from "./modules/realtime/socketio.gateway.js";
 import { startEventScheduler } from "./modules/events/event.scheduler.js";
 import { startPaymentScheduler } from "./modules/payments/payment.scheduler.js";
 import { startCreatorPayoutScheduler } from "./modules/payments/creator-payout.scheduler.js";
@@ -68,14 +69,19 @@ const startServer = async (): Promise<void> => {
   const server = createServer(app);
 
   realtimeGateway.attach(server);
+  socketIOGateway.attach(server);
 
   server.listen(env.PORT, () => {
-    logger.info({ port: env.PORT, apiPrefix: env.API_PREFIX, wsPath: "/ws" }, "Server started");
+    logger.info(
+      { port: env.PORT, apiPrefix: env.API_PREFIX, wsPath: "/ws", socketIOPath: "/socket.io" },
+      "Server started",
+    );
   });
 
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     logger.info({ signal }, "Shutdown started");
     realtimeGateway.close();
+    socketIOGateway.close();
 
     server.close(async () => {
       await RedisClient.disconnect();

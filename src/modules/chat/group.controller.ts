@@ -9,6 +9,7 @@ import type {
   ListGroupsQuery,
 } from "./group.interface.js";
 import { GroupService } from "./group.service.js";
+import { createGroupMessageWithSideEffects } from "../realtime/chat-events.service.js";
 
 export class GroupController {
   public constructor(private readonly groupService = new GroupService()) {}
@@ -39,7 +40,10 @@ export class GroupController {
   };
 
   public createGroupMessage = async (req: Request, res: Response): Promise<void> => {
-    const message = await this.groupService.createGroupMessage(
+    // Same shared side-effect path as chat.controller.ts's DM equivalent —
+    // ensures any future REST-based group message creation also broadcasts
+    // and evaluates push, matching the Socket.IO/raw-ws behavior.
+    const message = await createGroupMessageWithSideEffects(
       req.authUser as AuthUser,
       req.params.groupId as string,
       req.body as CreateGroupMessageDto,

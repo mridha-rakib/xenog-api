@@ -135,6 +135,7 @@ const createEventService = (privateEventsForUser: Record<string, unknown[]> = {}
   };
   const countRepository = {
     countByMomentIds: async () => new Map(),
+    findReposterUserIdsByMomentIds: async () => new Map<string, string[]>(),
   };
   const momentReactionRepository = {
     countByMomentIds: async () => new Map(),

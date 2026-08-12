@@ -55,6 +55,7 @@ router.get("/mine", catchAsync(controller.listMyEvents));
 router.get("/:id/ticket-access", validate(eventValidation.eventParams), catchAsync(controller.getTicketAccess));
 router.get("/now", validate(eventValidation.nowModeEvents), catchAsync(controller.listNowModeEvents));
 router.get("/map", validate(eventValidation.mapEvents), catchAsync(controller.listMapEvents));
+router.get("/hashtags/:hashtag", validate(eventValidation.hashtagEvents), catchAsync(controller.listHashtagEvents));
 router.get("/profile/:userId", validate(eventValidation.profileEvents), catchAsync(controller.listProfileEvents));
 router.get("/:id/tickets/:ticketId", validate(eventValidation.eventTicketParams), catchAsync(controller.getEventTicket));
 router.post("/:id/tickets", validate(eventValidation.createEventTicket), catchAsync(controller.createEventTicket));

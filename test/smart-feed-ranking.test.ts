@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  SMART_FEED_LIMITS,
   SMART_FEED_REGIONAL_NEARBY_SCORES,
+  SMART_FEED_RELATIONSHIP_TUNING,
+  SMART_FEED_SOCIAL_SUBSCORES,
   calculateFreshnessScore,
   calculateNearbyScore,
   calculateRegionalNearbyScore,
@@ -143,6 +146,129 @@ test("smart nearby score uses regional matching for IP-only viewer context", () 
       throw new Error("IP regional matching must not calculate distance");
     },
   }), SMART_FEED_REGIONAL_NEARBY_SCORES.sameCity);
+});
+
+// --- Own-content self-relevance (approved product rule #1) ---
+
+test("fresh own content gets a very strong lift over the base 0.5/0.2/0.3 ceiling", () => {
+  const noSelfBoost = calculateSmartFeedScore({ nearbyScore: 0, freshnessScore: 1, socialScore: 0 });
+  const withSelfBoost = calculateSmartFeedScore({
+    nearbyScore: 0,
+    freshnessScore: 1,
+    socialScore: 0,
+    isAuthorSelf: true,
+  });
+
+  // Base formula's own ceiling for this signal mix (freshness alone) is 0.2 —
+  // self relevance must push meaningfully past what nearby/social could add
+  // on their own for a same-instant post with no other signals yet.
+  assert.equal(noSelfBoost.finalScore, 0.2);
+  assert.ok(withSelfBoost.finalScore > noSelfBoost.finalScore);
+  assert.equal(
+    Number(withSelfBoost.finalScore.toFixed(4)),
+    Number((0.2 + 1 * SMART_FEED_RELATIONSHIP_TUNING.selfAuthorBoost).toFixed(4)),
+  );
+  // Beats the audit's own worked example of a strong non-self competitor
+  // (3-day-old, mutual author, same-city, some reactions — ~0.7875).
+  assert.ok(withSelfBoost.finalScore > 0.7875);
+});
+
+test("self relevance decays with freshness and is never a fixed/permanent boost", () => {
+  const freshOwn = calculateSmartFeedScore({ nearbyScore: 0, freshnessScore: 1, socialScore: 0, isAuthorSelf: true });
+  const halfLifeOwn = calculateSmartFeedScore({ nearbyScore: 0, freshnessScore: 0.5, socialScore: 0, isAuthorSelf: true });
+  const oldOwn = calculateSmartFeedScore({ nearbyScore: 0, freshnessScore: 0.05, socialScore: 0, isAuthorSelf: true });
+  const veryOldOwn = calculateSmartFeedScore({ nearbyScore: 0, freshnessScore: 0, socialScore: 0, isAuthorSelf: true });
+
+  assert.ok(freshOwn.finalScore > halfLifeOwn.finalScore);
+  assert.ok(halfLifeOwn.finalScore > oldOwn.finalScore);
+  // At freshnessScore 0 the self boost itself is exactly 0 — old own content
+  // is never permanently pinned above equivalent non-self content.
+  assert.equal(veryOldOwn.finalScore, 0);
+});
+
+test("self boost does not silently apply when isAuthorSelf is omitted (backward compatible)", () => {
+  const score = calculateSmartFeedScore({ nearbyScore: 0.8, freshnessScore: 0.5, socialScore: 0.25 });
+
+  assert.equal(score.finalScore, 0.575);
+});
+
+// --- One-way follow vs. mutual friend author relationship (rule #2) ---
+
+test("one-way followed author is a strong signal, weaker than mutual, stronger than unrelated", () => {
+  const unrelated = calculateSocialScore({ authorRelationship: "none" });
+  const followed = calculateSocialScore({ authorRelationship: "followed" });
+  const mutual = calculateSocialScore({ authorRelationship: "mutual" });
+
+  assert.equal(unrelated, 0);
+  assert.equal(followed, SMART_FEED_SOCIAL_SUBSCORES.followedAuthor);
+  assert.equal(mutual, SMART_FEED_SOCIAL_SUBSCORES.mutualAuthor);
+  assert.ok(followed > unrelated);
+  assert.ok(mutual > followed);
+});
+
+test("legacy mutualAuthor boolean still maps to the mutual relationship", () => {
+  assert.equal(calculateSocialScore({ mutualAuthor: true }), SMART_FEED_SOCIAL_SUBSCORES.mutualAuthor);
+  assert.equal(calculateSocialScore({ mutualAuthor: false }), 0);
+});
+
+// --- Followed-user reactions (weak signal, rule #4) ---
+
+test("a followed (non-mutual) reactor is a weaker signal than a mutual-friend reactor", () => {
+  const mutualOnly = calculateSocialScore({ mutualReactionUserCount: 1 });
+  const followedOnly = calculateSocialScore({ followedReactionUserCount: 1 });
+
+  assert.ok(followedOnly > 0);
+  assert.ok(followedOnly < mutualOnly);
+  assert.equal(
+    followedOnly,
+    (1 * SMART_FEED_RELATIONSHIP_TUNING.followedReactionWeight / SMART_FEED_LIMITS.reactionSaturationCount) *
+      SMART_FEED_SOCIAL_SUBSCORES.reaction,
+  );
+});
+
+test("mutual and followed reactors combine toward the same saturation budget without double counting", () => {
+  const combined = calculateSocialScore({ mutualReactionUserCount: 4, followedReactionUserCount: 4 });
+  const mutualAlone = calculateSocialScore({ mutualReactionUserCount: 4 });
+
+  // Mutual reactors alone already saturate the reaction sub-budget — adding
+  // more (even followed) reactors cannot push reactionScore past its own
+  // 0.35 ceiling.
+  assert.equal(mutualAlone, SMART_FEED_SOCIAL_SUBSCORES.reaction);
+  assert.equal(combined, SMART_FEED_SOCIAL_SUBSCORES.reaction);
+});
+
+test("an unrelated user's reaction contributes nothing unless counted as mutual or followed", () => {
+  // Simulates the caller correctly excluding a random/unrelated reactor from
+  // both counts — calculateSocialScore has no third "count everyone" input.
+  assert.equal(calculateSocialScore({ mutualReactionUserCount: 0, followedReactionUserCount: 0 }), 0);
+});
+
+// --- Followed/mutual repost (medium signal, rule #5) ---
+
+test("a followed or mutual repost is a medium signal, between a single like and an author relationship", () => {
+  const singleReaction = calculateSocialScore({ mutualReactionUserCount: 1 });
+  const singleRepost = calculateSocialScore({ mutualRepostUserCount: 1 });
+  const followedAuthor = calculateSocialScore({ authorRelationship: "followed" });
+
+  assert.ok(singleRepost > singleReaction);
+  assert.ok(singleRepost < followedAuthor);
+  assert.equal(
+    calculateSocialScore({ mutualRepostUserCount: SMART_FEED_LIMITS.repostSaturationCount }),
+    SMART_FEED_SOCIAL_SUBSCORES.repost,
+  );
+});
+
+test("repost signal saturates and stacks additively with author/reaction/attendance signals", () => {
+  const maxed = calculateSocialScore({
+    authorRelationship: "mutual",
+    mutualReactionUserCount: 99,
+    mutualAttendeeUserCount: 99,
+    mutualRepostUserCount: 99,
+  });
+
+  // Every sub-budget saturated at once still clamps to 1 — matches the
+  // original formula's own ceiling behavior.
+  assert.equal(maxed, 1);
 });
 
 test("smart score sorting falls back to timestamp when scores are unavailable", () => {

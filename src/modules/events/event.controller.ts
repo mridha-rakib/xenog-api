@@ -391,6 +391,29 @@ export class EventController {
     });
   };
 
+  public listHashtagEvents = async (req: Request, res: Response): Promise<void> => {
+    const { hashtag } = req.params as { hashtag: string };
+    const { limit, latitude, longitude, radiusKm } = req.query as {
+      limit?: number;
+      latitude?: number;
+      longitude?: number;
+      radiusKm?: number;
+    };
+    const events = await this.eventService.listHashtagEvents(hashtag, req.authUser as AuthUser, {
+      limit,
+      latitude,
+      longitude,
+      radiusKm,
+    });
+
+    ApiResponse.success(res, {
+      message: "Hashtag events retrieved",
+      data: {
+        events,
+      },
+    });
+  };
+
   public listMyPostTagEvents = async (req: Request, res: Response): Promise<void> => {
     const events = await this.eventService.listMyPostTagEvents(req.authUser as AuthUser);
 

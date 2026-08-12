@@ -12,13 +12,14 @@ import {
   eventTicketTypes,
 } from "./event.interface.js";
 import { eventCancellationReasonTypes } from "../payments/event-cancellation-refund.interface.js";
+import { normalizeHashtag } from "../moments/moment-hashtag.js";
 
 const objectId = z.string().trim().regex(/^[a-f\d]{24}$/i, "Invalid MongoDB ObjectId");
 const ticketId = z.string().trim().min(1, "Ticket ID is required").max(80, "Ticket ID cannot exceed 80 characters");
 const eventMediaId = z.string().trim().min(1, "Media ID is required").max(80, "Media ID cannot exceed 80 characters");
 const TICKET_SALES_END_DATE_AFTER_EVENT_END_MESSAGE = "Ticket sales end date must be before the event end date.";
 const TICKET_SALES_END_TIME_NOT_BEFORE_EVENT_END_MESSAGE = "Ticket sales end time must be before the event end time.";
-const MAX_EVENT_FILTER_RADIUS_KM = 200 * 1.609344;
+export const MAX_EVENT_FILTER_RADIUS_KM = 200 * 1.609344;
 
 const optionalText = (label: string, maxLength: number) =>
   z
@@ -28,11 +29,6 @@ const optionalText = (label: string, maxLength: number) =>
     .optional()
     .nullable()
     .transform((value) => (value === undefined ? undefined : value || null));
-
-const normalizeHashtag = (value: string): string => {
-  const normalized = value.normalize("NFKC").trim().replace(/^#+/, "").toLocaleLowerCase();
-  return (normalized.match(/^[\p{L}\p{N}_]+/u)?.[0] ?? "").slice(0, 64);
-};
 
 const hashtagList = z.preprocess(
   (value) => {
@@ -589,6 +585,19 @@ const feedQuery = z
     path: ["longitude"],
   });
 
+const hashtagEventsQuery = z
+  .object({
+    limit: queryNumber(z.number().int().min(1).max(100)),
+    latitude: queryNumber(z.number().min(-90).max(90)),
+    longitude: queryNumber(z.number().min(-180).max(180)),
+    radiusKm: queryNumber(z.number().finite().min(1).max(MAX_EVENT_FILTER_RADIUS_KM)),
+  })
+  .strict()
+  .refine((query) => (query.latitude === undefined) === (query.longitude === undefined), {
+    message: "Latitude and longitude must be provided together",
+    path: ["longitude"],
+  });
+
 const profileEventsQuery = z.object({
   filter: z.enum(["active", "past", "all"]).optional(),
   page: queryNumber(z.number().int().positive()),
@@ -742,6 +751,12 @@ export const eventValidation = {
   }),
   mapEvents: z.object({
     query: mapQuery,
+  }),
+  hashtagEvents: z.object({
+    params: z.object({
+      hashtag: z.string().trim().min(1).max(65),
+    }),
+    query: hashtagEventsQuery,
   }),
   nowModeEvents: z.object({
     query: mapQuery,

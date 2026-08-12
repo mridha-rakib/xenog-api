@@ -29,6 +29,8 @@ import type {
   ProfileTimelineQuery,
   MomentSaveSummaryResponse,
   MomentTimelineItemResponse,
+  UpdateMomentDto,
+  UpdateMomentShareDto,
 } from "./moment.interface.js";
 import { extractHashtags, normalizeHashtag } from "./moment-hashtag.js";
 import { MomentCommentRepository } from "./moment-comment.repository.js";
@@ -50,6 +52,7 @@ import {
   calculateSocialScore,
   compareSmartFeedScoreDesc,
   isValidSmartFeedCoordinate,
+  type SmartFeedAuthorRelationship,
   type SmartFeedScore,
   type SmartFeedSocialContext,
   type SmartFeedSocialUser,
@@ -318,14 +321,26 @@ export class MomentService {
     const hashtags = query.hashtags?.map(normalizeHashtag).filter(Boolean);
     const isSmartFeedEnabled = env.ENABLE_SMART_FEED === true;
     const shouldLoadFriendIds = isSmartFeedEnabled || query.audience === "friends";
-    const [excludeUserIds, blockerUserIds, friendIds] = await Promise.all([
+    // followingIds was previously fetched separately (via getViewerFollowingIdSet)
+    // only for the isFollowing UI badge. Fetched here instead so Smart Feed
+    // scoring can reuse the exact same query — no second follow-graph read.
+    const [excludeUserIds, blockerUserIds, friendIds, followingIds] = await Promise.all([
       this.userBlockRepository.findBlockedIds(user.id),
       isSmartFeedEnabled ? this.userBlockRepository.findBlockerIds(user.id) : Promise.resolve([]),
       shouldLoadFriendIds
         ? this.userFollowRepository.findMutualFriendIds(user.id)
         : Promise.resolve([]),
+      this.userFollowRepository.findFollowingIds(user.id),
     ]);
-    const authorUserIds = query.audience === "friends" ? friendIds : undefined;
+    const viewerFollowingIds = new Set(followingIds);
+    // Friends candidate authors = self + mutual friends. findMutualFriendIds
+    // never includes the viewer's own id (a user isn't their own
+    // follower/following), so without this the viewer's own Moments were
+    // silently excluded from their own Friends tab — this is the only line
+    // that changes Friends eligibility; scoring's mutualAuthor relationship
+    // (smartFeedFriendIds below) is untouched and still excludes self, since
+    // self relevance is already handled by the existing isAuthorSelf signal.
+    const authorUserIds = query.audience === "friends" ? [...friendIds, user.id] : undefined;
     const candidateEventIds = await this.momentRepository.findFeedCandidateEventIds({
       ...query,
       hashtags,
@@ -349,12 +364,14 @@ export class MomentService {
     const smartFeedFriendIds = isSmartFeedEnabled
       ? friendIds.filter((id) => !excludeUserIds.includes(id) && !blockerUserIds.includes(id))
       : [];
-    const [authors, viewerFollowingIds, interactionContext, smartFeedContext] = await Promise.all([
+    const smartFeedFollowedIds = isSmartFeedEnabled
+      ? followingIds.filter((id) => !excludeUserIds.includes(id) && !blockerUserIds.includes(id))
+      : [];
+    const [authors, interactionContext, smartFeedContext] = await Promise.all([
       this.userRepository.findByIds(uniqueUserIds),
-      this.getViewerFollowingIdSet(user),
       this.buildInteractionContext(moments, user),
       isSmartFeedEnabled
-        ? this.buildMomentSmartFeedContext(moments, smartFeedFriendIds, query, context)
+        ? this.buildMomentSmartFeedContext(moments, user.id, smartFeedFriendIds, smartFeedFollowedIds, query, context)
         : Promise.resolve(undefined),
     ]);
     const authorById = new Map(authors.map((a) => [a._id.toString(), a]));
@@ -372,26 +389,56 @@ export class MomentService {
     return isSmartFeedEnabled ? responses.sort(compareSmartFeedScoreDesc) : responses;
   }
 
-  public async listHashtagMoments(hashtagValue: string, user: AuthUser, limit = 100): Promise<MomentResponse[]> {
+  // Hashtag eligibility (findPublicByHashtag) is the hard match filter and is untouched —
+  // this only reorders the already-matching set using the exact same Smart Feed scoring
+  // already used by listFeedMoments (nearby/freshness/social), so a fresh own/mutual/
+  // followed post can outrank an older unrelated match without inventing new weights.
+  // No latitude/longitude query param exists for this endpoint — viewer location falls
+  // back to GeoIP (context.clientIp) exactly as calculateSmartFeedNearbyScore already
+  // supports; no GPS is required and nothing here forces a new location prompt.
+  public async listHashtagMoments(
+    hashtagValue: string,
+    user: AuthUser,
+    limit = 100,
+    context: MomentRequestContext = {},
+  ): Promise<MomentResponse[]> {
     const hashtag = normalizeHashtag(hashtagValue);
+    const isSmartFeedEnabled = env.ENABLE_SMART_FEED === true;
     const moments = hashtag ? await this.momentRepository.findPublicByHashtag(hashtag, limit) : [];
     const uniqueUserIds = [...new Set(moments.map((m) => m.userId.toString()))];
-    const [authors, viewerFollowingIds, interactionContext] = await Promise.all([
-      this.userRepository.findByIds(uniqueUserIds),
-      this.getViewerFollowingIdSet(user),
-      this.buildInteractionContext(moments, user),
-    ]);
+    const [authors, viewerFollowingIds, interactionContext, excludeUserIds, blockerUserIds, friendIds, followingIds] =
+      await Promise.all([
+        this.userRepository.findByIds(uniqueUserIds),
+        this.getViewerFollowingIdSet(user),
+        this.buildInteractionContext(moments, user),
+        isSmartFeedEnabled ? this.userBlockRepository.findBlockedIds(user.id) : Promise.resolve([]),
+        isSmartFeedEnabled ? this.userBlockRepository.findBlockerIds(user.id) : Promise.resolve([]),
+        isSmartFeedEnabled ? this.userFollowRepository.findMutualFriendIds(user.id) : Promise.resolve([]),
+        isSmartFeedEnabled ? this.userFollowRepository.findFollowingIds(user.id) : Promise.resolve([]),
+      ]);
     const authorById = new Map(authors.map((a) => [a._id.toString(), a]));
+    const smartFeedFriendIds = isSmartFeedEnabled
+      ? friendIds.filter((id) => !excludeUserIds.includes(id) && !blockerUserIds.includes(id))
+      : [];
+    const smartFeedFollowedIds = isSmartFeedEnabled
+      ? followingIds.filter((id) => !excludeUserIds.includes(id) && !blockerUserIds.includes(id))
+      : [];
+    const smartFeedContext = isSmartFeedEnabled
+      ? await this.buildMomentSmartFeedContext(moments, user.id, smartFeedFriendIds, smartFeedFollowedIds, {}, context)
+      : undefined;
 
-    return Promise.all(
+    const responses = await Promise.all(
       moments.map((moment) => this.toResponse(
         moment,
         authorById.get(moment.userId.toString()) ?? null,
         user,
         viewerFollowingIds,
         interactionContext,
+        smartFeedContext,
       )),
     );
+
+    return isSmartFeedEnabled ? responses.sort(compareSmartFeedScoreDesc) : responses;
   }
 
   public async shareMoment(
@@ -447,6 +494,51 @@ export class MomentService {
 
     const viewerFollowingIds = await this.getViewerFollowingIdSet(user);
     return this.toShareResponse(share, moment, user, viewerFollowingIds, interactionContext);
+  }
+
+  /**
+   * Owner-only edit of a repost's own commentary. Ownership is checked
+   * against the SHARE's userId (the reposter), never the original content's
+   * author — a user may always edit their own repost commentary regardless
+   * of who authored the original Post/Event, and can never touch the
+   * original content, taggedFriendIds, momentId, originalType/originalId, or
+   * clientRequestId through this path. Uses MomentShareRepository's
+   * updateCaptionForUser (a real $set), never the create-only share() upsert.
+   */
+  public async updateMomentShare(
+    shareId: string,
+    user: AuthUser,
+    payload: UpdateMomentShareDto,
+  ): Promise<MomentTimelineItemResponse> {
+    const share = await this.momentShareRepository.findById(shareId);
+
+    if (!share) {
+      throw new AppError("Repost not found", httpStatus.NOT_FOUND);
+    }
+
+    if (share.userId.toString() !== user.id) {
+      throw new AppError("You can only edit your own repost", httpStatus.FORBIDDEN);
+    }
+
+    const moment = await this.momentRepository.findById(share.momentId.toString());
+
+    if (!moment) {
+      throw new AppError("Repost not found", httpStatus.NOT_FOUND);
+    }
+
+    const caption = payload.caption?.trim() || null;
+    const updated = await this.momentShareRepository.updateCaptionForUser(shareId, user.id, caption);
+
+    if (!updated) {
+      throw new AppError("Repost not found", httpStatus.NOT_FOUND);
+    }
+
+    const [viewerFollowingIds, interactionContext] = await Promise.all([
+      this.getViewerFollowingIdSet(user),
+      this.buildInteractionContext([moment], user),
+    ]);
+
+    return this.toShareResponse(updated, moment, user, viewerFollowingIds, interactionContext);
   }
 
   public async listFeedShares(
@@ -598,6 +690,48 @@ export class MomentService {
       // recovery sweep from ever repointing a Moment that no longer exists.
       this.transcodingMomentSyncService.cancelForDeletedMoment(momentId),
     ]);
+  }
+
+  /**
+   * Owner-only, caption-only edit of an existing Moment/Post. Reuses the same
+   * existence/event-announcement/ownership checks as deleteMoment() above, so
+   * a synthetic Event announcement Moment can never be edited through this
+   * path (the Event itself has its own dedicated edit flow). Hashtags are
+   * re-derived from the updated caption via the canonical extractHashtags()
+   * parser — never merged with the previous set — and createdAt is never
+   * touched, so Smart Feed freshness is unaffected.
+   */
+  public async updateMoment(momentId: string, user: AuthUser, payload: UpdateMomentDto): Promise<MomentResponse> {
+    const moment = await this.momentRepository.findById(momentId);
+
+    if (!moment || moment.isEventAnnouncement) {
+      throw new AppError("Moment not found", httpStatus.NOT_FOUND);
+    }
+
+    if (moment.userId.toString() !== user.id) {
+      throw new AppError("You can only edit your own posts", httpStatus.FORBIDDEN);
+    }
+
+    const caption = payload.caption?.trim() || null;
+
+    if (!caption && moment.mediaItems.length === 0) {
+      throw new AppError("Write a stitch or attach media before creating a moment", httpStatus.BAD_REQUEST);
+    }
+
+    const hashtags = extractHashtags(caption);
+    const updated = await this.momentRepository.updateCaptionForUser(momentId, user.id, { caption, hashtags });
+
+    if (!updated) {
+      throw new AppError("Moment not found", httpStatus.NOT_FOUND);
+    }
+
+    const [author, viewerFollowingIds, interactionContext] = await Promise.all([
+      this.userRepository.findById(updated.userId.toString()),
+      this.getViewerFollowingIdSet(user),
+      this.buildInteractionContext([updated], user),
+    ]);
+
+    return this.toResponse(updated, author, user, viewerFollowingIds, interactionContext);
   }
 
   /**
@@ -942,18 +1076,33 @@ export class MomentService {
 
   private async buildMomentSmartFeedContext(
     moments: IMoment[],
+    viewerId: string,
     mutualFriendIds: string[],
+    followedAuthorIds: string[],
     query: MomentFeedQuery,
     context: MomentRequestContext,
   ): Promise<MomentSmartFeedContext> {
     const momentIds = moments.map((moment) => moment._id.toString());
-    const reactedUserIdsByMomentId = await this.momentReactionRepository.findLikedUserIdsByMomentIds(
-      momentIds,
-      mutualFriendIds,
-    );
-    const reactedUserIds = [...new Set([...reactedUserIdsByMomentId.values()].flat())];
-    const reactedUsers = reactedUserIds.length > 0
-      ? await this.userRepository.findActiveUsersByIds(reactedUserIds, undefined, reactedUserIds.length)
+    const mutualFriendSet = new Set(mutualFriendIds);
+    // "followed-only" = one-way follows that aren't already mutual friends,
+    // so a reactor/reposter is never counted toward both signals at once.
+    const followedOnlyIds = followedAuthorIds.filter((id) => !mutualFriendSet.has(id));
+    const followedOnlySet = new Set(followedOnlyIds);
+    const relationshipUserIds = [...new Set([...mutualFriendIds, ...followedOnlyIds])];
+
+    const [reactedUserIdsByMomentId, reposterUserIdsByMomentId] = await Promise.all([
+      this.momentReactionRepository.findLikedUserIdsByMomentIds(momentIds, relationshipUserIds),
+      this.momentShareRepository.findReposterUserIdsByMomentIds(momentIds, relationshipUserIds),
+    ]);
+
+    // The visible "X and Y reacted" preview stays scoped to mutual friends
+    // only, exactly as before — one-way-followed reactors influence scoring
+    // (below) but never widen this existing UI-facing preview list.
+    const mutualReactedUserIds = [...new Set(
+      [...reactedUserIdsByMomentId.values()].flat().filter((id) => mutualFriendSet.has(id)),
+    )];
+    const reactedUsers = mutualReactedUserIds.length > 0
+      ? await this.userRepository.findActiveUsersByIds(mutualReactedUserIds, undefined, mutualReactedUserIds.length)
       : [];
     const userById = new Map<string, SmartFeedSocialUser>(
       reactedUsers.map((item) => [item._id.toString(), {
@@ -962,7 +1111,6 @@ export class MomentService {
         avatarKey: item.avatarKey ?? null,
       }]),
     );
-    const mutualFriendSet = new Set(mutualFriendIds);
     const viewerLocation = isValidSmartFeedCoordinate(query.latitude, query.longitude)
       ? { latitude: query.latitude, longitude: query.longitude }
       : null;
@@ -976,13 +1124,27 @@ export class MomentService {
     for (const moment of moments) {
       const momentId = moment._id.toString();
       const reactedUserIdsForMoment = reactedUserIdsByMomentId.get(momentId) ?? [];
-      const socialContext = buildReactionSocialContext(reactedUserIdsForMoment, userById);
+      const mutualReactedForMoment = reactedUserIdsForMoment.filter((id) => mutualFriendSet.has(id));
+      const followedReactedForMoment = reactedUserIdsForMoment.filter((id) => followedOnlySet.has(id));
+      const socialContext = buildReactionSocialContext(mutualReactedForMoment, userById);
 
       if (socialContext) {
         socialContextByMomentId.set(momentId, socialContext);
       }
 
+      const reposterIdsForMoment = reposterUserIdsByMomentId.get(momentId) ?? [];
+      const mutualRepostCount = reposterIdsForMoment.filter((id) => mutualFriendSet.has(id)).length;
+      const followedRepostCount = reposterIdsForMoment.filter((id) => followedOnlySet.has(id)).length;
+
+      const authorId = moment.userId.toString();
+      const authorRelationship: SmartFeedAuthorRelationship = mutualFriendSet.has(authorId)
+        ? "mutual"
+        : followedOnlySet.has(authorId)
+          ? "followed"
+          : "none";
+
       const score = calculateSmartFeedScore({
+        isAuthorSelf: authorId === viewerId,
         nearbyScore: calculateSmartFeedNearbyScore({
           viewerExactLocation: viewerLocation,
           viewerRegionalLocation,
@@ -991,8 +1153,11 @@ export class MomentService {
         }),
         freshnessScore: calculateFreshnessScore(moment.createdAt, now),
         socialScore: calculateSocialScore({
-          mutualAuthor: mutualFriendSet.has(moment.userId.toString()),
-          mutualReactionUserCount: new Set(reactedUserIdsForMoment).size,
+          authorRelationship,
+          mutualReactionUserCount: new Set(mutualReactedForMoment).size,
+          followedReactionUserCount: new Set(followedReactedForMoment).size,
+          mutualRepostUserCount: mutualRepostCount,
+          followedRepostUserCount: followedRepostCount,
         }),
       });
 

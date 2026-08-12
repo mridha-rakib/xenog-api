@@ -172,6 +172,10 @@ export interface CreateMomentDto {
   mediaItems?: MomentMediaItem[];
 }
 
+export interface UpdateMomentDto {
+  caption?: string | null;
+}
+
 export interface MomentAuthorResponse {
   id: string;
   name: string;
@@ -244,6 +248,10 @@ export interface CreateMomentShareDto {
   caption?: string | null;
   taggedFriendIds?: string[];
   clientRequestId?: string | null;
+}
+
+export interface UpdateMomentShareDto {
+  caption?: string | null;
 }
 
 export interface MomentInteractionSummaryResponse {

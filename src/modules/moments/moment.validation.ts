@@ -161,12 +161,24 @@ export const momentValidation = {
       id: objectId,
     }),
   }),
+  updateMoment: z.object({
+    params: z.object({ id: objectId }),
+    body: z.object({
+      caption: optionalText("Caption", 5000),
+    }).strict(),
+  }),
   shareMoment: z.object({
     params: z.object({ id: objectId }),
     body: z.object({
       caption: optionalText("Repost caption", 2000),
       taggedFriendIds: z.array(objectId).max(20).default([]).transform((ids) => [...new Set(ids)]),
       clientRequestId: z.string().trim().min(8).max(100).regex(/^[a-zA-Z0-9._:-]+$/).optional().nullable(),
+    }).strict(),
+  }),
+  updateMomentShare: z.object({
+    params: z.object({ shareId: objectId }),
+    body: z.object({
+      caption: optionalText("Repost caption", 2000),
     }).strict(),
   }),
   commentReaction: z.object({

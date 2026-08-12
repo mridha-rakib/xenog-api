@@ -572,6 +572,38 @@ export class EventRepository {
     return EventModel.find({ userId, status: "draft" }).sort({ updatedAt: -1, _id: -1 });
   }
 
+  public async findPublicByHashtag(
+    hashtag: string,
+    excludeUserIds: string[] = [],
+    limit = 200,
+    requesterUserId?: string,
+  ): Promise<IEvent[]> {
+    // A requester may also see their own private event; everyone else only sees
+    // public/locked events. Ownership never overrides the status eligibility filter.
+    const visibility: FilterQuery<IEvent> = requesterUserId
+      ? {
+          $or: [
+            { privacy: { $in: ["public", "locked"] } },
+            { userId: requesterUserId, privacy: "private" },
+          ],
+        }
+      : { privacy: { $in: ["public", "locked"] } };
+
+    const filter: FilterQuery<IEvent> = {
+      status: { $in: ["published", "live"] },
+      hashtags: hashtag,
+      ...visibility,
+    };
+
+    if (excludeUserIds.length > 0) {
+      filter.userId = { $nin: excludeUserIds };
+    }
+
+    return EventModel.find(filter)
+      .sort({ publishedAt: -1, createdAt: -1, _id: -1 })
+      .limit(limit);
+  }
+
   public async findPublicFeedEvents(
     excludeUserIds: string[] = [],
     options: PublicFeedEventOptions = {},

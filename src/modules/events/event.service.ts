@@ -19,9 +19,11 @@ import { MomentCommentRepository } from "../moments/moment-comment.repository.js
 import { MomentCommentReactionRepository } from "../moments/moment-comment-reaction.repository.js";
 import { MomentShareRepository } from "../moments/moment-share.repository.js";
 import { MomentSaveRepository } from "../moments/moment-save.repository.js";
+import { extractHashtags, normalizeHashtag } from "../moments/moment-hashtag.js";
 import type { IUser } from "../user/user.interface.js";
 import { ProductRepository } from "../products/product.repository.js";
 import { EventRepository, getDistanceKm } from "./event.repository.js";
+import { MAX_EVENT_FILTER_RADIUS_KM } from "./event.validation.js";
 import { RewardClaimRepository } from "./reward-claim.repository.js";
 import type { IRewardClaim } from "./reward-claim.model.js";
 import { CheckoutPaymentRepository } from "../payments/checkout-payment.repository.js";
@@ -44,6 +46,7 @@ import {
   calculateSocialScore,
   compareSmartFeedScoreDesc,
   isValidSmartFeedCoordinate,
+  type SmartFeedAuthorRelationship,
   type SmartFeedScore,
   type SmartFeedSocialContext,
   type SmartFeedSocialUser,
@@ -197,13 +200,8 @@ const PROFILE_EVENTS_CACHE_VERSION = "v1";
 const PROFILE_EVENTS_CACHE_TTL_SECONDS = 30;
 const ADMIN_EVENT_DETAIL_STATUSES = new Set<EventStatus>(["published", "live", "completed", "cancelled"]);
 
-const normalizeEventHashtag = (value: string): string => {
-  const normalized = value.normalize("NFKC").trim().replace(/^#+/, "").toLocaleLowerCase();
-  return (normalized.match(/^[\p{L}\p{N}_]+/u)?.[0] ?? "").slice(0, 64);
-};
-
 const normalizeEventHashtags = (values: string[] | undefined): string[] =>
-  [...new Set((values ?? []).map(normalizeEventHashtag).filter(Boolean))].slice(0, 20);
+  [...new Set((values ?? []).map(normalizeHashtag).filter(Boolean))].slice(0, 20);
 
 const getNowStatus = (
   scheduledAt: Date | null | undefined,
@@ -269,10 +267,11 @@ export class EventService {
     payload: SaveEventDraftDto,
     eventId?: string,
   ): Promise<EventResponse> {
-    const normalizedPayload = this.normalizeDraftPayload(payload);
+    const existingDraft = eventId ? await this.getDraftForUser(user, eventId) : null;
+    const normalizedPayload = this.normalizeDraftPayload(payload, existingDraft);
 
     if (eventId) {
-      const draft = await this.getDraftForUser(user, eventId);
+      const draft = existingDraft!;
       await this.assertPostingWindowsFitSchedule(draft, normalizedPayload);
       const scheduleCandidate = this.getEventScheduleCandidate(draft, normalizedPayload);
       this.assertEndAtChangeDoesNotEnterTicketCreationCutoff(draft, normalizedPayload);
@@ -320,11 +319,10 @@ export class EventService {
     payload: PublishEventDto,
     eventId?: string,
   ): Promise<EventResponse> {
-    const normalizedPayload = this.normalizePublishPayload(payload);
+    const existingEvent = eventId ? await this.eventRepository.findByIdForUser(eventId, user.id) : null;
+    const normalizedPayload = this.normalizePublishPayload(payload, existingEvent);
 
     if (eventId) {
-      const existingEvent = await this.eventRepository.findByIdForUser(eventId, user.id);
-
       if (existingEvent && existingEvent.status !== "draft") {
         if (existingEvent.status === "completed" || existingEvent.status === "cancelled") {
           throw new AppError(
@@ -417,7 +415,7 @@ export class EventService {
     payload: SaveEventDraftDto,
   ): Promise<EventResponse> {
     const existingEvent = await this.getModifiableEventForOwner(user, eventId);
-    const normalizedPayload = this.normalizeDraftPayload(payload);
+    const normalizedPayload = this.normalizeDraftPayload(payload, existingEvent);
     this.assertPublishableCategories(this.getCategoryCandidate(existingEvent, normalizedPayload));
     await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
     const scheduleCandidate = this.getEventScheduleCandidate(existingEvent, normalizedPayload);
@@ -1139,6 +1137,9 @@ export class EventService {
     const smartFeedFriendIds = isSmartFeedEnabled
       ? friendIds.filter((id) => !excludeUserIds.includes(id) && !blockerUserIds.includes(id))
       : [];
+    const smartFeedFollowedIds = isSmartFeedEnabled
+      ? followingIds.filter((id) => !excludeUserIds.includes(id) && !blockerUserIds.includes(id))
+      : [];
     const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds, publicGoingSummaries, reportedEventIds, smartFeedContext] =
       await Promise.all([
         this.momentReactionRepository.countByMomentIds(momentIds),
@@ -1155,7 +1156,15 @@ export class EventService {
           ? this.reportRepository.findReportedTargetIds(user.id, "event", eventIds)
           : Promise.resolve(new Set<string>()),
         isSmartFeedEnabled
-          ? this.buildEventSmartFeedContext(events, momentIds, smartFeedFriendIds, query, context)
+          ? this.buildEventSmartFeedContext(
+              events,
+              momentIds,
+              user?.id,
+              smartFeedFriendIds,
+              smartFeedFollowedIds,
+              query,
+              context,
+            )
           : Promise.resolve(undefined),
       ]);
 
@@ -1189,6 +1198,70 @@ export class EventService {
     const eventsWithCrowdStatuses = await this.withCrowdStatuses(events, responseEvents);
 
     return isSmartFeedEnabled ? eventsWithCrowdStatuses.sort(compareSmartFeedScoreDesc) : eventsWithCrowdStatuses;
+  }
+
+  // Two-tier ordering deliberately mirrors the existing feed/map "nearby" convention
+  // (bounding radius check via getDistanceKm, then a stable date-based sort) rather than
+  // the Smart Feed blended score — a hashtag match should never be outranked by a farther,
+  // more "popular" event. Nearby events (within radiusKm) come first, soonest-scheduled
+  // first; everything else follows, most-recently-published first.
+  public async listHashtagEvents(
+    hashtagValue: string,
+    user: AuthUser,
+    options: { limit?: number; latitude?: number; longitude?: number; radiusKm?: number } = {},
+  ): Promise<EventResponse[]> {
+    const hashtag = normalizeHashtag(hashtagValue);
+
+    if (!hashtag) {
+      return [];
+    }
+
+    const limit = options.limit ?? 50;
+    const excludeUserIds = await this.userBlockRepository.findBlockedIds(user.id);
+    const candidates = await this.eventRepository.findPublicByHashtag(hashtag, excludeUserIds, 200, user.id);
+
+    const hasNearbyFilter = typeof options.latitude === "number" && typeof options.longitude === "number";
+    const radiusKm = options.radiusKm ?? MAX_EVENT_FILTER_RADIUS_KM;
+
+    const nearbyEvents: IEvent[] = [];
+    const remainingEvents: IEvent[] = [];
+
+    for (const event of candidates) {
+      const latitude = event.location?.latitude;
+      const longitude = event.location?.longitude;
+      const isNearby =
+        hasNearbyFilter &&
+        typeof latitude === "number" &&
+        typeof longitude === "number" &&
+        Number.isFinite(latitude) &&
+        Number.isFinite(longitude) &&
+        getDistanceKm(
+          { latitude: options.latitude!, longitude: options.longitude! },
+          { latitude, longitude },
+        ) <= radiusKm;
+
+      (isNearby ? nearbyEvents : remainingEvents).push(event);
+    }
+
+    nearbyEvents.sort(
+      (left, right) =>
+        this.compareDatesAsc(left.scheduledAt, right.scheduledAt) ||
+        this.compareDatesDesc(left.publishedAt, right.publishedAt) ||
+        right._id.toString().localeCompare(left._id.toString()),
+    );
+    remainingEvents.sort(
+      (left, right) =>
+        this.compareDatesDesc(left.publishedAt, right.publishedAt) ||
+        this.compareDatesDesc(left.createdAt, right.createdAt) ||
+        right._id.toString().localeCompare(left._id.toString()),
+    );
+
+    const orderedEvents = [...nearbyEvents, ...remainingEvents].slice(0, limit);
+    const hostById = await this.getHostById(orderedEvents);
+
+    return orderedEvents.map((event) =>
+      this.toResponse(event, hostById.get(event.userId.toString()) ?? null),
+    );
   }
 
   public async toggleSaveEvent(
@@ -2099,7 +2172,42 @@ export class EventService {
     }));
   }
 
-  private normalizeDraftPayload(payload: SaveEventDraftDto): SaveEventDraftDto {
+  // Event.hashtags has no provenance field distinguishing manually-supplied tags from
+  // description-derived ones. We reconstruct that distinction on every save by diffing
+  // against what the OLD description would have derived — whatever remains is treated as
+  // manual and is preserved; whatever the NEW description derives is added; nothing else
+  // is touched. This lets stale description hashtags disappear when the text changes while
+  // never discarding hashtags that didn't come from the description in the first place.
+  private mergeEventHashtags(
+    payloadHashtags: string[] | undefined,
+    newDescription: string | null | undefined,
+    existingEvent?: Pick<IEvent, "hashtags" | "description"> | null,
+  ): string[] | undefined {
+    const descriptionChanging = newDescription !== undefined;
+    const hashtagsProvided = payloadHashtags !== undefined;
+
+    if (!descriptionChanging && !hashtagsProvided) {
+      return undefined;
+    }
+
+    const manualHashtags = hashtagsProvided ? normalizeEventHashtags(payloadHashtags) : [];
+    const storedHashtags = existingEvent?.hashtags ?? [];
+
+    if (!descriptionChanging) {
+      return normalizeEventHashtags([...storedHashtags, ...manualHashtags]);
+    }
+
+    const staleDerivedHashtags = new Set(extractHashtags(existingEvent?.description ?? null));
+    const preservedHashtags = storedHashtags.filter((tag) => !staleDerivedHashtags.has(tag));
+    const freshDerivedHashtags = extractHashtags(newDescription ?? null);
+
+    return normalizeEventHashtags([...preservedHashtags, ...manualHashtags, ...freshDerivedHashtags]);
+  }
+
+  private normalizeDraftPayload(
+    payload: SaveEventDraftDto,
+    existingEvent?: Pick<IEvent, "hashtags" | "description"> | null,
+  ): SaveEventDraftDto {
     const normalized: SaveEventDraftDto = { ...payload };
 
     if (payload.name !== undefined) {
@@ -2129,8 +2237,9 @@ export class EventService {
       }
     }
 
-    if (payload.hashtags !== undefined) {
-      normalized.hashtags = normalizeEventHashtags(payload.hashtags);
+    const mergedHashtags = this.mergeEventHashtags(payload.hashtags, payload.description, existingEvent);
+    if (mergedHashtags !== undefined) {
+      normalized.hashtags = mergedHashtags;
     }
 
     if (payload.categories !== undefined) {
@@ -2213,15 +2322,21 @@ export class EventService {
     }
   }
 
-  private normalizePublishPayload(payload: PublishEventDto): PublishEventDto {
-    const draftPayload = this.normalizeDraftPayload(payload);
+  private normalizePublishPayload(
+    payload: PublishEventDto,
+    existingEvent?: Pick<IEvent, "hashtags" | "description"> | null,
+  ): PublishEventDto {
+    const draftPayload = this.normalizeDraftPayload(payload, existingEvent);
+    const hashtags =
+      this.mergeEventHashtags(payload.hashtags, payload.description, existingEvent) ??
+      normalizeEventHashtags(existingEvent?.hashtags ?? []);
 
     return {
       ...payload,
       ...draftPayload,
       name: payload.name.trim(),
       ageRestriction: payload.ageRestriction,
-      hashtags: normalizeEventHashtags(payload.hashtags),
+      hashtags,
       category: payload.categories[0],
       categories: payload.categories,
       scheduledAt: payload.scheduledAt,
@@ -3193,7 +3308,9 @@ export class EventService {
   private async buildEventSmartFeedContext(
     events: IEvent[],
     interactionMomentIds: string[],
+    viewerId: string | undefined,
     mutualFriendIds: string[],
+    followedAuthorIds: string[],
     query: EventFeedQuery,
     context: EventRequestContext,
   ): Promise<EventSmartFeedContext> {
@@ -3207,16 +3324,34 @@ export class EventService {
       }
     });
 
-    const [reactedUserIdsByMomentId, attendeeIdsByEventId] = await Promise.all([
-      this.momentReactionRepository.findLikedUserIdsByMomentIds(interactionMomentIds, mutualFriendIds),
+    const mutualFriendSet = new Set(mutualFriendIds);
+    // "followed-only" = one-way follows that aren't already mutual friends,
+    // mirroring MomentService.buildMomentSmartFeedContext's partitioning so
+    // a reactor/reposter/host is never counted toward both signals at once.
+    const followedOnlyIds = followedAuthorIds.filter((id) => !mutualFriendSet.has(id));
+    const followedOnlySet = new Set(followedOnlyIds);
+    const relationshipUserIds = [...new Set([...mutualFriendIds, ...followedOnlyIds])];
+
+    const [reactedUserIdsByMomentId, reposterUserIdsByMomentId, attendeeIdsByEventId] = await Promise.all([
+      this.momentReactionRepository.findLikedUserIdsByMomentIds(interactionMomentIds, relationshipUserIds),
+      // Event reposts are recorded as MomentShare rows against the event's
+      // interaction Moment (same id space as reactions/comments) — see
+      // MomentService.shareMoment's isEventAnnouncement branch.
+      this.momentShareRepository.findReposterUserIdsByMomentIds(interactionMomentIds, relationshipUserIds),
+      // Attendance stays mutual-friend-only, unchanged — not part of the
+      // approved one-way-follow extension for this task.
       this.checkoutPaymentService.getMutualAttendeeIdsByEventIds(
         events.map((event) => ({ id: event._id.toString(), status: event.status })),
         mutualFriendIds,
       ),
     ]);
-    const reactedUserIds = [...new Set([...reactedUserIdsByMomentId.values()].flat())];
-    const reactedUsers = reactedUserIds.length > 0
-      ? await this.userRepository.findActiveUsersByIds(reactedUserIds, undefined, reactedUserIds.length)
+
+    // Preview avatars stay scoped to mutual friends only, exactly as before.
+    const mutualReactedUserIds = [...new Set(
+      [...reactedUserIdsByMomentId.values()].flat().filter((id) => mutualFriendSet.has(id)),
+    )];
+    const reactedUsers = mutualReactedUserIds.length > 0
+      ? await this.userRepository.findActiveUsersByIds(mutualReactedUserIds, undefined, mutualReactedUserIds.length)
       : [];
     const userById = new Map<string, SmartFeedSocialUser>(
       reactedUsers.map((item) => [item._id.toString(), {
@@ -3241,13 +3376,29 @@ export class EventService {
       const reactedUserIdsForEvent = interactionMomentId
         ? reactedUserIdsByMomentId.get(interactionMomentId) ?? []
         : [];
-      const socialContext = buildReactionSocialContext(reactedUserIdsForEvent, userById);
+      const mutualReactedForEvent = reactedUserIdsForEvent.filter((id) => mutualFriendSet.has(id));
+      const followedReactedForEvent = reactedUserIdsForEvent.filter((id) => followedOnlySet.has(id));
+      const socialContext = buildReactionSocialContext(mutualReactedForEvent, userById);
 
       if (socialContext) {
         socialContextByEventId.set(eventId, socialContext);
       }
 
+      const reposterIdsForEvent = interactionMomentId
+        ? reposterUserIdsByMomentId.get(interactionMomentId) ?? []
+        : [];
+      const mutualRepostCount = reposterIdsForEvent.filter((id) => mutualFriendSet.has(id)).length;
+      const followedRepostCount = reposterIdsForEvent.filter((id) => followedOnlySet.has(id)).length;
+
+      const hostId = event.userId.toString();
+      const authorRelationship: SmartFeedAuthorRelationship = mutualFriendSet.has(hostId)
+        ? "mutual"
+        : followedOnlySet.has(hostId)
+          ? "followed"
+          : "none";
+
       const score = calculateSmartFeedScore({
+        isAuthorSelf: Boolean(viewerId) && hostId === viewerId,
         nearbyScore: calculateSmartFeedNearbyScore({
           viewerExactLocation: viewerLocation,
           viewerRegionalLocation,
@@ -3256,8 +3407,12 @@ export class EventService {
         }),
         freshnessScore: calculateFreshnessScore(event.publishedAt ?? event.createdAt, now),
         socialScore: calculateSocialScore({
-          mutualReactionUserCount: new Set(reactedUserIdsForEvent).size,
+          authorRelationship,
+          mutualReactionUserCount: new Set(mutualReactedForEvent).size,
+          followedReactionUserCount: new Set(followedReactedForEvent).size,
           mutualAttendeeUserCount: attendeeIdsByEventId.get(eventId)?.size ?? 0,
+          mutualRepostUserCount: mutualRepostCount,
+          followedRepostUserCount: followedRepostCount,
         }),
       });
 

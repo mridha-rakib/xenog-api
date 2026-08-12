@@ -45,6 +45,13 @@ router.get(
   validate(momentValidation.feedShares),
   catchAsync(controller.listFeedShares),
 );
+// Must be registered before the generic PATCH "/:id" below — otherwise
+// "shares" would be captured as the moment :id param.
+router.patch(
+  "/shares/:shareId",
+  validate(momentValidation.updateMomentShare),
+  catchAsync(controller.updateMomentShare),
+);
 router.post(
   "/:id/share",
   validate(momentValidation.shareMoment),
@@ -59,6 +66,11 @@ router.post(
   "/:id/retry-video-processing",
   validate(momentValidation.momentIdParam),
   catchAsync(controller.retryMomentVideoProcessing),
+);
+router.patch(
+  "/:id",
+  validate(momentValidation.updateMoment),
+  catchAsync(controller.updateMoment),
 );
 router.delete(
   "/:id",

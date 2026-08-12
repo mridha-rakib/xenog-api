@@ -439,6 +439,128 @@ test("friends feed moments use mutual friend authors for normal and event-tagged
   );
 });
 
+test("friends feed includes the viewer's own eligible Moments alongside mutual friends' Moments", async () => {
+  const ownPost = makeMoment({
+    userId: viewerId,
+    caption: "My own post",
+    createdAt: new Date("2026-07-16T12:05:00.000Z"),
+  });
+  const mutualFriendPost = makeMoment({
+    userId: authorId,
+    caption: "Mutual friend post",
+    createdAt: new Date("2026-07-16T12:04:00.000Z"),
+  });
+  const oneWayFollowedOnlyPost = makeMoment({
+    userId: otherAuthorId,
+    caption: "One-way-followed-only post (A follows this author, they do not follow back)",
+    createdAt: new Date("2026-07-16T12:03:00.000Z"),
+  });
+  const unrelatedPost = makeMoment({
+    userId: blockedAuthorId,
+    caption: "Unrelated author post",
+    createdAt: new Date("2026-07-16T12:02:00.000Z"),
+  });
+  const service = createMomentService({
+    momentRepository: new MomentRepository() as never,
+    eventRepository: new EventRepository() as never,
+    // Only authorId is a mutual friend — otherAuthorId/blockedAuthorId are
+    // deliberately NOT mutual (simulating one-way-follow-only and unrelated
+    // authors), proving Friends eligibility never widens to "everyone I follow".
+    friendUserIds: [authorId.toString()],
+  });
+
+  await withMockedMomentFind(
+    [ownPost, mutualFriendPost, oneWayFollowedOnlyPost, unrelatedPost],
+    async () => {
+      const moments = await service.listFeedMoments(viewer as never, { audience: "friends" });
+
+      assert.deepEqual(
+        moments.map((moment) => moment.id).sort(),
+        [ownPost._id.toString(), mutualFriendPost._id.toString()].sort(),
+      );
+    },
+  );
+});
+
+test("friends feed excludes a reverse one-way follow (B follows A, A does not follow B)", async () => {
+  // From A's perspective, B following A but not vice versa is still not a
+  // mutual relationship — findMutualFriendIds (reciprocal) intentionally
+  // returns nothing for B here, exactly like any other one-way relationship.
+  const reverseFollowerPost = makeMoment({
+    userId: otherAuthorId,
+    caption: "Reverse one-way follower's post",
+  });
+  const service = createMomentService({
+    momentRepository: new MomentRepository() as never,
+    eventRepository: new EventRepository() as never,
+    friendUserIds: [],
+  });
+
+  await withMockedMomentFind([reverseFollowerPost], async () => {
+    const moments = await service.listFeedMoments(viewer as never, { audience: "friends" });
+
+    assert.deepEqual(moments, []);
+  });
+});
+
+test("friends feed still ranks self and mutual-friend candidates through Smart Feed, not a fixed self-first order", async () => {
+  // Smart Feed's freshnessScore is computed against the real wall clock
+  // (calculateFreshnessScore(createdAt, new Date())), not this file's fixed
+  // 2026-07-16 fixture "now" used elsewhere for query-matching only — so
+  // this test uses the actual current time to represent "both posted just
+  // now", the scenario the assertion below is about.
+  const justNow = new Date();
+  const freshOwnPost = makeMoment({
+    userId: viewerId,
+    caption: "Fresh own post",
+    createdAt: justNow,
+  });
+  const sameInstantMutualPost = makeMoment({
+    userId: authorId,
+    caption: "Same-instant mutual friend post",
+    createdAt: justNow,
+  });
+  const service = createMomentService({
+    momentRepository: new MomentRepository() as never,
+    eventRepository: new EventRepository() as never,
+    friendUserIds: [authorId.toString()],
+  });
+
+  await withMockedMomentFind([freshOwnPost, sameInstantMutualPost], async () => {
+    const moments = await service.listFeedMoments(viewer as never, { audience: "friends" });
+
+    assert.equal(moments.length, 2);
+    // Both are eligible (self + mutual friend) — self relevance legitimately
+    // outranks a same-instant mutual-friend post with no other signals yet,
+    // proving ranking (not a hardcoded self-first array append) placed it
+    // there: the ordering is a consequence of smartFeedScore, not position.
+    const own = moments.find((m) => m.id === freshOwnPost._id.toString());
+    const mutual = moments.find((m) => m.id === sameInstantMutualPost._id.toString());
+    assert.ok((own?.smartFeedScore ?? 0) > (mutual?.smartFeedScore ?? 0));
+    assert.equal(moments[0]?.id, freshOwnPost._id.toString());
+  });
+});
+
+test("discover feed is unaffected by the Friends self-eligibility change", async () => {
+  const ownPost = makeMoment({ userId: viewerId, caption: "My own post" });
+  const unrelatedPost = makeMoment({ userId: otherAuthorId, caption: "Unrelated post" });
+  const service = createMomentService({
+    momentRepository: new MomentRepository() as never,
+    eventRepository: new EventRepository() as never,
+  });
+
+  await withMockedMomentFind([ownPost, unrelatedPost], async () => {
+    const moments = await service.listFeedMoments(viewer as never, {});
+
+    // Discover has no author restriction at all — both remain eligible,
+    // exactly as before this change.
+    assert.deepEqual(
+      moments.map((moment) => moment.id).sort(),
+      [ownPost._id.toString(), unrelatedPost._id.toString()].sort(),
+    );
+  });
+});
+
 test("friends feed shares keep only reposts created by mutual friends", async () => {
   const friendMoment = makeMoment({ caption: "Friend shared moment" });
   const discoverMoment = makeMoment({ userId: otherAuthorId, caption: "Discover shared moment" });
@@ -562,6 +684,7 @@ function createMomentService(overrides: {
     findByUserId: async () => [],
     countByUserId: async () => 0,
     countByMomentIds: async () => new Map<string, number>(),
+    findReposterUserIdsByMomentIds: async () => new Map<string, string[]>(),
     ...overrides.momentShareRepository,
   };
 

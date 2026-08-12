@@ -1,6 +1,36 @@
 import { MomentModel } from "./moment.model.js";
 import type { CreateMomentDto, IMoment, MomentFeedQuery, MomentLocationSnapshot } from "./moment.interface.js";
 
+const isFiniteCoordinate = (value: unknown): value is number =>
+  typeof value === "number" && Number.isFinite(value);
+
+// Bounding-box candidate filter — same degree-delta approach already used
+// for Events' feed/map location filtering (event.repository.ts), not a new
+// geo system. Only engaged when the caller explicitly supplies lat/lng/
+// radiusKm; the default Discover query (none of the three present) is
+// untouched. Deliberately no exact-radius JS post-filter+reslice here (as
+// Events do) — that requires an unbounded pre-limit fetch, a pattern the
+// Smart Feed audit already flagged as a risk on the Events path, and the
+// existing nearby *score* already orders results by exact distance within
+// this box, so precision is preserved at the ranking step instead.
+const buildLocationBoundsFilter = (
+  latitude?: number,
+  longitude?: number,
+  radiusKm?: number,
+): Record<string, unknown> | null => {
+  if (!isFiniteCoordinate(latitude) || !isFiniteCoordinate(longitude) || !isFiniteCoordinate(radiusKm)) {
+    return null;
+  }
+
+  const latitudeDelta = radiusKm / 111.32;
+  const longitudeDelta = radiusKm / (111.32 * Math.max(Math.cos((latitude * Math.PI) / 180), 0.01));
+
+  return {
+    "location.latitude": { $type: "number", $gte: latitude - latitudeDelta, $lte: latitude + latitudeDelta },
+    "location.longitude": { $type: "number", $gte: longitude - longitudeDelta, $lte: longitude + longitudeDelta },
+  };
+};
+
 interface CreateMomentRecord extends CreateMomentDto {
   userId: string;
   hashtags: string[];
@@ -130,6 +160,22 @@ export class MomentRepository {
     return MomentModel.findOneAndDelete({ _id: id, userId });
   }
 
+  // Targeted $set of only caption + hashtags — never touches createdAt (so
+  // Smart Feed freshness is unaffected), media, audience, tagged people, or
+  // location. Scoped to isEventAnnouncement:{$ne:true} so a synthetic Event
+  // announcement Moment can never be mutated through the Post-edit path.
+  public async updateCaptionForUser(
+    id: string,
+    userId: string,
+    payload: { caption: string | null; hashtags: string[] },
+  ): Promise<IMoment | null> {
+    return MomentModel.findOneAndUpdate(
+      { _id: id, userId, isEventAnnouncement: { $ne: true } },
+      { $set: { caption: payload.caption, hashtags: payload.hashtags } },
+      { new: true, runValidators: true },
+    );
+  }
+
   public async findByIds(ids: string[]): Promise<IMoment[]> {
     if (ids.length === 0) {
       return [];
@@ -172,12 +218,14 @@ export class MomentRepository {
           ],
         }
       : { mode: "feed" };
+    const locationFilter = buildLocationBoundsFilter(query.latitude, query.longitude, query.radiusKm);
 
     return MomentModel.find({
       ...visibilityFilter,
       audience: "public",
       ...(hashtags.length > 0 ? { hashtags: { $all: hashtags } } : {}),
       ...(Object.keys(userIdFilter).length > 0 ? { userId: userIdFilter } : {}),
+      ...(locationFilter ?? {}),
     })
       .sort({ createdAt: -1 })
       .limit(query.limit ?? 50);

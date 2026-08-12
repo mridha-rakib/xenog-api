@@ -80,7 +80,9 @@ export class MomentController {
   public listHashtagMoments = async (req: Request, res: Response): Promise<void> => {
     const { hashtag } = req.params as { hashtag: string };
     const { limit } = req.query as { limit?: number };
-    const moments = await this.momentService.listHashtagMoments(hashtag, req.authUser as AuthUser, limit);
+    const moments = await this.momentService.listHashtagMoments(hashtag, req.authUser as AuthUser, limit, {
+      clientIp: req.ip,
+    });
 
     ApiResponse.success(res, {
       message: "Hashtag moments retrieved",
@@ -95,6 +97,18 @@ export class MomentController {
     ApiResponse.success(res, {
       statusCode: httpStatus.CREATED,
       message: "Moment shared",
+      data: {
+        share,
+      },
+    });
+  };
+
+  public updateMomentShare = async (req: Request, res: Response): Promise<void> => {
+    const { shareId } = req.params as { shareId: string };
+    const share = await this.momentService.updateMomentShare(shareId, req.authUser as AuthUser, req.body);
+
+    ApiResponse.success(res, {
+      message: "Repost updated",
       data: {
         share,
       },
@@ -125,6 +139,18 @@ export class MomentController {
       message: summary.isLiked ? "Moment liked" : "Moment unliked",
       data: {
         summary,
+      },
+    });
+  };
+
+  public updateMoment = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const moment = await this.momentService.updateMoment(id, req.authUser as AuthUser, req.body);
+
+    ApiResponse.success(res, {
+      message: "Moment updated",
+      data: {
+        moment,
       },
     });
   };

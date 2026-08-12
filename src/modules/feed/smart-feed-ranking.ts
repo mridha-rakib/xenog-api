@@ -9,8 +9,52 @@ export const SMART_FEED_LIMITS = {
   freshnessHalfLifeHours: 72,
   reactionSaturationCount: 4,
   attendanceSaturationCount: 4,
+  // Reposts are a higher-effort action than a like/attendance RSVP, so they
+  // saturate on fewer distinct users.
+  repostSaturationCount: 2,
   socialPreviewUserLimit: 2,
 } as const;
+
+// Sub-budgets that make up calculateSocialScore's own [0,1] range. Values are
+// additive and clamp01'd at the end, so an all-signals-maxed candidate can
+// exceed 1 pre-clamp by design (extreme edge case, matches prior behavior).
+export const SMART_FEED_SOCIAL_SUBSCORES = {
+  // Unchanged from the original formula — reciprocal-friend author bonus.
+  mutualAuthor: 0.45,
+  // NEW. One-way follow (viewer follows the author, not necessarily back).
+  // Set below mutualAuthor so the approved relationship hierarchy
+  // (self > mutual > one-way follow > unrelated) holds inside socialScore.
+  followedAuthor: 0.25,
+  // Unchanged — mutual-friend reaction sub-budget.
+  reaction: 0.35,
+  // Unchanged — mutual-friend attendance sub-budget.
+  attendance: 0.2,
+  // NEW. A followed/mutual user reposting this content — a "medium" signal:
+  // stronger than a single like (reaction sub-budget is spread across up to
+  // reactionSaturationCount reactors), weaker than a persistent author
+  // relationship (mutualAuthor/followedAuthor), matching the approved
+  // "repost > like" intent ordering.
+  repost: 0.3,
+} as const;
+
+// Tuning multipliers for signals that aren't flat sub-budgets.
+export const SMART_FEED_RELATIONSHIP_TUNING = {
+  // NEW. A one-way-followed (non-mutual) reactor counts as this fraction of
+  // a mutual-friend reactor toward reactionScore's saturation — makes
+  // followed-user likes a WEAK signal relative to mutual-friend likes.
+  followedReactionWeight: 0.5,
+  // NEW. Self-authored content's relevance boost, calibrated as
+  // freshnessScore * selfAuthorBoost (see calculateSmartFeedScore) rather
+  // than a separate timer, so it inherits the existing 72h decay curve and
+  // fades to ~0 exactly as freshnessScore does — never a permanent pin.
+  // Deliberately larger than the full nearby weight (0.5) so brand-new own
+  // content can dominate typical strong non-self candidates (approved
+  // "very strong short-term relevance"), while still being fully governed
+  // by the existing freshness curve rather than a new mechanism.
+  selfAuthorBoost: 0.6,
+} as const;
+
+export type SmartFeedAuthorRelationship = "mutual" | "followed" | "none";
 
 export const SMART_FEED_REGIONAL_NEARBY_SCORES = {
   sameCity: 1,
@@ -218,31 +262,72 @@ export const calculateFreshnessScore = (createdAt?: Date | string | null, now = 
 };
 
 export const calculateSocialScore = (signals: {
+  /** @deprecated pass authorRelationship instead; still honored for old call sites. */
   mutualAuthor?: boolean;
+  // NEW. Supersedes mutualAuthor when present. "followed" = one-way follow,
+  // viewer follows the author but it isn't reciprocal.
+  authorRelationship?: SmartFeedAuthorRelationship;
   mutualReactionUserCount?: number;
+  // NEW. Must be disjoint from mutualReactionUserCount's underlying user set
+  // (a mutual friend is never also counted here) — the caller is responsible
+  // for partitioning reactor ids before counting.
+  followedReactionUserCount?: number;
   mutualAttendeeUserCount?: number;
+  // NEW. Disjoint from mutualRepostUserCount's underlying user set, same
+  // partitioning contract as the reaction counts above.
+  mutualRepostUserCount?: number;
+  followedRepostUserCount?: number;
 }): number => {
-  const authorScore = signals.mutualAuthor ? 0.45 : 0;
+  const relationship: SmartFeedAuthorRelationship =
+    signals.authorRelationship ?? (signals.mutualAuthor ? "mutual" : "none");
+  const authorScore =
+    relationship === "mutual"
+      ? SMART_FEED_SOCIAL_SUBSCORES.mutualAuthor
+      : relationship === "followed"
+        ? SMART_FEED_SOCIAL_SUBSCORES.followedAuthor
+        : 0;
+
+  const weightedReactorCount =
+    (signals.mutualReactionUserCount ?? 0) +
+    (signals.followedReactionUserCount ?? 0) * SMART_FEED_RELATIONSHIP_TUNING.followedReactionWeight;
   const reactionScore =
-    Math.min(signals.mutualReactionUserCount ?? 0, SMART_FEED_LIMITS.reactionSaturationCount) /
+    Math.min(weightedReactorCount, SMART_FEED_LIMITS.reactionSaturationCount) /
     SMART_FEED_LIMITS.reactionSaturationCount *
-    0.35;
+    SMART_FEED_SOCIAL_SUBSCORES.reaction;
+
   const attendanceScore =
     Math.min(signals.mutualAttendeeUserCount ?? 0, SMART_FEED_LIMITS.attendanceSaturationCount) /
     SMART_FEED_LIMITS.attendanceSaturationCount *
-    0.2;
+    SMART_FEED_SOCIAL_SUBSCORES.attendance;
 
-  return clamp01(authorScore + reactionScore + attendanceScore);
+  const weightedReposterCount =
+    (signals.mutualRepostUserCount ?? 0) + (signals.followedRepostUserCount ?? 0);
+  const repostScore =
+    Math.min(weightedReposterCount, SMART_FEED_LIMITS.repostSaturationCount) /
+    SMART_FEED_LIMITS.repostSaturationCount *
+    SMART_FEED_SOCIAL_SUBSCORES.repost;
+
+  return clamp01(authorScore + reactionScore + attendanceScore + repostScore);
 };
 
 export const calculateSmartFeedScore = (signals: {
   nearbyScore: number;
   freshnessScore: number;
   socialScore: number;
+  // NEW. Adds freshnessScore * SMART_FEED_RELATIONSHIP_TUNING.selfAuthorBoost
+  // to finalScore only — nearbyScore/freshnessScore/socialScore below stay
+  // exactly the base 0.5/0.2/0.3 formula's own inputs, unchanged, so this is
+  // purely additive on top of it rather than a replacement. Not returned as
+  // its own field: the API response's `smartFeed` object keeps its existing
+  // {nearbyScore, freshnessScore, socialScore, finalScore} shape.
+  isAuthorSelf?: boolean;
 }): SmartFeedScore => {
   const nearbyScore = clamp01(signals.nearbyScore);
   const freshnessScore = clamp01(signals.freshnessScore);
   const socialScore = clamp01(signals.socialScore);
+  const selfAuthorBoost = signals.isAuthorSelf
+    ? freshnessScore * SMART_FEED_RELATIONSHIP_TUNING.selfAuthorBoost
+    : 0;
 
   return {
     nearbyScore,
@@ -251,7 +336,8 @@ export const calculateSmartFeedScore = (signals: {
     finalScore: clamp01(
       nearbyScore * SMART_FEED_WEIGHTS.nearby +
       freshnessScore * SMART_FEED_WEIGHTS.freshness +
-      socialScore * SMART_FEED_WEIGHTS.social,
+      socialScore * SMART_FEED_WEIGHTS.social +
+      selfAuthorBoost,
     ),
   };
 };

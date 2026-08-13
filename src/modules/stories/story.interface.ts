@@ -21,6 +21,7 @@ export interface IStory {
   textContent?: string | null;
   textBackground?: StoryTextBackground | null;
   textOverlay?: StoryTextOverlay | null;
+  imageTransform?: StoryImageTransform | null;
   audience: StoryAudienceType;
   expiresAt: Date;
   createdAt: Date;
@@ -67,6 +68,7 @@ export interface CreateStoryDto {
   textContent?: string | null;
   textBackground?: StoryTextBackground | null;
   textOverlay?: StoryTextOverlay | null;
+  imageTransform?: StoryImageTransform | null;
 }
 
 export interface StoryTextBackground {
@@ -82,6 +84,17 @@ export interface StoryTextOverlay {
   color: string;
   fontWeight?: "normal" | "600" | "700" | "bold";
   textAlign?: "left" | "center" | "right";
+  rotation?: number;
+}
+
+// Normalized Story image placement — x/y are the image's visual center as a
+// fraction of the Story canvas (0.5/0.5 = today's legacy centered
+// full-bleed cover), matching StoryTextOverlay's coordinate convention.
+export interface StoryImageTransform {
+  x: number;
+  y: number;
+  scale: number;
+  rotation?: number;
 }
 
 export interface StoryAuthorResponse {
@@ -106,6 +119,7 @@ export interface StoryResponse {
   textContent?: string | null;
   textBackground?: StoryTextBackground | null;
   textOverlay?: StoryTextOverlay | null;
+  imageTransform?: StoryImageTransform | null;
   audience: StoryAudienceType;
   viewsCount: number;
   reactionsCount: number;

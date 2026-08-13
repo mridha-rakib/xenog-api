@@ -68,6 +68,7 @@ export class StoryService {
       textContent: payload.textContent?.trim() || null,
       textBackground: payload.textBackground ?? null,
       textOverlay: payload.textOverlay?.text.trim() ? payload.textOverlay : null,
+      imageTransform: payload.imageTransform ?? null,
       expiresAt,
     });
 
@@ -248,6 +249,7 @@ export class StoryService {
       textContent: story.textContent ?? null,
       textBackground: story.textBackground ?? null,
       textOverlay: story.textOverlay ?? null,
+      imageTransform: story.imageTransform ?? null,
       audience: story.audience,
       ...interaction,
       isOwner: (author?.id ?? story.userId.toString()) === viewer.id,

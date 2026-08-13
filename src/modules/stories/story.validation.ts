@@ -12,6 +12,16 @@ const optionalText = (label: string, maxLength: number) =>
     .nullable()
     .transform((value) => value || null);
 
+// Shared bounds for freeform Story canvas objects (image + text). -0.6..1.6
+// (not 0..1) intentionally allows an object's center to sit partially
+// off-canvas for creative framing — see lib/storyTransform.ts on the
+// client for the matching POSITION_BOUND_MIN/MAX and the rationale.
+const CANVAS_POSITION_MIN = -0.6;
+const CANVAS_POSITION_MAX = 1.6;
+const ROTATION_MIN = -180;
+const ROTATION_MAX = 180;
+const rotationSchema = z.number().min(ROTATION_MIN).max(ROTATION_MAX).optional();
+
 export const storyValidation = {
   storyId: z.object({ params: z.object({ id: z.string().regex(/^[a-f\d]{24}$/i, "Invalid story id") }) }),
   userId: z.object({ params: z.object({ userId: z.string().regex(/^[a-f\d]{24}$/i, "Invalid user id") }) }),
@@ -82,12 +92,22 @@ export const storyValidation = {
         textOverlay: z
           .object({
             text: z.string().trim().min(1, "Overlay text is required").max(160, "Overlay text cannot exceed 160 characters"),
-            x: z.number().min(0).max(1).default(0.5),
-            y: z.number().min(0).max(1).default(0.5),
+            x: z.number().min(CANVAS_POSITION_MIN).max(CANVAS_POSITION_MAX).default(0.5),
+            y: z.number().min(CANVAS_POSITION_MIN).max(CANVAS_POSITION_MAX).default(0.5),
             scale: z.number().min(0.5).max(2).default(1),
             color: z.string().trim().regex(/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i, "Overlay color must be a hex color").default("#FFFFFF"),
             fontWeight: z.enum(["normal", "600", "700", "bold"]).default("700"),
             textAlign: z.enum(["left", "center", "right"]).default("center"),
+            rotation: rotationSchema,
+          })
+          .optional()
+          .nullable(),
+        imageTransform: z
+          .object({
+            x: z.number().min(CANVAS_POSITION_MIN).max(CANVAS_POSITION_MAX).default(0.5),
+            y: z.number().min(CANVAS_POSITION_MIN).max(CANVAS_POSITION_MAX).default(0.5),
+            scale: z.number().min(0.5).max(4).default(1),
+            rotation: rotationSchema,
           })
           .optional()
           .nullable(),

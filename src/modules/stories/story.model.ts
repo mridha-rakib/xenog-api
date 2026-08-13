@@ -68,15 +68,18 @@ const storySchema = new Schema<IStory>(
         trim: true,
         maxlength: 160,
       },
+      // -0.6..1.6 (not 0..1): text is now a freeform-draggable canvas
+      // object and may be positioned partially off-canvas, matching the
+      // image transform's POSITION_BOUND_MIN/MAX (see lib/storyTransform.ts).
       x: {
         type: Number,
-        min: 0,
-        max: 1,
+        min: -0.6,
+        max: 1.6,
       },
       y: {
         type: Number,
-        min: 0,
-        max: 1,
+        min: -0.6,
+        max: 1.6,
       },
       scale: {
         type: Number,
@@ -95,6 +98,37 @@ const storySchema = new Schema<IStory>(
       textAlign: {
         type: String,
         enum: ["left", "center", "right"],
+      },
+      rotation: {
+        type: Number,
+        min: -180,
+        max: 180,
+      },
+    },
+    // Optional — absent/null on every Story created before this feature and
+    // on any Story whose image was never touched by the editor, in which
+    // case the client falls back to the pre-existing full-bleed cover
+    // rendering unchanged.
+    imageTransform: {
+      x: {
+        type: Number,
+        min: -0.6,
+        max: 1.6,
+      },
+      y: {
+        type: Number,
+        min: -0.6,
+        max: 1.6,
+      },
+      scale: {
+        type: Number,
+        min: 0.5,
+        max: 4,
+      },
+      rotation: {
+        type: Number,
+        min: -180,
+        max: 180,
       },
     },
     audience: {

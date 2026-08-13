@@ -101,6 +101,16 @@ const envSchema = z.object({
     .optional()
     .transform((value) => value?.trim().toLowerCase() !== "false"),
 
+  // Temporarily disabled while the deployment host runs with constrained
+  // memory and cannot also run the video-transcoding worker (ffmpeg). Gates
+  // every video creation/processing entry point and video media returned in
+  // API responses; defaults to disabled and only turns on with an explicit
+  // "true". Flip to "true" (or remove) to re-enable video end to end.
+  ENABLE_VIDEO_UPLOADS: z
+    .string()
+    .optional()
+    .transform((value) => value?.trim().toLowerCase() === "true"),
+
   FIREBASE_SERVICE_ACCOUNT_PATH: z.string().optional(),
   FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),
 

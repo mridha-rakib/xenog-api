@@ -96,7 +96,18 @@ const normalizeContentType = (contentType: string): string => contentType.toLowe
 
 const redactStorageKey = (key: string): string => createHash("sha256").update(key).digest("hex").slice(0, 12);
 
+// Single choke point for every Moment video upload/creation path
+// (createUpload -> POST /moments/video-upload-url, uploadObject -> PUT
+// /moments/video-upload, and validateCreateMomentVideo -> the video branch
+// of POST /moments): video creation is temporarily disabled while the
+// deployment host runs without the transcoding worker. Set
+// ENABLE_VIDEO_UPLOADS=true (env.ts) to re-enable. Image/text/audio Moments
+// are untouched — this function is never on their path.
 const assertVideoContentType = (contentType: string): string => {
+  if (!env.ENABLE_VIDEO_UPLOADS) {
+    throw new AppError("Video posts are temporarily unavailable.", httpStatus.BAD_REQUEST);
+  }
+
   const normalized = normalizeContentType(contentType);
 
   if (!normalized.startsWith("video/")) {

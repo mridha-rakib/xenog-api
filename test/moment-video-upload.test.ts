@@ -23,6 +23,16 @@ process.env.AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY ?? "test-s
 process.env.AWS_S3_BUCKET = process.env.AWS_S3_BUCKET ?? "test-bucket";
 process.env.JWT_ACCESS_SECRET =
   process.env.JWT_ACCESS_SECRET ?? "development-access-secret-change-before-production";
+// NOTE: video creation is temporarily disabled by default (ENABLE_VIDEO_UPLOADS
+// in env.ts). This suite exercises the video pipeline's own logic and needs
+// it enabled to run — set ENABLE_VIDEO_UPLOADS=true in the environment (e.g.
+// this project's .env, or prefixed on the command line) before running this
+// file. A `process.env.ENABLE_VIDEO_UPLOADS = "true"` line here would NOT
+// work: ES module imports (including the ../src/... ones above) are
+// evaluated — and env.ts's one-time parse along with them — before any of
+// this file's own top-level statements run, regardless of textual order.
+// See video-upload-disabled.test.ts for coverage of the actual disabled
+// (default) state, which does not need this.
 
 const userId = new Types.ObjectId().toString();
 const otherUserId = new Types.ObjectId().toString();

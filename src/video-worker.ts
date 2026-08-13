@@ -119,6 +119,17 @@ const runWorkerLoop = async (
 };
 
 const startWorker = async (): Promise<void> => {
+  // Video processing is temporarily disabled while the deployment host runs
+  // without capacity for the transcoding worker. Exits immediately and
+  // cleanly, before touching Mongo, ffmpeg/ffprobe, disk, or the
+  // TranscodingJob collection in any way — this process is not required to
+  // run at all while disabled. Set ENABLE_VIDEO_UPLOADS=true (env.ts) to
+  // restore the normal startup path below.
+  if (!env.ENABLE_VIDEO_UPLOADS) {
+    logger.info("Video worker temporarily disabled (ENABLE_VIDEO_UPLOADS is not \"true\") — exiting without starting.");
+    return;
+  }
+
   const capabilities = await verifyFfmpegCapabilities();
 
   if (!capabilities.ok) {

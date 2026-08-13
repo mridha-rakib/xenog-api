@@ -1,5 +1,6 @@
 import httpStatus from "http-status";
 import { AppError } from "../../core/errors/app-error.js";
+import { env } from "../../config/env.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { EventRepository } from "../events/event.repository.js";
 import type { IEvent } from "../events/event.interface.js";
@@ -41,7 +42,21 @@ export class EventWindowService {
     private readonly storageService = new StorageService(),
   ) {}
 
+  // Hosts can no longer opt a new/updated window into "video" while video is
+  // temporarily disabled. Existing windows that already allow video keep
+  // that configuration (checked only when allowedContentTypes is actually
+  // part of this payload) — actual video posting is still blocked separately
+  // in createPost above. Set ENABLE_VIDEO_UPLOADS=true (env.ts) to re-enable.
+  private assertVideoContentTypeSelectable(allowedContentTypes?: string[]): void {
+    if (env.ENABLE_VIDEO_UPLOADS || !allowedContentTypes?.includes("video")) {
+      return;
+    }
+
+    throw new AppError("Video is temporarily unavailable for event windows.", httpStatus.BAD_REQUEST);
+  }
+
   public async createWindow(user: AuthUser, eventId: string, payload: CreateEventWindowDto): Promise<EventWindowResponse> {
+    this.assertVideoContentTypeSelectable(payload.allowedContentTypes);
     const event = await this.getEventForHost(user, eventId);
     this.validateWindowPayloadWithinEvent(event, payload.startsAt, payload.endsAt);
     this.ensureWindowEndsInFuture(payload.endsAt);
@@ -115,6 +130,8 @@ export class EventWindowService {
     }
 
     if (payload.allowedContentTypes !== undefined) {
+      this.assertVideoContentTypeSelectable(payload.allowedContentTypes);
+
       const postCount = await this.eventWindowRepository.countAcceptedPosts(windowId);
       if (postCount > 0) {
         throw new AppError("Allowed content types cannot be changed after posts exist.", httpStatus.UNPROCESSABLE_ENTITY);
@@ -180,6 +197,14 @@ export class EventWindowService {
 
     if (!window.allowedContentTypes.includes(payload.contentType)) {
       throw new AppError("This content type is not allowed in this window.", httpStatus.BAD_REQUEST);
+    }
+
+    // Event-window video posting is temporarily disabled while the
+    // deployment host runs without the transcoding worker, even for windows
+    // whose existing configuration already allows "video". Text/image/audio
+    // posts are untouched. Set ENABLE_VIDEO_UPLOADS=true (env.ts) to re-enable.
+    if (payload.contentType === "video" && !env.ENABLE_VIDEO_UPLOADS) {
+      throw new AppError("Video posts are temporarily unavailable.", httpStatus.BAD_REQUEST);
     }
 
     const attendance = await this.ticketUsageRepository.findByEventIdAndHolderUserId(eventId, user.id);
@@ -256,6 +281,14 @@ export class EventWindowService {
     const mediaItem = post.mediaItems[mediaIndex];
     if (!mediaItem?.storageKey) {
       throw new AppError("Event window media not found.", httpStatus.NOT_FOUND);
+    }
+
+    // Video is temporarily disabled — never stream/serve a video window-post
+    // media object, even an existing one, through this endpoint. Reliable
+    // here (unlike the generic /storage endpoint) because the media item's
+    // type is already known from the post document, before any object lookup.
+    if (mediaItem.type === "video" && !env.ENABLE_VIDEO_UPLOADS) {
+      throw new AppError("Video posts are temporarily unavailable.", httpStatus.BAD_REQUEST);
     }
 
     return {

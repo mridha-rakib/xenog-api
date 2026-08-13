@@ -20,6 +20,17 @@ import {
 } from "./helpers/transcoding-test-db.js";
 
 process.env.NODE_ENV = "test";
+// NOTE: video creation/processing is temporarily disabled by default
+// (ENABLE_VIDEO_UPLOADS in env.ts). This suite exercises the retry
+// pipeline's own logic and needs it enabled to run — set
+// ENABLE_VIDEO_UPLOADS=true in the environment (e.g. this project's .env,
+// or prefixed on the command line) before running this file. A
+// `process.env.ENABLE_VIDEO_UPLOADS = "true"` line here would NOT work: ES
+// module imports (including the ../src/... ones above) are evaluated — and
+// env.ts's one-time parse along with them — before any of this file's own
+// top-level statements run, regardless of textual order. See
+// video-upload-disabled.test.ts for coverage of the actual disabled
+// (default) state, which does not need this.
 process.env.AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID ?? "test-access-key";
 process.env.AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY ?? "test-secret-key";
 process.env.AWS_S3_BUCKET = process.env.AWS_S3_BUCKET ?? "test-bucket";

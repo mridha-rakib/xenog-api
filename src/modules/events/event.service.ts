@@ -516,6 +516,14 @@ export class EventService {
       throw new AppError("Event media not found.", httpStatus.NOT_FOUND);
     }
 
+    // Video is temporarily disabled — never stream/serve a video event-media
+    // object, even an existing one, through this endpoint. Reliable here
+    // (unlike the generic /storage endpoint) because the media item's type
+    // is already known from the Event document, before any object lookup.
+    if (media.type === "video" && !env.ENABLE_VIDEO_UPLOADS) {
+      throw new AppError("Video event media is temporarily unavailable.", httpStatus.BAD_REQUEST);
+    }
+
     return {
       key: media.storageKey,
       contentType: media.contentType,
@@ -3115,6 +3123,13 @@ export class EventService {
     }
 
     if (mediaInput.type === "video") {
+      // Event video media is temporarily disabled while the deployment host
+      // runs without the transcoding worker. Image event media is untouched.
+      // Set ENABLE_VIDEO_UPLOADS=true (env.ts) to re-enable.
+      if (!env.ENABLE_VIDEO_UPLOADS) {
+        throw new AppError("Video event media is temporarily unavailable.", httpStatus.BAD_REQUEST);
+      }
+
       const durationSeconds = mediaInput.durationSeconds;
       if (durationSeconds == null || durationSeconds > MAX_EVENT_MEDIA_VIDEO_DURATION_SECONDS) {
         throw new AppError("Video duration cannot exceed 10 minutes.", httpStatus.BAD_REQUEST);

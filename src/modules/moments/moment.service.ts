@@ -746,6 +746,10 @@ export class MomentService {
    * eligible one is retried so this stays correct if that ever changes.
    */
   public async retryMomentVideoProcessing(momentId: string, user: AuthUser): Promise<MomentResponse> {
+    if (!env.ENABLE_VIDEO_UPLOADS) {
+      throw new AppError("Video processing is temporarily unavailable.", httpStatus.BAD_REQUEST);
+    }
+
     const moment = await this.momentRepository.findById(momentId);
 
     if (!moment) {
@@ -1174,6 +1178,18 @@ export class MomentService {
     const plainMediaItem = typeof (mediaItem as unknown as { toObject?: () => MomentMediaItem }).toObject === "function"
       ? (mediaItem as unknown as { toObject: () => MomentMediaItem }).toObject()
       : mediaItem;
+
+    if (plainMediaItem.type === "video" && !env.ENABLE_VIDEO_UPLOADS) {
+      // Video is temporarily disabled — never resolve/return a playable URL
+      // for video media, even for existing content. The media item itself
+      // (type, processingStatus, engagement counts on the parent Moment) is
+      // kept unchanged so mixed-media Moments and media indices are
+      // unaffected; only the playable reference is redacted. The mobile
+      // client already drops media items with no url from what it renders
+      // (lib/momentPostMapper.ts), so this also removes video tiles from
+      // the feed for existing content without any array-shape risk.
+      return { ...plainMediaItem, url: null };
+    }
 
     if (plainMediaItem.url || !plainMediaItem.storageKey) {
       return plainMediaItem;

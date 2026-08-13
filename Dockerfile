@@ -17,7 +17,13 @@ ENV PORT=5000
 COPY package*.json ./
 RUN npm ci --no-audit --no-fund --omit=dev
 COPY --from=builder --chown=node:node /app/dist ./dist
-RUN apk add --no-cache ffmpeg
+# ffmpeg is only invoked by src/video-worker.ts (never by src/server.ts), and
+# that worker now exits immediately without starting while video is
+# temporarily disabled (ENABLE_VIDEO_UPLOADS is not "true" — see
+# src/config/env.ts / src/video-worker.ts). Commented out rather than
+# removed: re-enabling video requires restoring this line and rebuilding the
+# image, in addition to setting ENABLE_VIDEO_UPLOADS=true.
+# RUN apk add --no-cache ffmpeg
 RUN mkdir -p /app/tmp/transcoding && chown -R node:node /app/tmp
 USER node
 EXPOSE 5000

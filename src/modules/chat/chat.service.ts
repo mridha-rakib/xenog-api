@@ -1,5 +1,6 @@
 import httpStatus from "http-status";
 import { AppError } from "../../core/errors/app-error.js";
+import { env } from "../../config/env.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { StorageService } from "../storage/storage.service.js";
 import type { IUser } from "../user/user.interface.js";
@@ -292,6 +293,13 @@ export class ChatService {
       return null;
     }
 
+    // Video is temporarily disabled — never resolve/return a playable URL
+    // for a video attachment, even an existing one. The attachment record
+    // itself is untouched; only the playable reference is withheld.
+    if (attachment.type === "video" && !env.ENABLE_VIDEO_UPLOADS) {
+      return attachment;
+    }
+
     if (attachment.type === "image" || attachment.type === "video" || attachment.type === "audio") {
       try {
         const download = await this.storageService.createDownloadUrl(attachment.key);
@@ -355,6 +363,14 @@ export class ChatService {
     userId: string,
     attachment: ChatFileAttachment,
   ): Promise<ChatFileAttachment> {
+    // Video chat attachments are temporarily disabled server-side too
+    // (defense-in-depth — the mobile client already blocks video attachment
+    // creation at its own single choke point). Text/image/audio messages are
+    // untouched. Set ENABLE_VIDEO_UPLOADS=true (env.ts) to re-enable.
+    if (attachment.type === "video" && !env.ENABLE_VIDEO_UPLOADS) {
+      throw new AppError("Video attachments are temporarily unavailable.", httpStatus.BAD_REQUEST);
+    }
+
     const key = attachment.key.trim();
     const mimeType = attachment.mimeType.trim().toLowerCase();
     const maxSize = this.getMaxFileSize(attachment.type);

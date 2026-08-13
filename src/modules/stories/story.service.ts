@@ -1,5 +1,6 @@
 import httpStatus from "http-status";
 import type { AuthUser } from "../auth/auth.interface.js";
+import { env } from "../../config/env.js";
 import { StorageService } from "../storage/storage.service.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
 import { AppError } from "../../core/errors/app-error.js";
@@ -27,6 +28,13 @@ export class StoryService {
 
   public async createStory(payload: CreateStoryDto, user: AuthUser): Promise<StoryResponse> {
     const mediaType = payload.mediaType ?? "video";
+
+    // Video Story creation is temporarily disabled while the deployment host
+    // runs without the transcoding worker. Image and text Stories are
+    // untouched. Set ENABLE_VIDEO_UPLOADS=true (env.ts) to re-enable.
+    if (mediaType === "video" && !env.ENABLE_VIDEO_UPLOADS) {
+      throw new AppError("Video stories are temporarily unavailable", httpStatus.BAD_REQUEST);
+    }
 
     if (payload.durationSeconds > MAX_STORY_DURATION_SECONDS) {
       throw new AppError("Stories can be up to 15 seconds long", httpStatus.BAD_REQUEST);
@@ -66,36 +74,45 @@ export class StoryService {
     return this.toResponse(story, user);
   }
 
+  // Video is temporarily disabled — video Stories are excluded from every
+  // list/feed response (existing video Stories included) so no playable
+  // video reaches a normal product surface. Image/text Stories are
+  // untouched, and the underlying records are never modified. Set
+  // ENABLE_VIDEO_UPLOADS=true (env.ts) to re-enable.
+  private filterVisibleStories(stories: IStory[]): IStory[] {
+    return env.ENABLE_VIDEO_UPLOADS ? stories : stories.filter((story) => story.mediaType !== "video");
+  }
+
   public async listFeedStories(user: AuthUser): Promise<StoryResponse[]> {
     const [followingIds, friendIds] = await Promise.all([
       this.userFollowRepository.findFollowingIds(user.id),
       this.userFollowRepository.findMutualFriendIds(user.id),
     ]);
     const visibleUserIds = [...new Set([user.id, ...followingIds, ...friendIds])];
-    const stories = await this.storyRepository.findActiveByViewerNetwork(visibleUserIds);
+    const stories = this.filterVisibleStories(await this.storyRepository.findActiveByViewerNetwork(visibleUserIds));
 
     return Promise.all(stories.map((story) => this.toResponse(story, user)));
   }
 
   public async listMyStories(user: AuthUser): Promise<StoryResponse[]> {
-    const stories = await this.storyRepository.findActiveByUserId(user.id);
+    const stories = this.filterVisibleStories(await this.storyRepository.findActiveByUserId(user.id));
 
     return Promise.all(stories.map((story) => this.toResponse(story, user)));
   }
 
   public async listUserStories(userId: string, viewer: AuthUser): Promise<StoryResponse[]> {
-    const stories = await this.storyRepository.findActiveByUserId(userId);
+    const stories = this.filterVisibleStories(await this.storyRepository.findActiveByUserId(userId));
     return Promise.all(stories.map((story) => this.toResponse(story, viewer)));
   }
 
   public async listDiscoverStories(user: AuthUser): Promise<StoryResponse[]> {
-    const stories = await this.storyRepository.findAllActive();
+    const stories = this.filterVisibleStories(await this.storyRepository.findAllActive());
     return Promise.all(stories.map((story) => this.toResponse(story, user)));
   }
 
   public async listFriendStories(user: AuthUser): Promise<StoryResponse[]> {
     const friendIds = await this.userFollowRepository.findMutualFriendIds(user.id);
-    const stories = await this.storyRepository.findActiveByViewerNetwork(friendIds);
+    const stories = this.filterVisibleStories(await this.storyRepository.findActiveByViewerNetwork(friendIds));
     return Promise.all(stories.map((story) => this.toResponse(story, user)));
   }
 

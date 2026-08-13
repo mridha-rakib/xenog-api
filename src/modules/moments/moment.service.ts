@@ -1181,14 +1181,17 @@ export class MomentService {
 
     if (plainMediaItem.type === "video" && !env.ENABLE_VIDEO_UPLOADS) {
       // Video is temporarily disabled — never resolve/return a playable URL
-      // for video media, even for existing content. The media item itself
-      // (type, processingStatus, engagement counts on the parent Moment) is
-      // kept unchanged so mixed-media Moments and media indices are
-      // unaffected; only the playable reference is redacted. The mobile
+      // *or* the raw storageKey for video media, even for existing content.
+      // storageKey is redacted too (not just url) because GET /storage/file
+      // resolves any storageKey it's given, unauthenticated, so leaving the
+      // key in the response would still let a client stream the video
+      // directly. The media item's other fields (type, processingStatus,
+      // engagement counts on the parent Moment) are kept unchanged so
+      // mixed-media Moments and media indices are unaffected. The mobile
       // client already drops media items with no url from what it renders
       // (lib/momentPostMapper.ts), so this also removes video tiles from
       // the feed for existing content without any array-shape risk.
-      return { ...plainMediaItem, url: null };
+      return { ...plainMediaItem, url: null, storageKey: null };
     }
 
     if (plainMediaItem.url || !plainMediaItem.storageKey) {

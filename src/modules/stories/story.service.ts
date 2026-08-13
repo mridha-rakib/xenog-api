@@ -211,9 +211,18 @@ export class StoryService {
     return { momentId: moment._id.toString() };
   }
 
+  // Single choke point for every by-ID Story read (detail, view, reaction,
+  // comments, share-to-feed). While video is disabled, a video Story is
+  // treated as not-found here too — same semantics as an expired Story —
+  // so no read/detail path can reach a video Story's storageKey/mediaUrl
+  // even if the caller already knows its id. Set ENABLE_VIDEO_UPLOADS=true
+  // (env.ts) to re-enable. deleteStory intentionally does not go through
+  // this method: owners may still delete their own video Stories.
   private async getActiveStory(id: string): Promise<IStory> {
     const story = await this.storyRepository.findActiveById(id);
-    if (!story) throw new AppError("Story not found or expired", httpStatus.NOT_FOUND);
+    if (!story || (story.mediaType === "video" && !env.ENABLE_VIDEO_UPLOADS)) {
+      throw new AppError("Story not found or expired", httpStatus.NOT_FOUND);
+    }
     return story;
   }
 

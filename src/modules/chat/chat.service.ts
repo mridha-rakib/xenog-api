@@ -294,10 +294,14 @@ export class ChatService {
     }
 
     // Video is temporarily disabled — never resolve/return a playable URL
-    // for a video attachment, even an existing one. The attachment record
-    // itself is untouched; only the playable reference is withheld.
+    // *or* the raw storage key for a video attachment, even an existing
+    // one. `key` is redacted (not just left without a `url`) because
+    // GET /storage/file resolves any key it's given, unauthenticated, so
+    // leaving it in the response would still let a client stream the video
+    // directly. Non-video attachment fields (fileName, size, dimensions,
+    // etc.) are left untouched.
     if (attachment.type === "video" && !env.ENABLE_VIDEO_UPLOADS) {
-      return attachment;
+      return { ...attachment, key: "", url: null };
     }
 
     if (attachment.type === "image" || attachment.type === "video" || attachment.type === "audio") {

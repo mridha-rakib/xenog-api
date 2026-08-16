@@ -54,6 +54,18 @@ export class EventWindowController {
     });
   };
 
+  public listParticipatedEvents = async (req: Request, res: Response): Promise<void> => {
+    const result = await this.eventWindowService.listParticipatedEvents(
+      req.authUser as AuthUser,
+      req.query as unknown as { limit: number },
+    );
+
+    ApiResponse.success(res, {
+      message: "Participated event windows retrieved",
+      data: result,
+    });
+  };
+
   public updateWindow = async (req: Request, res: Response): Promise<void> => {
     const window = await this.eventWindowService.updateWindow(
       req.authUser as AuthUser,

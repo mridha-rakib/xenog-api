@@ -97,6 +97,9 @@ const eventForPrivacy = (
   ...overrides,
 });
 
+// postingEligibility/participantPostVisibility default to the legacy
+// behavior here to mirror what Mongoose's schema `default` produces when
+// hydrating a real pre-migration document that never stored these fields.
 const createWindowDoc = (overrides = {}) => ({
   _id: windowId,
   eventId,
@@ -109,6 +112,8 @@ const createWindowDoc = (overrides = {}) => ({
   maxPosts: 2,
   acceptedPostCount: 0,
   status: "scheduled",
+  postingEligibility: "checked_in_attendees",
+  participantPostVisibility: "end_of_event",
   cancelledAt: null,
   createdAt: now,
   updatedAt: now,
@@ -121,6 +126,7 @@ const createPostDoc = (overrides = {}) => ({
   windowId,
   userId: attendeeId,
   ticketUsageId: usageId,
+  ticketEntitlement: null,
   contentType: "text",
   text: "Checked in",
   mediaItems: [],
@@ -152,6 +158,7 @@ const createService = async (overrides: {
   mediaPost?: unknown;
   storageMetadata?: unknown;
   storageError?: unknown;
+  ticketEntitlement?: unknown;
 } = {}) => {
   const { EventWindowService } = await import("../src/modules/event-windows/event-window.service.js");
   const hasOverride = (key: keyof typeof overrides) => Object.prototype.hasOwnProperty.call(overrides, key);
@@ -164,10 +171,19 @@ const createService = async (overrides: {
       endsAt: payload.endsAt,
       allowedContentTypes: payload.allowedContentTypes,
       maxPosts: payload.maxPosts,
+      postingEligibility: payload.postingEligibility,
+      participantPostVisibility: payload.participantPostVisibility,
     }),
     findByEventId: async () => overrides.windows ?? [window],
     findConflictingForEventSchedule: async () => [],
-    findByIdForEvent: async () => window,
+    // Realistically scoped by requested windowId, unlike a constant stub —
+    // several tests exercise a second, distinct window to prove cross-window
+    // isolation (see §"cross-window" tests below).
+    findByIdForEvent: async (_eventId: string, requestedWindowId: string) => {
+      const pool = ((overrides.windows as { _id: Types.ObjectId }[] | undefined) ?? [window])
+        .filter((candidate): candidate is { _id: Types.ObjectId } => Boolean(candidate));
+      return pool.find((candidate) => candidate._id.toString() === requestedWindowId) ?? null;
+    },
     updateByIdForEvent: async (_eventId: string, _windowId: string, payload: Record<string, unknown>) => (
       hasOverride("updateResult")
         ? overrides.updateResult
@@ -225,6 +241,11 @@ const createService = async (overrides: {
           }
     ),
   };
+  const ticketEntitlementService = {
+    findValidEntitlementForUser: async () => (
+      hasOverride("ticketEntitlement") ? overrides.ticketEntitlement : null
+    ),
+  };
   const storageService = {
     getObjectMetadata: async () => {
       if (hasOverride("storageError")) {
@@ -239,6 +260,7 @@ const createService = async (overrides: {
     eventWindowRepository,
     eventRepository,
     ticketUsageRepository,
+    ticketEntitlementService,
     storageService,
   );
 };
@@ -415,18 +437,17 @@ test("non-host cannot create, edit, or cancel event windows", async () => {
   await assert.rejects(() => service.cancelWindow(attendee, eventId.toString(), windowId.toString()), { statusCode: 403 });
 });
 
-test("window outside event time is rejected", async () => {
+test("window starting before the event starts is now allowed (pre-event window)", async () => {
   const service = await createService();
 
-  await assert.rejects(
-    () => service.createWindow(host, eventId.toString(), {
-      startsAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
-      endsAt: new Date(Date.now() + 10 * 60 * 1000),
-      allowedContentTypes: ["text"],
-      maxPosts: 1,
-    }),
-    { statusCode: 400 },
-  );
+  const window = await service.createWindow(host, eventId.toString(), {
+    startsAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+    endsAt: new Date(Date.now() + 10 * 60 * 1000),
+    allowedContentTypes: ["text"],
+    maxPosts: 1,
+  });
+
+  assert.ok(window.id);
 });
 
 test("window ending after event time is rejected", async () => {
@@ -443,21 +464,37 @@ test("window ending after event time is rejected", async () => {
   );
 });
 
-test("editing a window outside event time is rejected", async () => {
+test("window ending exactly at the event's end time is valid (boundary is inclusive)", async () => {
+  const service = await createService();
+
+  const window = await service.createWindow(host, eventId.toString(), {
+    startsAt: new Date(Date.now() + 10 * 60 * 1000),
+    endsAt: event.endAt,
+    allowedContentTypes: ["text"],
+    maxPosts: 1,
+  });
+
+  assert.ok(window.id);
+});
+
+test("editing a window's start time before the event start is now allowed", async () => {
   const scheduledService = await createService({
     window: createWindowDoc({
       startsAt: new Date(Date.now() + 10 * 60 * 1000),
       endsAt: new Date(Date.now() + 20 * 60 * 1000),
     }),
   });
+
+  const window = await scheduledService.updateWindow(host, eventId.toString(), windowId.toString(), {
+    startsAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
+  });
+
+  assert.ok(window.id);
+});
+
+test("editing a window's end time past the event's end is still rejected", async () => {
   const openService = await createService();
 
-  await assert.rejects(
-    () => scheduledService.updateWindow(host, eventId.toString(), windowId.toString(), {
-      startsAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
-    }),
-    { statusCode: 400 },
-  );
   await assert.rejects(
     () => openService.updateWindow(host, eventId.toString(), windowId.toString(), {
       endsAt: new Date(Date.now() + 2 * 60 * 60 * 1000),
@@ -554,17 +591,64 @@ test("posting after successful ticket scan is accepted", async () => {
   assert.equal(post.text, "Checked in");
 });
 
-test("published event windows are visible but not postable", async () => {
+test("published (not-yet-live) event windows accept eligible posts before the event starts", async () => {
   const service = await createService({
     event: { ...event, status: "published", startedAt: null },
   });
   const [window] = await service.listWindows(attendee, eventId.toString());
 
-  assert.equal(window.canPost, false);
+  assert.equal(window.canPost, true);
+
+  const post = await service.createPost(attendee, eventId.toString(), windowId.toString(), {
+    contentType: "text",
+    text: "Early bird",
+    mediaItems: [],
+  });
+
+  assert.equal(post.windowId, windowId.toString());
+});
+
+test("draft events are invisible to attendees, so a window on a draft event can't be posted to either", async () => {
+  const service = await createService({
+    event: { ...event, status: "draft" },
+  });
+
+  // Draft events aren't visible to non-owners at all — this 404s in
+  // getAccessibleEvent before canEventAcceptWindowPosts is ever consulted.
   await assert.rejects(
     () => service.createPost(attendee, eventId.toString(), windowId.toString(), {
       contentType: "text",
       text: "Too early",
+      mediaItems: [],
+    }),
+    { statusCode: 404 },
+  );
+});
+
+test("cancelled events are invisible to attendees, so a window on a cancelled event can't be posted to either", async () => {
+  const service = await createService({
+    event: { ...event, status: "cancelled" },
+  });
+
+  await assert.rejects(
+    () => service.createPost(attendee, eventId.toString(), windowId.toString(), {
+      contentType: "text",
+      text: "Event was cancelled",
+      mediaItems: [],
+    }),
+    { statusCode: 404 },
+  );
+});
+
+test("completed events are visible but never accept new window posts", async () => {
+  const service = await createService({
+    event: { ...event, status: "completed", completedAt: now },
+  });
+
+  await assert.rejects(
+    () => service.createPost(attendee, eventId.toString(), windowId.toString(), {
+      contentType: "text",
+      text: "Too late",
       mediaItems: [],
     }),
     { statusCode: 403 },
@@ -865,7 +949,7 @@ test("completed event window listing only includes windows the attendee particip
   assert.equal(windows[0]?.canViewPosts, true);
 });
 
-test("attendee cannot view a completed window they did not participate in", async () => {
+test("requesting a window id that doesn't exist on the event 404s rather than silently denying", async () => {
   const service = await createService({
     event: { ...event, status: "completed", completedAt: now },
     existingPostsByWindow: {
@@ -875,11 +959,11 @@ test("attendee cannot view a completed window they did not participate in", asyn
 
   await assert.rejects(
     () => service.listPosts(attendee, eventId.toString(), otherWindowId.toString(), { limit: 20 }),
-    { statusCode: 403 },
+    { statusCode: 404 },
   );
 });
 
-test("ticket owner without check-in cannot view or post in event windows", async () => {
+test("checked-in-attendees mode still blocks posting for a ticket owner who never checked in, but an already-accepted post can still be viewed", async () => {
   const service = await createService({
     event: { ...event, status: "completed", completedAt: now },
     attendance: null,
@@ -894,10 +978,12 @@ test("ticket owner without check-in cannot view or post in event windows", async
     }),
     { statusCode: 403 },
   );
-  await assert.rejects(
-    () => service.listPosts(attendee, eventId.toString(), windowId.toString(), { limit: 20 }),
-    { statusCode: 403 },
-  );
+
+  // The accepted post itself is sufficient participation proof to view —
+  // check-in state is not re-checked at view time (see
+  // EventWindowService#ensureCanViewWindowPosts).
+  const result = await service.listPosts(attendee, eventId.toString(), windowId.toString(), { limit: 20 });
+  assert.equal(result.posts.length, 1);
 });
 
 test("host and admin can view window posts for moderation", async () => {
@@ -1273,4 +1359,337 @@ test("existing event moments and event interaction stats remain unaffected", asy
   assert.equal(eventResponse.commentsCount, 5);
   assert.equal(eventResponse.sharesCount, 6);
   assert.equal(eventResponse.isLiked, true);
+});
+
+// ============================================================
+// postingEligibility / participantPostVisibility
+// ============================================================
+
+const sampleEntitlement = {
+  orderId: new Types.ObjectId().toString(),
+  ticketId: "ticket-1",
+  ticketIndex: 0,
+  source: "owned" as const,
+};
+
+const sampleSharedEntitlement = {
+  ...sampleEntitlement,
+  source: "shared" as const,
+};
+
+test("legacy window with no stored policy fields still behaves exactly like check-in-required + end-of-event (backward compatibility)", async () => {
+  // Simulates what Mongoose's schema `default` produces when hydrating a
+  // document saved before these fields existed: the fields are present with
+  // the legacy default values, not literally undefined.
+  const legacyWindow = createWindowDoc({
+    postingEligibility: "checked_in_attendees",
+    participantPostVisibility: "end_of_event",
+  });
+
+  const noCheckIn = await createService({ window: legacyWindow, attendance: null });
+  await assert.rejects(
+    () => noCheckIn.createPost(attendee, eventId.toString(), windowId.toString(), {
+      contentType: "text",
+      text: "no check-in",
+      mediaItems: [],
+    }),
+    { statusCode: 403 },
+  );
+
+  const checkedIn = await createService({ window: legacyWindow });
+  const post = await checkedIn.createPost(attendee, eventId.toString(), windowId.toString(), {
+    contentType: "text",
+    text: "checked in",
+    mediaItems: [],
+  });
+  assert.ok(post.id);
+
+  const notCompleted = await createService({
+    window: legacyWindow,
+    existingPost: createPostDoc(),
+  });
+  await assert.rejects(
+    () => notCompleted.listPosts(attendee, eventId.toString(), windowId.toString(), { limit: 20 }),
+    { statusCode: 403 },
+  );
+
+  const completed = await createService({
+    window: legacyWindow,
+    event: { ...event, status: "completed", completedAt: now },
+    existingPost: createPostDoc(),
+  });
+  const result = await completed.listPosts(attendee, eventId.toString(), windowId.toString(), { limit: 20 });
+  assert.equal(result.posts.length, 1);
+});
+
+test("ticket_holders window: a user with a valid current ticket can post without checking in", async () => {
+  const service = await createService({
+    window: createWindowDoc({ postingEligibility: "ticket_holders" }),
+    attendance: null,
+    ticketEntitlement: sampleEntitlement,
+  });
+
+  const post = await service.createPost(attendee, eventId.toString(), windowId.toString(), {
+    contentType: "text",
+    text: "I have a ticket",
+    mediaItems: [],
+  });
+
+  assert.equal(post.userId, attendeeId.toString());
+});
+
+test("ticket_holders window: a user with no valid ticket entitlement cannot post", async () => {
+  const service = await createService({
+    window: createWindowDoc({ postingEligibility: "ticket_holders" }),
+    attendance: null,
+    ticketEntitlement: null,
+  });
+
+  await assert.rejects(
+    () => service.createPost(attendee, eventId.toString(), windowId.toString(), {
+      contentType: "text",
+      text: "I have no ticket",
+      mediaItems: [],
+    }),
+    { statusCode: 403 },
+  );
+});
+
+// Ticket-sharing mandatory cases from the product spec: User A shares a
+// ticket to User B. Whether User B counts as the valid holder is resolved by
+// TicketEntitlementService (tested directly in ticket-entitlement.test.ts);
+// here we only prove EventWindowService wires that result into posting
+// correctly for both eligibility modes.
+test("Case A — shared-ticket recipient can post in a ticket_holders window without checking in", async () => {
+  const service = await createService({
+    window: createWindowDoc({ postingEligibility: "ticket_holders" }),
+    attendance: null,
+    ticketEntitlement: sampleSharedEntitlement,
+  });
+
+  const post = await service.createPost(attendee, eventId.toString(), windowId.toString(), {
+    contentType: "text",
+    text: "shared ticket holder",
+    mediaItems: [],
+  });
+
+  assert.equal(post.userId, attendeeId.toString());
+});
+
+test("Case B — shared-ticket recipient cannot post in a checked_in_attendees window before checking in", async () => {
+  const service = await createService({
+    window: createWindowDoc({ postingEligibility: "checked_in_attendees" }),
+    attendance: null,
+    ticketEntitlement: sampleSharedEntitlement,
+  });
+
+  await assert.rejects(
+    () => service.createPost(attendee, eventId.toString(), windowId.toString(), {
+      contentType: "text",
+      text: "shared but not checked in",
+      mediaItems: [],
+    }),
+    { statusCode: 403 },
+  );
+});
+
+test("Case C — shared-ticket recipient can post in a checked_in_attendees window once actually checked in", async () => {
+  const service = await createService({
+    window: createWindowDoc({ postingEligibility: "checked_in_attendees" }),
+    attendance: { _id: usageId, eventId: eventId.toString(), holderUserId: attendeeId, usedAt: now },
+  });
+
+  const post = await service.createPost(attendee, eventId.toString(), windowId.toString(), {
+    contentType: "text",
+    text: "checked in via shared ticket",
+    mediaItems: [],
+  });
+
+  assert.equal(post.userId, attendeeId.toString());
+});
+
+test("pre-event posting: a ticket_holders window that opens before the event starts accepts posts once the event is published", async () => {
+  const service = await createService({
+    event: { ...event, status: "published", scheduledAt: new Date(Date.now() + 60 * 60 * 1000) },
+    window: createWindowDoc({
+      postingEligibility: "ticket_holders",
+      startsAt: new Date(Date.now() - 5 * 60 * 1000),
+      endsAt: new Date(Date.now() + 30 * 60 * 1000),
+    }),
+    attendance: null,
+    ticketEntitlement: sampleEntitlement,
+  });
+
+  const post = await service.createPost(attendee, eventId.toString(), windowId.toString(), {
+    contentType: "text",
+    text: "posting before doors open",
+    mediaItems: [],
+  });
+
+  assert.ok(post.id);
+});
+
+test("pre-event posting: checked_in_attendees mode still requires an actual check-in even before the event starts", async () => {
+  const service = await createService({
+    event: { ...event, status: "published", scheduledAt: new Date(Date.now() + 60 * 60 * 1000) },
+    window: createWindowDoc({
+      postingEligibility: "checked_in_attendees",
+      startsAt: new Date(Date.now() - 5 * 60 * 1000),
+      endsAt: new Date(Date.now() + 30 * 60 * 1000),
+    }),
+    attendance: null,
+  });
+
+  await assert.rejects(
+    () => service.createPost(attendee, eventId.toString(), windowId.toString(), {
+      contentType: "text",
+      text: "not checked in yet",
+      mediaItems: [],
+    }),
+    { statusCode: 403 },
+  );
+});
+
+test("instant visibility: a participant can view the window's posts immediately, even while the window is still open and the event hasn't completed", async () => {
+  const service = await createService({
+    window: createWindowDoc({ participantPostVisibility: "instant" }),
+    event: { ...event, status: "live" },
+    existingPost: createPostDoc(),
+    acceptedPosts: [
+      createPostDoc({ text: "First" }),
+      createPostDoc({ userId: otherAttendeeId, text: "Second" }),
+    ],
+  });
+
+  const result = await service.listPosts(attendee, eventId.toString(), windowId.toString(), { limit: 20 });
+  assert.deepEqual(result.posts.map((post) => post.text), ["First", "Second"]);
+});
+
+test("end-of-event visibility: a participant is locked out until the event completes, even with an accepted post", async () => {
+  const stillLive = await createService({
+    window: createWindowDoc({ participantPostVisibility: "end_of_event" }),
+    event: { ...event, status: "live" },
+    existingPost: createPostDoc(),
+  });
+
+  await assert.rejects(
+    () => stillLive.listPosts(attendee, eventId.toString(), windowId.toString(), { limit: 20 }),
+    { statusCode: 403 },
+  );
+
+  const completed = await createService({
+    window: createWindowDoc({ participantPostVisibility: "end_of_event" }),
+    event: { ...event, status: "completed", completedAt: now },
+    existingPost: createPostDoc(),
+  });
+  const result = await completed.listPosts(attendee, eventId.toString(), windowId.toString(), { limit: 20 });
+  assert.ok(result.posts.length >= 0);
+});
+
+test("cross-window: participating in window A never grants gallery access to window B, even under instant visibility", async () => {
+  const windowA = createWindowDoc({ _id: windowId, participantPostVisibility: "instant" });
+  const windowB = createWindowDoc({ _id: otherWindowId, participantPostVisibility: "instant" });
+  const service = await createService({
+    windows: [windowA, windowB],
+    existingPostsByWindow: {
+      [windowId.toString()]: createPostDoc({ windowId }),
+    },
+  });
+
+  const resultA = await service.listPosts(attendee, eventId.toString(), windowId.toString(), { limit: 20 });
+  assert.ok(resultA.posts.length >= 0);
+
+  await assert.rejects(
+    () => service.listPosts(attendee, eventId.toString(), otherWindowId.toString(), { limit: 20 }),
+    { statusCode: 403 },
+  );
+});
+
+test("postingEligibility and participantPostVisibility cannot be changed after a window is created", async () => {
+  const { eventWindowValidation } = await import("../src/modules/event-windows/event-window.validation.js");
+
+  const result = eventWindowValidation.updateWindow.safeParse({
+    params: { eventId: eventId.toString(), windowId: windowId.toString() },
+    body: { postingEligibility: "ticket_holders" },
+  });
+
+  assert.equal(result.success, false);
+});
+
+test("create window rejects an unknown postingEligibility or participantPostVisibility value", async () => {
+  const { eventWindowValidation } = await import("../src/modules/event-windows/event-window.validation.js");
+  const basePayload = {
+    startsAt: new Date(Date.now() + 60 * 1000).toISOString(),
+    endsAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    allowedContentTypes: ["text"],
+    maxPosts: 5,
+  };
+
+  const badEligibility = eventWindowValidation.createWindow.safeParse({
+    params: { eventId: eventId.toString() },
+    body: { ...basePayload, postingEligibility: "everyone" },
+  });
+  assert.equal(badEligibility.success, false);
+
+  const badVisibility = eventWindowValidation.createWindow.safeParse({
+    params: { eventId: eventId.toString() },
+    body: { ...basePayload, participantPostVisibility: "always" },
+  });
+  assert.equal(badVisibility.success, false);
+
+  const defaulted = eventWindowValidation.createWindow.safeParse({
+    params: { eventId: eventId.toString() },
+    body: basePayload,
+  });
+  assert.equal(defaulted.success, true);
+  if (defaulted.success) {
+    assert.equal(defaulted.data.body.postingEligibility, "checked_in_attendees");
+    assert.equal(defaulted.data.body.participantPostVisibility, "end_of_event");
+  }
+});
+
+test("host and admin still cannot post as attendees under either postingEligibility mode", async () => {
+  for (const mode of ["ticket_holders", "checked_in_attendees"] as const) {
+    const service = await createService({
+      window: createWindowDoc({ postingEligibility: mode }),
+      ticketEntitlement: sampleEntitlement,
+    });
+
+    await assert.rejects(
+      () => service.createPost(host, eventId.toString(), windowId.toString(), {
+        contentType: "text",
+        text: "host trying to post",
+        mediaItems: [],
+      }),
+      { statusCode: 403 },
+    );
+    await assert.rejects(
+      () => service.createPost(admin, eventId.toString(), windowId.toString(), {
+        contentType: "text",
+        text: "admin trying to post",
+        mediaItems: [],
+      }),
+      { statusCode: 403 },
+    );
+  }
+});
+
+test("video content type is still blocked in event windows regardless of postingEligibility", async () => {
+  const service = await createService({
+    window: createWindowDoc({ postingEligibility: "ticket_holders", allowedContentTypes: ["video"] }),
+    ticketEntitlement: sampleEntitlement,
+  });
+
+  await assert.rejects(
+    () => service.createPost(attendee, eventId.toString(), windowId.toString(), {
+      contentType: "video",
+      mediaItems: [{
+        type: "video",
+        source: "gallery",
+        storageKey: `event-windows/${eventId.toString()}/${windowId.toString()}/${attendeeId.toString()}/clip.mp4`,
+        contentType: "video/mp4",
+      }],
+    }),
+    { statusCode: 400 },
+  );
 });

@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import httpStatus from "http-status";
 import { ApiResponse } from "../../core/http/api-response.js";
 import type { AuthUser } from "../auth/auth.interface.js";
+import { createLiveRoomMessageWithSideEffects } from "../realtime/live-room-events.service.js";
 import type {
   CreateLiveRoomDto,
   CreateLiveRoomMessageDto,
@@ -89,7 +90,7 @@ export class LiveRoomController {
   };
 
   public createMessage = async (req: Request, res: Response): Promise<void> => {
-    const message = await this.liveRoomService.createMessage(
+    const message = await createLiveRoomMessageWithSideEffects(
       req.authUser as AuthUser,
       req.params.id as string,
       req.body as CreateLiveRoomMessageDto,

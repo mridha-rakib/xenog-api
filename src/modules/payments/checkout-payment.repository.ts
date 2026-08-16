@@ -308,6 +308,15 @@ export class CheckoutPaymentRepository {
     }).select("lineItems userId kind paymentStatus createdAt paidAt");
   }
 
+  public async findPaidTicketOrdersForUserAndEvent(userId: string, eventId: string): Promise<ICheckoutOrder[]> {
+    return CheckoutOrderModel.find({
+      userId,
+      kind: "ticket",
+      paymentStatus: "paid",
+      "ticketPasses.eventId": eventId,
+    }).select("ticketPasses userId kind paymentStatus");
+  }
+
   public async hasUserPaidTicketForEvent(userId: string, eventId: string): Promise<boolean> {
     const order = await CheckoutOrderModel.findOne({
       userId,

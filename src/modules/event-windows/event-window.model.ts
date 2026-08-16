@@ -1,9 +1,13 @@
 import { Schema, model } from "mongoose";
-import type { EventWindowMediaItem, IEventWindow, IEventWindowPost } from "./event-window.interface.js";
+import type { EventWindowMediaItem, EventWindowPostTicketEntitlement, IEventWindow, IEventWindowPost } from "./event-window.interface.js";
 import {
+  DEFAULT_EVENT_WINDOW_PARTICIPANT_POST_VISIBILITY,
+  DEFAULT_EVENT_WINDOW_POSTING_ELIGIBILITY,
   eventWindowContentTypes,
   eventWindowMediaSources,
   eventWindowMediaTypes,
+  eventWindowParticipantPostVisibilities,
+  eventWindowPostingEligibilities,
   eventWindowPostStatuses,
   eventWindowStatuses,
   MAX_EVENT_WINDOW_POSTS,
@@ -72,6 +76,18 @@ const eventWindowSchema = new Schema<IEventWindow>(
       default: "scheduled",
       index: true,
     },
+    postingEligibility: {
+      type: String,
+      enum: eventWindowPostingEligibilities,
+      required: true,
+      default: DEFAULT_EVENT_WINDOW_POSTING_ELIGIBILITY,
+    },
+    participantPostVisibility: {
+      type: String,
+      enum: eventWindowParticipantPostVisibilities,
+      required: true,
+      default: DEFAULT_EVENT_WINDOW_PARTICIPANT_POST_VISIBILITY,
+    },
     cancelledAt: {
       type: Date,
       default: null,
@@ -127,6 +143,31 @@ const eventWindowMediaItemSchema = new Schema<EventWindowMediaItem>(
   { _id: false },
 );
 
+const eventWindowPostTicketEntitlementSchema = new Schema<EventWindowPostTicketEntitlement>(
+  {
+    orderId: {
+      type: Schema.Types.ObjectId,
+      ref: "CheckoutOrder",
+      required: true,
+    },
+    ticketId: {
+      type: String,
+      required: true,
+    },
+    ticketIndex: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
+    source: {
+      type: String,
+      enum: ["owned", "shared"],
+      required: true,
+    },
+  },
+  { _id: false },
+);
+
 const eventWindowPostSchema = new Schema<IEventWindowPost>(
   {
     eventId: {
@@ -147,11 +188,18 @@ const eventWindowPostSchema = new Schema<IEventWindowPost>(
       required: true,
       index: true,
     },
+    // Only one of ticketUsageId / ticketEntitlement is populated on a given
+    // post, depending on the window's postingEligibility at the time the
+    // post was created (see event-window.service.ts#resolvePostingAuthorization).
     ticketUsageId: {
       type: Schema.Types.ObjectId,
       ref: "TicketUsage",
-      required: true,
+      default: null,
       index: true,
+    },
+    ticketEntitlement: {
+      type: eventWindowPostTicketEntitlementSchema,
+      default: null,
     },
     contentType: {
       type: String,
@@ -185,6 +233,11 @@ const eventWindowPostSchema = new Schema<IEventWindowPost>(
 eventWindowPostSchema.index({ windowId: 1, userId: 1 }, { unique: true, partialFilterExpression: { status: "accepted" } });
 eventWindowPostSchema.index({ windowId: 1, status: 1, createdAt: 1 });
 eventWindowPostSchema.index({ eventId: 1, userId: 1, createdAt: -1 });
+// Supports the "my participated events/windows" query (EventWindowRepository
+// #findAcceptedPostsByUser) — a cross-event, user-scoped lookup that none of
+// the indexes above serve, since each has eventId or windowId leading rather
+// than userId.
+eventWindowPostSchema.index({ userId: 1, status: 1, createdAt: -1 });
 
 export const EventWindowModel = model<IEventWindow>("EventWindow", eventWindowSchema);
 export const EventWindowPostModel = model<IEventWindowPost>("EventWindowPost", eventWindowPostSchema);

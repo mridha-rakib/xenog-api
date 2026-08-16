@@ -4,6 +4,8 @@ import { env } from "../../config/env.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { EventRepository } from "../events/event.repository.js";
 import type { IEvent } from "../events/event.interface.js";
+import { TicketEntitlementService } from "../payments/ticket-entitlement.service.js";
+import type { TicketEntitlement } from "../payments/ticket-entitlement.service.js";
 import { TicketUsageRepository } from "../payments/ticket-usage.repository.js";
 import { StorageService } from "../storage/storage.service.js";
 import type {
@@ -11,6 +13,8 @@ import type {
   CreateEventWindowPostDto,
   EventWindowComputedStatus,
   EventWindowMediaItem,
+  EventWindowParticipantPostVisibility,
+  EventWindowPostingEligibility,
   EventWindowPostMediaResponse,
   EventWindowPostListResponse,
   EventWindowPostResponse,
@@ -18,10 +22,23 @@ import type {
   IEventWindow,
   IEventWindowPost,
   ListEventWindowPostsOptions,
+  ListParticipatedEventsOptions,
+  ParticipatedEventsResponse,
+  ParticipatedEventSummary,
+  ParticipatedWindowSummary,
   UpdateEventWindowDto,
 } from "./event-window.interface.js";
-import { EVENT_WINDOW_MEDIA_LIMITS_BYTES as MEDIA_LIMITS } from "./event-window.interface.js";
+import {
+  DEFAULT_EVENT_WINDOW_PARTICIPANT_POST_VISIBILITY,
+  DEFAULT_EVENT_WINDOW_POSTING_ELIGIBILITY,
+  EVENT_WINDOW_MEDIA_LIMITS_BYTES as MEDIA_LIMITS,
+} from "./event-window.interface.js";
 import { EventWindowRepository } from "./event-window.repository.js";
+
+type PostingAuthorization = {
+  ticketUsageId: string | null;
+  ticketEntitlement: TicketEntitlement | null;
+};
 
 type AuthorizedEventWindowMedia = {
   key: string;
@@ -39,6 +56,7 @@ export class EventWindowService {
     private readonly eventWindowRepository = new EventWindowRepository(),
     private readonly eventRepository = new EventRepository(),
     private readonly ticketUsageRepository = new TicketUsageRepository(),
+    private readonly ticketEntitlementService = new TicketEntitlementService(),
     private readonly storageService = new StorageService(),
   ) {}
 
@@ -65,17 +83,17 @@ export class EventWindowService {
       ...payload,
       eventId,
       hostUserId: user.id,
+      postingEligibility: payload.postingEligibility ?? DEFAULT_EVENT_WINDOW_POSTING_ELIGIBILITY,
+      participantPostVisibility: payload.participantPostVisibility ?? DEFAULT_EVENT_WINDOW_PARTICIPANT_POST_VISIBILITY,
     });
 
-    return this.toWindowResponse(window, user, false, false, event);
+    return this.toWindowResponse(window, user, false, false, false, event);
   }
 
   public async listWindows(user: AuthUser, eventId: string): Promise<EventWindowResponse[]> {
     const event = await this.getAccessibleEvent(user, eventId);
-    const [windows, attendance] = await Promise.all([
-      this.eventWindowRepository.findByEventId(eventId),
-      this.ticketUsageRepository.findByEventIdAndHolderUserId(eventId, user.id),
-    ]);
+    const windows = await this.eventWindowRepository.findByEventId(eventId);
+
     const postedWindowIds = new Set<string>();
 
     await Promise.all(windows.map(async (window) => {
@@ -85,17 +103,158 @@ export class EventWindowService {
       }
     }));
 
-    const visibleWindows = !this.canModerateEvent(user, event) && this.hasEventEnded(event)
+    const canModerate = this.canModerateEvent(user, event);
+    const visibleWindows = !canModerate && this.hasEventEnded(event)
       ? windows.filter((window) => postedWindowIds.has(window._id.toString()))
       : windows;
 
-    return visibleWindows.map((window) => this.toWindowResponse(
-      window,
-      user,
-      postedWindowIds.has(window._id.toString()),
-      Boolean(attendance),
-      event,
-    ));
+    // Eligibility checks are event-scoped, not window-scoped, so each is
+    // resolved at most once per request rather than once per window — only
+    // fetched when at least one visible window actually needs that mode.
+    const needsCheckedIn = !canModerate && visibleWindows.some((window) => this.resolvePostingEligibility(window) === "checked_in_attendees");
+    const needsTicketHolder = !canModerate && visibleWindows.some((window) => this.resolvePostingEligibility(window) === "ticket_holders");
+
+    const [attendance, ticketEntitlement] = await Promise.all([
+      needsCheckedIn ? this.ticketUsageRepository.findByEventIdAndHolderUserId(eventId, user.id) : Promise.resolve(null),
+      needsTicketHolder ? this.ticketEntitlementService.findValidEntitlementForUser(user.id, eventId) : Promise.resolve(null),
+    ]);
+
+    return visibleWindows.map((window) => {
+      const hasPosted = postedWindowIds.has(window._id.toString());
+      const isEligibleToPost = this.resolvePostingEligibility(window) === "ticket_holders"
+        ? Boolean(ticketEntitlement)
+        : Boolean(attendance);
+
+      return this.toWindowResponse(window, user, hasPosted, Boolean(attendance), isEligibleToPost, event);
+    });
+  }
+
+  // "Windows" Home tab data source: the Events (and, within each, only the
+  // specific Windows) where this user has an ACCEPTED EventWindowPost —
+  // never any other signal (ticket ownership, check-in, eligibility, event
+  // membership). Returns navigation metadata only; actual post content stays
+  // behind listPosts/getAuthorizedMedia, which independently re-verify
+  // access via ensureCanViewWindowPosts.
+  public async listParticipatedEvents(
+    user: AuthUser,
+    options: ListParticipatedEventsOptions,
+  ): Promise<ParticipatedEventsResponse> {
+    const posts = await this.eventWindowRepository.findAcceptedPostsByUser(user.id);
+
+    if (posts.length === 0) {
+      return { events: [] };
+    }
+
+    // posts are already sorted most-recent-first, so the first time a
+    // windowId/eventId is seen is its most recent participation.
+    const lastParticipatedAtByWindowId = new Map<string, Date>();
+    const windowIds: string[] = [];
+    for (const post of posts) {
+      const windowId = post.windowId.toString();
+      if (!lastParticipatedAtByWindowId.has(windowId)) {
+        lastParticipatedAtByWindowId.set(windowId, post.createdAt);
+        windowIds.push(windowId);
+      }
+    }
+
+    const windows = await this.eventWindowRepository.findByIds(windowIds);
+    const windowsByEventId = new Map<string, IEventWindow[]>();
+    for (const window of windows) {
+      const eventId = window.eventId.toString();
+      const bucket = windowsByEventId.get(eventId);
+      if (bucket) {
+        bucket.push(window);
+      } else {
+        windowsByEventId.set(eventId, [window]);
+      }
+    }
+
+    const events = await this.eventRepository.findByIds([...windowsByEventId.keys()]);
+
+    const summaries: ParticipatedEventSummary[] = [];
+    for (const event of events) {
+      if (!this.isEventVisibleForParticipationHistory(user, event)) {
+        continue;
+      }
+
+      const eventWindows = windowsByEventId.get(event._id.toString()) ?? [];
+      if (eventWindows.length === 0) {
+        continue;
+      }
+
+      const participatedWindows: ParticipatedWindowSummary[] = eventWindows
+        .map((window) => this.toParticipatedWindowSummary(window, event, lastParticipatedAtByWindowId))
+        // Chronological, matching the existing EventWindow list convention
+        // (EventWindowRepository#findByEventId sorts the same way).
+        .sort((left, right) => left.startsAt.getTime() - right.startsAt.getTime());
+
+      const lastParticipatedAt = participatedWindows.reduce(
+        (latest, window) => (window.lastParticipatedAt > latest ? window.lastParticipatedAt : latest),
+        participatedWindows[0]!.lastParticipatedAt,
+      );
+
+      summaries.push({
+        id: event._id.toString(),
+        name: event.name ?? "",
+        bannerImageKey: event.bannerImageKey ?? null,
+        bannerImageDisplay: event.bannerImageDisplay ?? null,
+        scheduledAt: event.scheduledAt ?? null,
+        endAt: event.endAt ?? null,
+        status: event.status,
+        participatedWindows,
+        lastParticipatedAt,
+      });
+    }
+
+    summaries.sort((left, right) => right.lastParticipatedAt.getTime() - left.lastParticipatedAt.getTime());
+
+    return { events: summaries.slice(0, options.limit) };
+  }
+
+  private toParticipatedWindowSummary(
+    window: IEventWindow,
+    event: IEvent,
+    lastParticipatedAtByWindowId: Map<string, Date>,
+  ): ParticipatedWindowSummary {
+    const participantPostVisibility = this.resolveParticipantPostVisibility(window);
+    const canViewPosts = participantPostVisibility === "instant" || this.hasEventEnded(event);
+
+    return {
+      id: window._id.toString(),
+      title: window.title ?? null,
+      details: window.details ?? null,
+      startsAt: window.startsAt,
+      endsAt: window.endsAt,
+      computedStatus: this.computeWindowStatus(window),
+      participantPostVisibility,
+      canViewPosts,
+      lastParticipatedAt: lastParticipatedAtByWindowId.get(window._id.toString())!,
+    };
+  }
+
+  // Mirrors getAccessibleEvent's visibility rules (draft → owner only,
+  // otherwise published/live/completed, private → membership required) but
+  // filters instead of throwing, since this list spans many events at once.
+  // A historical accepted post never overrides these rules — an event that
+  // would 404 via getAccessibleEvent is silently excluded here too.
+  private isEventVisibleForParticipationHistory(user: AuthUser, event: IEvent): boolean {
+    if (this.canModerateEvent(user, event)) {
+      return true;
+    }
+
+    if (event.status === "draft") {
+      return event.userId.toString() === user.id;
+    }
+
+    if (event.status !== "published" && event.status !== "live" && event.status !== "completed") {
+      return false;
+    }
+
+    if (event.privacy === "private" && !event.memberUserIds.some((id) => id.toString() === user.id)) {
+      return false;
+    }
+
+    return true;
   }
 
   public async updateWindow(
@@ -148,7 +307,7 @@ export class EventWindowService {
       throw new AppError("Event window not found.", httpStatus.NOT_FOUND);
     }
 
-    return this.toWindowResponse(updatedWindow, user, false, false, event);
+    return this.toWindowResponse(updatedWindow, user, false, false, false, event);
   }
 
   public async cancelWindow(user: AuthUser, eventId: string, windowId: string): Promise<EventWindowResponse> {
@@ -170,7 +329,7 @@ export class EventWindowService {
       throw new AppError("Event window not found.", httpStatus.NOT_FOUND);
     }
 
-    return this.toWindowResponse(window, user, false, false, event);
+    return this.toWindowResponse(window, user, false, false, false, event);
   }
 
   public async createPost(
@@ -207,10 +366,7 @@ export class EventWindowService {
       throw new AppError("Video posts are temporarily unavailable.", httpStatus.BAD_REQUEST);
     }
 
-    const attendance = await this.ticketUsageRepository.findByEventIdAndHolderUserId(eventId, user.id);
-    if (!attendance) {
-      throw new AppError("You must check in with a scanned ticket before posting in this window.", httpStatus.FORBIDDEN);
-    }
+    const authorization = await this.resolvePostingAuthorization(user, event, window);
 
     const existingPost = await this.eventWindowRepository.findAcceptedPostByUser(windowId, user.id);
     if (existingPost) {
@@ -223,7 +379,8 @@ export class EventWindowService {
       eventId,
       windowId,
       userId: user.id,
-      ticketUsageId: attendance._id.toString(),
+      ticketUsageId: authorization.ticketUsageId,
+      ticketEntitlement: authorization.ticketEntitlement,
       contentType: payload.contentType,
       text: payload.text ?? null,
       mediaItems: payload.mediaItems ?? [],
@@ -247,9 +404,9 @@ export class EventWindowService {
     options: ListEventWindowPostsOptions,
   ): Promise<EventWindowPostListResponse> {
     const event = await this.getAccessibleEvent(user, eventId);
-    await this.getWindowForEvent(eventId, windowId);
+    const window = await this.getWindowForEvent(eventId, windowId);
 
-    await this.ensureCanViewWindowPosts(user, event, windowId);
+    await this.ensureCanViewWindowPosts(user, event, window);
 
     const posts = await this.eventWindowRepository.listAcceptedPosts(windowId, options);
     const pagePosts = posts.slice(0, options.limit);
@@ -269,9 +426,9 @@ export class EventWindowService {
     mediaIndex: number,
   ): Promise<AuthorizedEventWindowMedia> {
     const event = await this.getAccessibleEvent(user, eventId);
-    await this.getWindowForEvent(eventId, windowId);
+    const window = await this.getWindowForEvent(eventId, windowId);
 
-    await this.ensureCanViewWindowPosts(user, event, windowId);
+    await this.ensureCanViewWindowPosts(user, event, window);
 
     const post = await this.eventWindowRepository.findAcceptedPostByIdForWindow(windowId, postId);
     if (!post) {
@@ -344,6 +501,20 @@ export class EventWindowService {
     return event;
   }
 
+  // Normalizes a persisted window's policy fields to the legacy defaults.
+  // Mongoose already applies the schema `default` when hydrating a
+  // pre-migration document that never stored these fields, so this is a
+  // defense-in-depth backstop (e.g. against a future .lean() query), not the
+  // primary mechanism — it guarantees every code path here treats a missing
+  // value exactly like a document created before these fields existed.
+  private resolvePostingEligibility(window: IEventWindow): EventWindowPostingEligibility {
+    return window.postingEligibility ?? DEFAULT_EVENT_WINDOW_POSTING_ELIGIBILITY;
+  }
+
+  private resolveParticipantPostVisibility(window: IEventWindow): EventWindowParticipantPostVisibility {
+    return window.participantPostVisibility ?? DEFAULT_EVENT_WINDOW_PARTICIPANT_POST_VISIBILITY;
+  }
+
   private async getWindowForEvent(eventId: string, windowId: string): Promise<IEventWindow> {
     const window = await this.eventWindowRepository.findByIdForEvent(eventId, windowId);
 
@@ -354,6 +525,9 @@ export class EventWindowService {
     return window;
   }
 
+  // A window may start before the event itself does (e.g. a pre-show
+  // posting window), but it may never outlast the event — endsAt is a hard
+  // ceiling at event.endAt. Only the end boundary is enforced here.
   private validateWindowPayloadWithinEvent(event: IEvent, startsAt: Date, endsAt: Date): void {
     if (!event.scheduledAt || !event.endAt) {
       throw new AppError("Event must have a start and end time before windows can be created.", httpStatus.UNPROCESSABLE_ENTITY);
@@ -363,8 +537,8 @@ export class EventWindowService {
       throw new AppError("Window end date and time must be after the start date and time.", httpStatus.BAD_REQUEST);
     }
 
-    if (startsAt < event.scheduledAt || endsAt > event.endAt) {
-      throw new AppError("Window start and end time must stay inside the event time.", httpStatus.BAD_REQUEST);
+    if (endsAt > event.endAt) {
+      throw new AppError("Window end date and time cannot be after the event ends.", httpStatus.BAD_REQUEST);
     }
   }
 
@@ -396,36 +570,53 @@ export class EventWindowService {
     return event.status === "completed";
   }
 
+  // A window's own open/closed computed status (startsAt/endsAt) is now the
+  // authoritative posting-timing gate, since a window may legitimately open
+  // before the event itself starts. This only screens out event states a
+  // window should never accept posts in, regardless of window timing.
   private canEventAcceptWindowPosts(event: IEvent): boolean {
-    if (event.status !== "live") {
-      return false;
-    }
-
-    if (!event.scheduledAt || !event.endAt) {
-      return false;
-    }
-
-    const now = Date.now();
-
-    return event.scheduledAt.getTime() <= now && event.endAt.getTime() > now;
+    return event.status === "published" || event.status === "live";
   }
 
-  private async ensureCanViewWindowPosts(user: AuthUser, event: IEvent, windowId: string): Promise<void> {
+  // Resolves what proves this user is allowed to post into this window,
+  // per the window's own postingEligibility policy. Throws if the user
+  // doesn't currently satisfy it.
+  private async resolvePostingAuthorization(user: AuthUser, event: IEvent, window: IEventWindow): Promise<PostingAuthorization> {
+    if (this.resolvePostingEligibility(window) === "ticket_holders") {
+      const entitlement = await this.ticketEntitlementService.findValidEntitlementForUser(user.id, event._id.toString());
+      if (!entitlement) {
+        throw new AppError("You need a valid ticket for this event before posting in this window.", httpStatus.FORBIDDEN);
+      }
+
+      return { ticketUsageId: null, ticketEntitlement: entitlement };
+    }
+
+    const attendance = await this.ticketUsageRepository.findByEventIdAndHolderUserId(event._id.toString(), user.id);
+    if (!attendance) {
+      throw new AppError("You must check in with a scanned ticket before posting in this window.", httpStatus.FORBIDDEN);
+    }
+
+    return { ticketUsageId: attendance._id.toString(), ticketEntitlement: null };
+  }
+
+  // Viewing is gated purely by per-window participation (an accepted post
+  // in THIS window) plus that window's participantPostVisibility policy —
+  // not by check-in or ticket state, since a user may have legitimately
+  // posted here without either (postingEligibility === "ticket_holders").
+  // The accepted post itself is the participation proof.
+  private async ensureCanViewWindowPosts(user: AuthUser, event: IEvent, window: IEventWindow): Promise<void> {
     if (this.canModerateEvent(user, event)) {
       return;
     }
 
-    const [attendance, ownPost] = await Promise.all([
-      this.ticketUsageRepository.findByEventIdAndHolderUserId(event._id.toString(), user.id),
-      this.eventWindowRepository.findAcceptedPostByUser(windowId, user.id),
-    ]);
-
-    if (!attendance) {
-      throw new AppError("You must check in with a scanned ticket before viewing this window.", httpStatus.FORBIDDEN);
-    }
+    const ownPost = await this.eventWindowRepository.findAcceptedPostByUser(window._id.toString(), user.id);
 
     if (!ownPost) {
       throw new AppError("Post in this window to view its posts.", httpStatus.FORBIDDEN);
+    }
+
+    if (this.resolveParticipantPostVisibility(window) === "instant") {
+      return;
     }
 
     if (!this.hasEventEnded(event)) {
@@ -456,13 +647,17 @@ export class EventWindowService {
     user: AuthUser,
     hasPosted = false,
     hasAttended = false,
+    isEligibleToPost = false,
     event?: IEvent,
   ): EventWindowResponse {
     const computedStatus = this.computeWindowStatus(window);
     const remainingSlots = Math.max(0, window.maxPosts - window.acceptedPostCount);
     const canModerate = user.role === "admin" || window.hostUserId.toString() === user.id;
     const eventAcceptsPosts = event !== undefined && this.canEventAcceptWindowPosts(event);
-    const canViewPosts = canModerate || (hasPosted && event !== undefined && this.hasEventEnded(event));
+    const postingEligibility = this.resolvePostingEligibility(window);
+    const participantPostVisibility = this.resolveParticipantPostVisibility(window);
+    const canViewPosts = canModerate
+      || (hasPosted && (participantPostVisibility === "instant" || (event !== undefined && this.hasEventEnded(event))));
 
     return {
       id: window._id.toString(),
@@ -477,10 +672,13 @@ export class EventWindowService {
       acceptedPostCount: window.acceptedPostCount,
       status: window.status,
       computedStatus,
+      postingEligibility,
+      participantPostVisibility,
       cancelledAt: window.cancelledAt ?? null,
       hasAttended,
       hasPosted,
-      canPost: !canModerate && eventAcceptsPosts && hasAttended && computedStatus === "open" && !hasPosted && remainingSlots > 0,
+      isEligibleToPost,
+      canPost: !canModerate && eventAcceptsPosts && isEligibleToPost && computedStatus === "open" && !hasPosted && remainingSlots > 0,
       canViewPosts,
       remainingSlots,
       createdAt: window.createdAt,

@@ -2717,24 +2717,22 @@ export class EventService {
       .map((claim) => this.toClaimResponse(claim));
   }
 
+  // A window may legitimately start before the event does, so only the
+  // event's end time can invalidate an existing window — a window ending
+  // after the event's new end time. Moving the event's start time alone
+  // never conflicts with any existing window.
   private async assertPostingWindowsFitSchedule(
     event: IEvent,
     payload: Pick<SaveEventDraftDto, "scheduledAt" | "endAt">,
   ): Promise<void> {
-    if (payload.scheduledAt === undefined && payload.endAt === undefined) {
+    if (payload.endAt === undefined) {
       return;
     }
 
-    const nextStartsAt = payload.scheduledAt !== undefined
-      ? payload.scheduledAt ?? null
-      : event.scheduledAt ?? null;
-    const nextEndsAt = payload.endAt !== undefined
-      ? payload.endAt ?? null
-      : event.endAt ?? null;
+    const nextEndsAt = payload.endAt ?? null;
 
     const conflicts = await this.eventWindowRepository.findConflictingForEventSchedule(
       event._id.toString(),
-      nextStartsAt,
       nextEndsAt,
     );
 
@@ -2743,7 +2741,7 @@ export class EventService {
     }
 
     throw new AppError(
-      "Event schedule cannot be changed while posting windows fall outside the new event time. Edit or cancel conflicting windows first.",
+      "Event schedule cannot be changed while posting windows would end after the new event end time. Edit or cancel conflicting windows first.",
       httpStatus.UNPROCESSABLE_ENTITY,
     );
   }

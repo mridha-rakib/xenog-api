@@ -14,7 +14,8 @@ import { EventRepository } from "./event.repository.js";
 
 export type EventChatAccessResult = {
   event: IEvent;
-  attendance: ITicketUsage;
+  // null when access was granted via the host bypass below, not a checked-in ticket.
+  attendance: ITicketUsage | null;
 };
 
 export class EventChatAccessService {
@@ -37,6 +38,13 @@ export class EventChatAccessService {
     }
 
     this.assertEventChatWindow(event, now);
+
+    // Host bypass: the event owner can chat once the event has started
+    // without a checked-in ticket, but is still subject to the window check
+    // above (not before start, not after end/cancellation) like anyone else.
+    if (event.userId.toString() === userId) {
+      return { event, attendance: null };
+    }
 
     const attendance = await this.ticketUsageRepository.findByEventIdAndHolderUserId(
       eventId,

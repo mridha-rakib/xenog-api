@@ -229,11 +229,9 @@ test("draft schedule update is blocked when existing windows would fall outside 
     eventWindowRepository: {
       findConflictingForEventSchedule: async (
         requestedEventId: string,
-        requestedStart: Date | null,
         requestedEnd: Date | null,
       ) => {
         assert.equal(requestedEventId, eventId.toString());
-        assert.equal(requestedStart?.toISOString(), "2026-07-15T10:30:00.000Z");
         assert.equal(requestedEnd?.toISOString(), "2026-07-15T11:00:00.000Z");
         return [{ _id: new Types.ObjectId() }];
       },

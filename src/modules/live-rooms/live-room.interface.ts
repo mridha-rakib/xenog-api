@@ -30,6 +30,7 @@ export interface ILiveRoomMessage {
   liveRoomId: Types.ObjectId;
   senderId: Types.ObjectId;
   text: string;
+  clientMessageId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -52,6 +53,7 @@ export interface ListLiveRoomMessagesQuery {
 
 export interface CreateLiveRoomMessageDto {
   text: string;
+  clientMessageId?: string | null;
 }
 
 export interface LiveRoomViewerPermissions {
@@ -85,6 +87,7 @@ export interface LiveRoomMessageResponse {
   senderName: string;
   senderAvatarUrl?: string | null;
   text: string;
+  clientMessageId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

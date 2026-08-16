@@ -51,6 +51,7 @@ export const liveRoomValidation = {
     body: z
       .object({
         text: z.string().trim().min(1, "Message is required").max(1000, "Message cannot exceed 1000 characters"),
+        clientMessageId: z.string().trim().min(1).max(120).optional(),
       })
       .strict(),
   }),

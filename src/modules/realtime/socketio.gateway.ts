@@ -10,6 +10,8 @@ import { AuthService } from "../auth/auth.service.js";
 import { chatMessageAttachmentSchema, chatMessageBodySchema } from "../chat/chat.validation.js";
 import { ChatService } from "../chat/chat.service.js";
 import { GroupService } from "../chat/group.service.js";
+import { chatMessageTypes } from "../chat/chat.interface.js";
+import { LiveRoomService } from "../live-rooms/live-room.service.js";
 import {
   createDirectMessageWithSideEffects,
   createGroupMessageWithSideEffects,
@@ -19,6 +21,7 @@ import {
   notifyGroupMessageDeleted,
   notifyGroupMessageEdited,
 } from "./chat-events.service.js";
+import { createLiveRoomMessageWithSideEffects, registerLiveRoomBroadcastTarget } from "./live-room-events.service.js";
 import { presenceService } from "./presence.service.js";
 import { notifyUserBoth, registerBroadcastTarget } from "./realtime-dual-emit.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
@@ -32,7 +35,7 @@ const objectId = z
   .regex(/^[a-f\d]{24}$/i);
 
 const chatMessageFields = {
-  messageType: z.enum(["text", "image", "video", "audio", "location", "event"]).optional(),
+  messageType: z.enum(chatMessageTypes).optional(),
   text: z.string().trim().max(2000).optional(),
   attachment: chatMessageAttachmentSchema.optional(),
 };
@@ -90,17 +93,34 @@ const groupMessageSchema = z
   .strict()
   .superRefine(validateRealtimeChatBody);
 
+const liveRoomJoinSchema = z.object({ liveRoomId: objectId }).strict();
+const liveRoomLeaveSchema = z.object({ liveRoomId: objectId }).strict();
+const liveRoomMessageSchema = z
+  .object({
+    liveRoomId: objectId,
+    text: z.string().trim().min(1).max(1000),
+    clientMessageId: z.string().trim().min(1).max(120).optional(),
+  })
+  .strict();
+
 const userRoom = (userId: string) => `user:${userId}`;
+const liveRoomRoom = (liveRoomId: string) => `live:${liveRoomId}`;
 
 /**
- * Socket.IO gateway for DM/group chat + presence + notifications.
+ * Socket.IO gateway for DM/group chat + presence + notifications + Event
+ * Chat (live rooms).
  *
- * Intentionally does NOT handle `live:*` events — the live-room/event-chat
- * feature stays on the raw `ws` gateway for this migration (lower risk,
- * unrelated feature, see realtime.gateway.ts). Chat message creation is
- * delegated to chat-events.service.ts, the same shared path the REST
- * controllers and the legacy raw-ws gateway use, so there is exactly one
- * place that persists + broadcasts + decides push for a new message.
+ * Chat message creation is delegated to chat-events.service.ts /
+ * live-room-events.service.ts, the same shared paths the REST controllers
+ * use, so there is exactly one place that persists + broadcasts (+ decides
+ * push, for DM/group) for a new message.
+ *
+ * Event Chat's `live:*` handlers here are a separate, additive realtime path
+ * from the legacy raw-ws gateway's own `live:*` handling (realtime.gateway.ts)
+ * — that one is NOT retired, because it also backs the unrelated standalone
+ * Live Room (audio room) feature (see live-room-screen.tsx), which still
+ * depends on it. Only the Event Chat client (ChatTab.tsx) has been cut over
+ * to this gateway.
  */
 export class SocketIOGateway {
   private io?: SocketIOServer;
@@ -109,6 +129,7 @@ export class SocketIOGateway {
     private readonly authService = new AuthService(),
     private readonly chatService = new ChatService(),
     private readonly groupService = new GroupService(),
+    private readonly liveRoomService = new LiveRoomService(),
     private readonly userFollowRepository = new UserFollowRepository(),
   ) {}
 
@@ -131,7 +152,11 @@ export class SocketIOGateway {
         })
         .catch((error) => {
           logger.warn({ error }, "Socket.IO authentication failed");
-          next(new Error("Authentication required"));
+          const authError = new Error("Authentication required") as Error & {
+            data?: { code: string };
+          };
+          authError.data = { code: "AUTHENTICATION_REQUIRED" };
+          next(authError);
         });
     });
 
@@ -141,6 +166,12 @@ export class SocketIOGateway {
 
     registerBroadcastTarget({
       notifyUser: (userId, _legacyEnvelope, event, payload) => this.notifyUser(userId, event, payload),
+    });
+
+    registerLiveRoomBroadcastTarget({
+      broadcast: (liveRoomId, event, payload) => {
+        this.io?.to(liveRoomRoom(liveRoomId)).emit(event, payload);
+      },
     });
 
     logger.info({ path: "/socket.io" }, "Socket.IO gateway attached");
@@ -205,6 +236,15 @@ export class SocketIOGateway {
     );
     socket.on("group:message:delete", (payload: unknown, ack?: AckCallback<unknown>) =>
       void this.handleGroupMessageDelete(user, payload, ack),
+    );
+    socket.on("live:join", (payload: unknown, ack?: AckCallback<unknown>) =>
+      void this.handleLiveRoomJoin(socket, user, payload, ack),
+    );
+    socket.on("live:leave", (payload: unknown, ack?: AckCallback<unknown>) =>
+      this.handleLiveRoomLeave(socket, payload, ack),
+    );
+    socket.on("live:message", (payload: unknown, ack?: AckCallback<unknown>) =>
+      void this.handleLiveRoomMessage(socket, user, payload, ack),
     );
 
     socket.on("disconnect", (reason) => {
@@ -381,6 +421,69 @@ export class SocketIOGateway {
     } catch (error) {
       const message = error instanceof AppError ? error.message : "Unable to delete message.";
       ack?.({ ok: false, code: "MESSAGE_DELETE_FAILED", message });
+    }
+  }
+
+  private async handleLiveRoomJoin(
+    socket: Socket,
+    user: AuthUser,
+    rawPayload: unknown,
+    ack?: AckCallback<unknown>,
+  ): Promise<void> {
+    const result = liveRoomJoinSchema.safeParse(rawPayload);
+    if (!result.success) {
+      ack?.({ ok: false, code: "INVALID_MESSAGE", message: "Invalid realtime message." });
+      return;
+    }
+
+    try {
+      // Re-validates event-start/checked-in/host access on every join — a
+      // prior successful join does not grant standing authorization (see
+      // handleLiveRoomMessage, which re-checks again on every send).
+      const liveRoom = await this.liveRoomService.getLiveRoom(user, result.data.liveRoomId);
+      await socket.join(liveRoomRoom(result.data.liveRoomId));
+      ack?.({ ok: true, message: liveRoom });
+    } catch (error) {
+      const message = error instanceof AppError ? error.message : "Unable to join event chat.";
+      this.sendError(socket, "EVENT_CHAT_ACCESS_DENIED", message);
+      ack?.({ ok: false, code: "EVENT_CHAT_ACCESS_DENIED", message });
+    }
+  }
+
+  private handleLiveRoomLeave(socket: Socket, rawPayload: unknown, ack?: AckCallback<unknown>): void {
+    const result = liveRoomLeaveSchema.safeParse(rawPayload);
+    if (!result.success) {
+      ack?.({ ok: false, code: "INVALID_MESSAGE", message: "Invalid realtime message." });
+      return;
+    }
+
+    void socket.leave(liveRoomRoom(result.data.liveRoomId));
+    ack?.({ ok: true, message: { liveRoomId: result.data.liveRoomId } });
+  }
+
+  private async handleLiveRoomMessage(
+    socket: Socket,
+    user: AuthUser,
+    rawPayload: unknown,
+    ack?: AckCallback<unknown>,
+  ): Promise<void> {
+    const result = liveRoomMessageSchema.safeParse(rawPayload);
+    if (!result.success) {
+      this.sendError(socket, "INVALID_MESSAGE", "Invalid realtime message.");
+      ack?.({ ok: false, code: "INVALID_MESSAGE", message: "Invalid realtime message." });
+      return;
+    }
+
+    try {
+      const savedMessage = await createLiveRoomMessageWithSideEffects(user, result.data.liveRoomId, {
+        text: result.data.text,
+        clientMessageId: result.data.clientMessageId ?? null,
+      });
+      ack?.({ ok: true, message: savedMessage });
+    } catch (error) {
+      const message = error instanceof AppError ? error.message : "Unable to send event chat message.";
+      this.sendError(socket, "EVENT_CHAT_ACCESS_DENIED", message);
+      ack?.({ ok: false, code: "EVENT_CHAT_ACCESS_DENIED", message });
     }
   }
 

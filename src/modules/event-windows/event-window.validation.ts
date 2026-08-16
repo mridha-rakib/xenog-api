@@ -1,11 +1,17 @@
 import { z } from "zod";
 import {
+  DEFAULT_EVENT_WINDOW_PARTICIPANT_POST_VISIBILITY,
   DEFAULT_EVENT_WINDOW_POST_PAGE_SIZE,
+  DEFAULT_EVENT_WINDOW_POSTING_ELIGIBILITY,
+  DEFAULT_PARTICIPATED_EVENTS_LIMIT,
   eventWindowContentTypes,
   eventWindowMediaSources,
   eventWindowMediaTypes,
+  eventWindowParticipantPostVisibilities,
+  eventWindowPostingEligibilities,
   MAX_EVENT_WINDOW_POST_PAGE_SIZE,
   MAX_EVENT_WINDOW_POSTS,
+  MAX_PARTICIPATED_EVENTS_LIMIT,
 } from "./event-window.interface.js";
 
 const objectId = z.string().trim().regex(/^[a-f\d]{24}$/i, "Invalid MongoDB ObjectId");
@@ -132,6 +138,15 @@ const listPostsQuery = z.object({
   cursor: objectId.optional(),
 });
 
+const listParticipatedEventsQuery = z.object({
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_PARTICIPATED_EVENTS_LIMIT)
+    .default(DEFAULT_PARTICIPATED_EVENTS_LIMIT),
+});
+
 const createWindowBody = z
   .object({
     title: optionalText("Window title", 120),
@@ -140,6 +155,10 @@ const createWindowBody = z
     endsAt: dateTime("Window end date and time"),
     allowedContentTypes,
     maxPosts: z.coerce.number().int().min(1).max(MAX_EVENT_WINDOW_POSTS),
+    postingEligibility: z.enum(eventWindowPostingEligibilities).default(DEFAULT_EVENT_WINDOW_POSTING_ELIGIBILITY),
+    participantPostVisibility: z
+      .enum(eventWindowParticipantPostVisibilities)
+      .default(DEFAULT_EVENT_WINDOW_PARTICIPANT_POST_VISIBILITY),
   })
   .strict()
   .superRefine(validateWindowDateRange);
@@ -221,5 +240,8 @@ export const eventWindowValidation = {
   listPosts: z.object({
     params: eventWindowPostParams,
     query: listPostsQuery,
+  }),
+  listParticipatedEvents: z.object({
+    query: listParticipatedEventsQuery,
   }),
 };

@@ -2,10 +2,16 @@ import mongoose, { Types } from "mongoose";
 import type {
   CreateEventWindowDto,
   CreateEventWindowPostDto,
+  EventWindowPostTicketEntitlement,
   IEventWindow,
   IEventWindowPost,
   ListEventWindowPostsOptions,
   UpdateEventWindowDto,
+} from "./event-window.interface.js";
+import {
+  DEFAULT_EVENT_WINDOW_PARTICIPANT_POST_VISIBILITY,
+  DEFAULT_EVENT_WINDOW_POSTING_ELIGIBILITY,
+  PARTICIPATED_POSTS_SCAN_LIMIT,
 } from "./event-window.interface.js";
 import { EventWindowModel, EventWindowPostModel } from "./event-window.model.js";
 
@@ -14,11 +20,20 @@ interface CreateWindowRecord extends CreateEventWindowDto {
   hostUserId: string;
 }
 
+// A post is authorized either by a check-in (ticketUsageId) or by a current
+// ticket entitlement (ticketEntitlement), never both — see
+// EventWindowService#resolvePostingAuthorization.
 interface CreateWindowPostRecord extends CreateEventWindowPostDto {
   eventId: string;
   windowId: string;
   userId: string;
-  ticketUsageId: string;
+  ticketUsageId?: string | null;
+  ticketEntitlement?: {
+    orderId: string;
+    ticketId: string;
+    ticketIndex: number;
+    source: EventWindowPostTicketEntitlement["source"];
+  } | null;
 }
 
 export type CreatePostWithCapacityResult =
@@ -47,6 +62,8 @@ export class EventWindowRepository {
       maxPosts: payload.maxPosts,
       acceptedPostCount: 0,
       status: "scheduled",
+      postingEligibility: payload.postingEligibility ?? DEFAULT_EVENT_WINDOW_POSTING_ELIGIBILITY,
+      participantPostVisibility: payload.participantPostVisibility ?? DEFAULT_EVENT_WINDOW_PARTICIPANT_POST_VISIBILITY,
       cancelledAt: null,
     });
   }
@@ -55,19 +72,34 @@ export class EventWindowRepository {
     return EventWindowModel.find({ eventId }).sort({ startsAt: 1, _id: 1 });
   }
 
+  public async findByIds(windowIds: string[]): Promise<IEventWindow[]> {
+    return windowIds.length > 0 ? EventWindowModel.find({ _id: { $in: windowIds } }) : [];
+  }
+
+  // Source query for the participated-events index — the caller's own
+  // accepted posts, most recent first, bounded by PARTICIPATED_POSTS_SCAN_LIMIT
+  // rather than the caller's full lifetime history. Uses the
+  // {userId, status, createdAt} index (added specifically for this access
+  // pattern — see event-window.model.ts).
+  public async findAcceptedPostsByUser(userId: string): Promise<IEventWindowPost[]> {
+    return EventWindowPostModel.find({ userId, status: "accepted" })
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(PARTICIPATED_POSTS_SCAN_LIMIT);
+  }
+
+  // Event start moving no longer invalidates a window (a window may start
+  // before the event does), so only a window ending after the event's new
+  // end time is a conflict. A null eventEndsAt (the event losing its end
+  // time entirely) can't be validated against, so every non-cancelled
+  // window is treated as conflicting in that case, matching prior behavior.
   public async findConflictingForEventSchedule(
     eventId: string,
-    eventStartsAt: Date | null,
     eventEndsAt: Date | null,
   ): Promise<IEventWindow[]> {
-    const scheduleFilter = eventStartsAt && eventEndsAt
-      ? { $or: [{ startsAt: { $lt: eventStartsAt } }, { endsAt: { $gt: eventEndsAt } }] }
-      : {};
-
     return EventWindowModel.find({
       eventId,
       status: { $ne: "cancelled" },
-      ...scheduleFilter,
+      ...(eventEndsAt ? { endsAt: { $gt: eventEndsAt } } : {}),
     }).sort({ startsAt: 1, _id: 1 });
   }
 
@@ -179,7 +211,15 @@ export class EventWindowRepository {
               eventId: payload.eventId,
               windowId: payload.windowId,
               userId: payload.userId,
-              ticketUsageId: payload.ticketUsageId,
+              ticketUsageId: payload.ticketUsageId ?? null,
+              ticketEntitlement: payload.ticketEntitlement
+                ? {
+                  orderId: new Types.ObjectId(payload.ticketEntitlement.orderId),
+                  ticketId: payload.ticketEntitlement.ticketId,
+                  ticketIndex: payload.ticketEntitlement.ticketIndex,
+                  source: payload.ticketEntitlement.source,
+                }
+                : null,
               contentType: payload.contentType,
               text: payload.text ?? null,
               mediaItems: payload.mediaItems ?? [],

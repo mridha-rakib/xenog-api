@@ -489,6 +489,10 @@ export class EventRepository {
     return EventModel.findById(id);
   }
 
+  public async findByIds(ids: string[]): Promise<IEvent[]> {
+    return ids.length > 0 ? EventModel.find({ _id: { $in: ids } }) : [];
+  }
+
   public async findManyByIds(ids: string[]): Promise<IEvent[]> {
     return EventModel.find({ _id: { $in: ids } });
   }

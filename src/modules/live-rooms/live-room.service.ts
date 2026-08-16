@@ -125,8 +125,17 @@ export class LiveRoomService {
     }
 
     const messages = await this.messageRepository.findByLiveRoomId(liveRoomId, query);
+    const orderedMessages = messages.reverse();
+    const senderById = await this.loadUsersByIds(
+      orderedMessages.map((message) => message.senderId.toString()),
+      user,
+    );
 
-    return Promise.all(messages.reverse().map((message) => this.toMessageResponse(message, user)));
+    return Promise.all(
+      orderedMessages.map((message) =>
+        this.toMessageResponse(message, senderById.get(message.senderId.toString()) ?? null),
+      ),
+    );
   }
 
   public async createMessage(
@@ -146,6 +155,7 @@ export class LiveRoomService {
       liveRoomId,
       senderId: user.id,
       text: payload.text.trim(),
+      clientMessageId: payload.clientMessageId ?? null,
     });
 
     await this.participantRepository.join(liveRoomId, user.id);
@@ -189,6 +199,10 @@ export class LiveRoomService {
       this.participantRepository.findActiveByLiveRoomId(liveRoomId),
       this.participantRepository.countActiveByLiveRoomId(liveRoomId),
     ]);
+    const participantUserById = await this.loadUsersByIds(
+      participants.map((participant) => participant.userId.toString()),
+      viewer,
+    );
 
     return {
       id: liveRoomId,
@@ -199,7 +213,13 @@ export class LiveRoomService {
       speakerIds,
       listenerCount,
       participants: await Promise.all(
-        participants.map((participant) => this.toParticipantResponse(participant, liveRoom)),
+        participants.map((participant) =>
+          this.toParticipantResponse(
+            participant,
+            liveRoom,
+            participantUserById.get(participant.userId.toString()) ?? null,
+          ),
+        ),
       ),
       status: liveRoom.status,
       viewerPermissions: {
@@ -215,9 +235,9 @@ export class LiveRoomService {
   private async toParticipantResponse(
     participant: ILiveRoomParticipant,
     liveRoom: ILiveRoom,
+    user: IUser | AuthUser | null,
   ): Promise<LiveRoomParticipantResponse> {
     const userId = participant.userId.toString();
-    const user = await this.userRepository.findById(userId);
     const hostUserId = liveRoom.hostUserId.toString();
     const isHost = hostUserId === userId;
 
@@ -237,22 +257,43 @@ export class LiveRoomService {
 
   private async toMessageResponse(
     message: ILiveRoomMessage,
-    viewer: AuthUser,
+    sender: IUser | AuthUser | null,
   ): Promise<LiveRoomMessageResponse> {
-    const senderId = message.senderId.toString();
-    const sender = senderId === viewer.id ? viewer : await this.userRepository.findById(senderId);
     const senderResponse = await this.toUserResponse(sender);
 
     return {
       id: message._id.toString(),
       liveRoomId: message.liveRoomId.toString(),
-      senderId,
+      senderId: message.senderId.toString(),
       senderName: senderResponse?.name ?? "Mooment User",
       senderAvatarUrl: senderResponse?.avatarUrl ?? null,
       text: message.text,
+      clientMessageId: message.clientMessageId ?? null,
       createdAt: message.createdAt,
       updatedAt: message.updatedAt,
     };
+  }
+
+  /** Batches a list of user ids into a single query (plus the viewer, which
+   * is already in hand) instead of one `findById` per row — used by both
+   * message-sender and participant rendering. */
+  private async loadUsersByIds(
+    userIds: string[],
+    viewer: AuthUser,
+  ): Promise<Map<string, IUser | AuthUser>> {
+    const distinctIds = [...new Set(userIds)];
+    const idsToFetch = distinctIds.filter((id) => id !== viewer.id);
+    const fetchedUsers = idsToFetch.length > 0 ? await this.userRepository.findByIds(idsToFetch) : [];
+
+    const usersById = new Map<string, IUser | AuthUser>(
+      fetchedUsers.map((fetchedUser) => [fetchedUser._id.toString(), fetchedUser]),
+    );
+
+    if (distinctIds.includes(viewer.id)) {
+      usersById.set(viewer.id, viewer);
+    }
+
+    return usersById;
   }
 
   private async toUserResponse(

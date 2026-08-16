@@ -10,6 +10,14 @@ const controller = new EventWindowController();
 
 router.use(authenticate);
 
+// Registered before the "/:eventId/windows" routes below so the literal
+// "windows" segment here is never shadowed by ambiguity with :eventId.
+router.get(
+  "/windows/participated",
+  validate(eventWindowValidation.listParticipatedEvents),
+  catchAsync(controller.listParticipatedEvents),
+);
+
 router.post(
   "/:eventId/windows",
   validate(eventWindowValidation.createWindow),

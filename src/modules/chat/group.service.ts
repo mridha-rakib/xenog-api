@@ -11,7 +11,9 @@ import type {
   GroupConversationResponse,
   GroupMessageResponse,
   IGroup,
+  IGroupMember,
   IGroupMessage,
+  LeaveGroupResponse,
   ListGroupMessageHistoryQuery,
   ListGroupsQuery,
 } from "./group.interface.js";
@@ -194,6 +196,87 @@ export class GroupService {
 
     await this.syncGroupLastMessage(deleted.groupId.toString());
     return this.toGroupMessageResponse(deleted, user.name);
+  }
+
+  // Leave-group is a real membership mutation, never a reused DM action.
+  // All decisions (member vs. owner, successor selection, deletion) are
+  // made here against fresh in-transaction DB state — never trusting
+  // role/owner info the frontend might supply.
+  public async leaveGroup(user: AuthUser, groupId: string): Promise<LeaveGroupResponse> {
+    return this.groupRepository.runTransaction(async (session) => {
+      const group = await this.groupRepository.findByIdInSession(groupId, session);
+
+      if (!group) {
+        throw new AppError("Group not found.", httpStatus.NOT_FOUND);
+      }
+
+      const isMember = group.members.some((member) => member.userId.toString() === user.id);
+      if (!isMember) {
+        throw new AppError("You are not a member of this group.", httpStatus.FORBIDDEN);
+      }
+
+      const isOwner = group.createdBy.toString() === user.id;
+
+      if (!isOwner) {
+        const removed = await this.groupRepository.pullNonOwnerMember(groupId, user.id, session);
+        if (!removed) {
+          throw new AppError("Group membership changed, please try again.", httpStatus.CONFLICT);
+        }
+
+        return { groupId, status: "left" };
+      }
+
+      const remainingMembers = group.members.filter((member) => member.userId.toString() !== user.id);
+
+      if (remainingMembers.length === 0) {
+        const deleted = await this.groupRepository.deleteGroupWithMessages(groupId, session);
+        if (!deleted) {
+          throw new AppError("Group membership changed, please try again.", httpStatus.CONFLICT);
+        }
+
+        return { groupId, status: "group_deleted" };
+      }
+
+      const successor = this.selectOwnershipSuccessor(remainingMembers);
+
+      const transferred = await this.groupRepository.transferOwnership(
+        groupId,
+        user.id,
+        successor.userId.toString(),
+        session,
+      );
+      if (!transferred) {
+        throw new AppError("Group membership changed, please try again.", httpStatus.CONFLICT);
+      }
+
+      const removed = await this.groupRepository.pullFormerOwnerMember(groupId, user.id, session);
+      if (!removed) {
+        throw new AppError("Group membership changed, please try again.", httpStatus.CONFLICT);
+      }
+
+      return { groupId, status: "left", newOwnerId: successor.userId.toString() };
+    });
+  }
+
+  // Deterministic successor selection: regular members are preferred over
+  // admins (Priority 1), oldest `joinedAt` wins, and ties (identical
+  // timestamps) are broken by ascending ObjectId string comparison — never
+  // by array order or randomness — so the outcome is reproducible.
+  private selectOwnershipSuccessor(candidates: IGroupMember[]): IGroupMember {
+    const byJoinedAtThenId = (a: IGroupMember, b: IGroupMember): number => {
+      const timeDiff = a.joinedAt.getTime() - b.joinedAt.getTime();
+      return timeDiff !== 0 ? timeDiff : a.userId.toString().localeCompare(b.userId.toString());
+    };
+
+    const regularMembers = candidates.filter((member) => member.role === "member").sort(byJoinedAtThenId);
+    const admins = candidates.filter((member) => member.role === "admin").sort(byJoinedAtThenId);
+    const successor = regularMembers[0] ?? admins[0];
+
+    if (!successor) {
+      throw new AppError("Unable to determine group ownership successor.", httpStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    return successor;
   }
 
   public async assertIsMember(userId: string, groupId: string): Promise<void> {

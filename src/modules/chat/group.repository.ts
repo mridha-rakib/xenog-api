@@ -1,4 +1,5 @@
-import { Types } from "mongoose";
+import mongoose, { Types } from "mongoose";
+import type { ClientSession } from "mongoose";
 import type { ChatMessageAttachment, ChatMessageType } from "./chat.interface.js";
 import type { IGroup, IGroupMessage } from "./group.interface.js";
 import { GroupMessageModel } from "./group-message.model.js";
@@ -119,5 +120,105 @@ export class GroupRepository {
     }
 
     return group.members.map((m) => m.userId.toString());
+  }
+
+  // Runs `fn` inside a Mongo session/transaction, matching the pattern used
+  // in event-window.repository.ts's createPostWithCapacity. withTransaction
+  // re-runs `fn` on retryable transient errors (e.g. write conflicts from a
+  // concurrent leave on the same group), so `fn` must be idempotent to rerun.
+  public async runTransaction<T>(fn: (session: ClientSession) => Promise<T>): Promise<T> {
+    const session = await mongoose.startSession();
+
+    try {
+      let result: T | undefined;
+      await session.withTransaction(async () => {
+        result = await fn(session);
+      });
+      return result as T;
+    } finally {
+      await session.endSession();
+    }
+  }
+
+  public async findByIdInSession(groupId: string, session: ClientSession): Promise<IGroup | null> {
+    return GroupModel.findById(groupId).session(session);
+  }
+
+  // Atomically removes `userId` from `members`, guarded on the caller still
+  // being a current, non-owner member at write time. Returns false if the
+  // guard didn't match (already removed / no longer applicable), so callers
+  // can treat that as a state-changed conflict rather than silently no-op.
+  public async pullNonOwnerMember(
+    groupId: string,
+    userId: string,
+    session: ClientSession,
+  ): Promise<boolean> {
+    const result = await GroupModel.updateOne(
+      {
+        _id: groupId,
+        createdBy: { $ne: new Types.ObjectId(userId) },
+        "members.userId": new Types.ObjectId(userId),
+      },
+      { $pull: { members: { userId: new Types.ObjectId(userId) } } },
+      { session },
+    );
+
+    return result.modifiedCount === 1;
+  }
+
+  // Promotes `newOwnerId` to admin + owner. Guarded on them still being a
+  // current member and the caller still being the current owner.
+  public async transferOwnership(
+    groupId: string,
+    currentOwnerId: string,
+    newOwnerId: string,
+    session: ClientSession,
+  ): Promise<boolean> {
+    const result = await GroupModel.updateOne(
+      {
+        _id: groupId,
+        createdBy: new Types.ObjectId(currentOwnerId),
+        "members.userId": new Types.ObjectId(newOwnerId),
+      },
+      {
+        $set: {
+          createdBy: new Types.ObjectId(newOwnerId),
+          "members.$.role": "admin",
+        },
+      },
+      { session },
+    );
+
+    return result.modifiedCount === 1;
+  }
+
+  // Removes the (now former) owner from `members` after ownership has
+  // already been transferred to someone else.
+  public async pullFormerOwnerMember(
+    groupId: string,
+    formerOwnerId: string,
+    session: ClientSession,
+  ): Promise<boolean> {
+    const result = await GroupModel.updateOne(
+      {
+        _id: groupId,
+        createdBy: { $ne: new Types.ObjectId(formerOwnerId) },
+        "members.userId": new Types.ObjectId(formerOwnerId),
+      },
+      { $pull: { members: { userId: new Types.ObjectId(formerOwnerId) } } },
+      { session },
+    );
+
+    return result.modifiedCount === 1;
+  }
+
+  // Deletes the group and every group-message row it directly owns. Only
+  // ever called on the sole-remaining-member leave path; scoped strictly to
+  // this groupId, so it cannot touch DMs or any other group.
+  public async deleteGroupWithMessages(groupId: string, session: ClientSession): Promise<boolean> {
+    const deleted = await GroupModel.deleteOne({ _id: groupId }, { session });
+    await GroupMessageModel.deleteMany({ groupId: new Types.ObjectId(groupId) }, { session });
+
+    return deleted.deletedCount === 1;
   }
 }

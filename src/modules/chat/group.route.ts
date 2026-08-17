@@ -14,5 +14,6 @@ router.post("/", validate(groupValidation.createGroup), catchAsync(controller.cr
 router.get("/", validate(groupValidation.listGroups), catchAsync(controller.listGroups));
 router.post("/:groupId/messages", validate(groupValidation.createGroupMessage), catchAsync(controller.createGroupMessage));
 router.get("/:groupId/messages", validate(groupValidation.listGroupMessages), catchAsync(controller.listGroupMessages));
+router.post("/:groupId/leave", validate(groupValidation.leaveGroup), catchAsync(controller.leaveGroup));
 
 export const groupRoutes = router;

@@ -79,3 +79,9 @@ export interface GroupMessageResponse {
   createdAt: Date;
   updatedAt: Date;
 }
+
+export interface LeaveGroupResponse {
+  groupId: string;
+  status: "left" | "group_deleted";
+  newOwnerId?: string;
+}

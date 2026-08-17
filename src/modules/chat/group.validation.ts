@@ -29,4 +29,7 @@ export const groupValidation = {
       limit: z.coerce.number().int().min(1).max(100).optional(),
     }),
   }),
+  leaveGroup: z.object({
+    params: z.object({ groupId: objectId }),
+  }),
 };

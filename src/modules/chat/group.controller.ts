@@ -68,4 +68,16 @@ export class GroupController {
       data: { messages },
     });
   };
+
+  public leaveGroup = async (req: Request, res: Response): Promise<void> => {
+    const result = await this.groupService.leaveGroup(
+      req.authUser as AuthUser,
+      req.params.groupId as string,
+    );
+
+    ApiResponse.success(res, {
+      message: result.status === "group_deleted" ? "Group deleted" : "Left group",
+      data: { leave: result },
+    });
+  };
 }

@@ -68,4 +68,56 @@ export class ChatController {
 
     ApiResponse.success(res, { message: "Conversation deleted" });
   };
+
+  public blockMessages = async (req: Request, res: Response): Promise<void> => {
+    const block = await this.chatService.blockMessages(
+      req.authUser as AuthUser,
+      req.params.friendId as string,
+    );
+
+    ApiResponse.success(res, {
+      statusCode: httpStatus.CREATED,
+      message: "Messages blocked",
+      data: { block },
+    });
+  };
+
+  public unblockMessages = async (req: Request, res: Response): Promise<void> => {
+    const block = await this.chatService.unblockMessages(
+      req.authUser as AuthUser,
+      req.params.friendId as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Messages unblocked",
+      data: { block },
+    });
+  };
+
+  public listMessageBlockedUsers = async (req: Request, res: Response): Promise<void> => {
+    const result = await this.chatService.listMessageBlockedUsers(
+      req.authUser as AuthUser,
+      req.query as { page?: number; limit?: number },
+    );
+
+    ApiResponse.success(res, {
+      message: "Message-blocked users retrieved",
+      data: {
+        users: result.data,
+      },
+      meta: { pagination: result.meta },
+    });
+  };
+
+  public getDirectMessageRelationship = async (req: Request, res: Response): Promise<void> => {
+    const relationship = await this.chatService.getDirectMessageRelationship(
+      req.authUser as AuthUser,
+      req.params.friendId as string,
+    );
+
+    ApiResponse.success(res, {
+      message: "Direct message relationship retrieved",
+      data: { relationship },
+    });
+  };
 }

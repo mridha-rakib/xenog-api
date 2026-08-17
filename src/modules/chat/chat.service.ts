@@ -1,6 +1,7 @@
 import httpStatus from "http-status";
 import { AppError } from "../../core/errors/app-error.js";
 import { env } from "../../config/env.js";
+import { createPaginationMeta, getPaginationOptions, type PaginatedResult } from "../../core/utils/pagination.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { StorageService } from "../storage/storage.service.js";
 import type { IUser } from "../user/user.interface.js";
@@ -12,16 +13,20 @@ import { EventRepository } from "../events/event.repository.js";
 import { MomentRepository } from "../moments/moment.repository.js";
 import { ChatDeletionRepository } from "./chat-deletion.repository.js";
 import { ChatMessageRepository } from "./chat-message.repository.js";
+import { DirectMessageBlockRepository, type MessageBlockedUserRecord } from "./direct-message-block.repository.js";
 import type {
   ChatFileAttachment,
   ChatMessageAttachment,
   ChatMessageType,
   CreateDirectMessageDto,
   DirectMessageConversationResponse,
+  DirectMessageRelationshipResponse,
   DirectMessageResponse,
   IChatMessage,
   ListDirectMessageHistoryQuery,
   ListDirectMessagesQuery,
+  MessageBlockedUserResponse,
+  MessageBlockStatusResponse,
 } from "./chat.interface.js";
 
 export class ChatService {
@@ -34,6 +39,7 @@ export class ChatService {
     private readonly chatDeletionRepository = new ChatDeletionRepository(),
     private readonly eventRepository = new EventRepository(),
     private readonly momentRepository = new MomentRepository(),
+    private readonly directMessageBlockRepository = new DirectMessageBlockRepository(),
   ) {}
 
   public async listDirectMessages(
@@ -104,7 +110,7 @@ export class ChatService {
     friendId: string,
     query: ListDirectMessageHistoryQuery,
   ): Promise<DirectMessageResponse[]> {
-    await this.assertCanDirectMessage(user.id, friendId);
+    await this.assertCanReadDirectMessages(user.id, friendId);
 
     const conversationId = this.getConversationId(user.id, friendId);
     const messages = await this.chatMessageRepository.findConversationMessages(
@@ -123,7 +129,7 @@ export class ChatService {
     friendId: string,
     payload: CreateDirectMessageDto,
   ): Promise<DirectMessageResponse> {
-    await this.assertCanDirectMessage(user.id, friendId);
+    await this.assertCanSendDirectMessage(user.id, friendId);
 
     const conversationId = this.getConversationId(user.id, friendId);
     const type = payload.type ?? payload.attachment?.type ?? "text";
@@ -492,7 +498,13 @@ export class ChatService {
     return allowed[type].has(mimeType);
   }
 
-  public async assertCanDirectMessage(userId: string, friendId: string): Promise<void> {
+  // Full/Profile Block (UserBlockModel) + mutual-friend requirement only —
+  // the exact pre-existing assertCanDirectMessage body, unchanged, extracted
+  // so both the read and send gates below share it instead of duplicating
+  // it. Message-only block is deliberately NOT checked here: history reads
+  // must remain unaffected by a message-only block (only Full Block may
+  // restrict reading, exactly as it did before this split).
+  private async assertNotFullyBlocked(userId: string, friendId: string): Promise<IUser> {
     if (userId === friendId) {
       throw new AppError("You cannot send a direct message to yourself.", httpStatus.BAD_REQUEST);
     }
@@ -522,6 +534,113 @@ export class ChatService {
     if (!senderFollowsRecipient || !recipientFollowsSender) {
       throw new AppError("You can only message mutual friends.", httpStatus.FORBIDDEN);
     }
+
+    return friend;
+  }
+
+  // Reading history: Full Block only, byte-identical to the pre-split
+  // assertCanDirectMessage — a message-only block must never hide history.
+  public async assertCanReadDirectMessages(userId: string, friendId: string): Promise<void> {
+    await this.assertNotFullyBlocked(userId, friendId);
+  }
+
+  // Sending (and typing indicators, which reuse this): Full Block OR
+  // Message Block, either direction. Both HTTP and Socket.IO/legacy-ws
+  // message creation already funnel through createDirectMessage, so this
+  // one method is the single centralized send gate for every transport.
+  public async assertCanSendDirectMessage(userId: string, friendId: string): Promise<void> {
+    await this.assertNotFullyBlocked(userId, friendId);
+
+    const [senderMessageBlockedRecipient, recipientMessageBlockedSender] = await Promise.all([
+      this.directMessageBlockRepository.isBlocked(userId, friendId),
+      this.directMessageBlockRepository.isBlocked(friendId, userId),
+    ]);
+
+    if (senderMessageBlockedRecipient || recipientMessageBlockedSender) {
+      throw new AppError("You cannot message this user.", httpStatus.FORBIDDEN);
+    }
+  }
+
+  // ── Message-only block (DirectMessageBlock) — Chat-domain only. Must
+  // never touch UserFollowRepository or UserBlockModel; must never be
+  // consulted by Feed/Moment/Event/profile-visibility code. ──────────────
+
+  public async blockMessages(user: AuthUser, targetUserId: string): Promise<MessageBlockStatusResponse> {
+    if (user.id === targetUserId) {
+      throw new AppError("You cannot message-block yourself.", httpStatus.BAD_REQUEST);
+    }
+
+    const target = await this.userRepository.findById(targetUserId);
+
+    if (!target || target.role !== "user" || !target.isActive) {
+      throw new AppError("User not found", httpStatus.NOT_FOUND);
+    }
+
+    await this.directMessageBlockRepository.block(user.id, targetUserId);
+
+    return { userId: targetUserId, isMessageBlocked: true };
+  }
+
+  public async unblockMessages(user: AuthUser, targetUserId: string): Promise<MessageBlockStatusResponse> {
+    if (user.id === targetUserId) {
+      throw new AppError("You cannot message-unblock yourself.", httpStatus.BAD_REQUEST);
+    }
+
+    await this.directMessageBlockRepository.unblock(user.id, targetUserId);
+
+    return { userId: targetUserId, isMessageBlocked: false };
+  }
+
+  public async listMessageBlockedUsers(
+    user: AuthUser,
+    query: { page?: number; limit?: number },
+  ): Promise<PaginatedResult<MessageBlockedUserResponse>> {
+    const { page, limit, skip } = getPaginationOptions({ page: query.page, limit: query.limit ?? 30 });
+    const result = await this.directMessageBlockRepository.findBlockedUsers(user.id, skip, limit);
+
+    return {
+      data: await Promise.all(result.users.map((blockedUser) => this.toMessageBlockedUserResponse(blockedUser))),
+      meta: createPaginationMeta(page, limit, result.total),
+    };
+  }
+
+  // Combined Full Block + Message Block directional state for a single DM
+  // pair, in one round trip — this is what Chat Detail polls on focus.
+  public async getDirectMessageRelationship(
+    user: AuthUser,
+    friendId: string,
+  ): Promise<DirectMessageRelationshipResponse> {
+    const [fullBlockedByMe, fullBlockedMe, messageBlockedByMe, messageBlockedMe] = await Promise.all([
+      this.userBlockRepository.isBlocked(user.id, friendId),
+      this.userBlockRepository.isBlocked(friendId, user.id),
+      this.directMessageBlockRepository.isBlocked(user.id, friendId),
+      this.directMessageBlockRepository.isBlocked(friendId, user.id),
+    ]);
+
+    return {
+      fullBlockedByMe,
+      fullBlockedMe,
+      messageBlockedByMe,
+      messageBlockedMe,
+      canMessage: !fullBlockedByMe && !fullBlockedMe && !messageBlockedByMe && !messageBlockedMe,
+    };
+  }
+
+  private async toMessageBlockedUserResponse(
+    user: MessageBlockedUserRecord,
+  ): Promise<MessageBlockedUserResponse> {
+    const avatarUrl = user.avatarKey
+      ? await this.storageService.createDownloadUrl(user.avatarKey).then((download) => download.url).catch(() => null)
+      : null;
+
+    return {
+      id: user._id.toString(),
+      name: user.name,
+      username: user.username,
+      avatarKey: user.avatarKey ?? null,
+      avatarUrl,
+      blockedAt: user.blockedAt,
+    };
   }
 
   private getConversationId(userId: string, friendId: string): string {

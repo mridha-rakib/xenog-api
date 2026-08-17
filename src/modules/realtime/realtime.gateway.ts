@@ -366,7 +366,10 @@ export class RealtimeGateway {
     message: Extract<ClientMessage, { type: "dm:typing" }>,
   ): Promise<void> {
     try {
-      await this.chatService.assertCanDirectMessage(client.user.id, message.recipientId);
+      // Typing indicators reuse the send gate (not the read gate) — a
+      // message-only-blocked pair must not expose active-typing state,
+      // exactly as if messaging were fully unavailable.
+      await this.chatService.assertCanSendDirectMessage(client.user.id, message.recipientId);
     } catch (error) {
       if (error instanceof AppError) {
         this.sendError(

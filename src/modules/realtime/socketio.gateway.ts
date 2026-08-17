@@ -294,7 +294,10 @@ export class SocketIOGateway {
     if (!result.success) return;
 
     try {
-      await this.chatService.assertCanDirectMessage(user.id, result.data.recipientId);
+      // Typing indicators reuse the send gate (not the read gate) — a
+      // message-only-blocked pair must not expose active-typing state,
+      // exactly as if messaging were fully unavailable.
+      await this.chatService.assertCanSendDirectMessage(user.id, result.data.recipientId);
     } catch {
       return;
     }

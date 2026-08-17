@@ -10,6 +10,13 @@ type PermissionOptions = {
   recipientFollowsSender?: boolean;
   senderBlockedRecipient?: boolean;
   recipientBlockedSender?: boolean;
+  // Message-only block (DirectMessageBlock) — separate from the Full Block
+  // options above. Defaults to false throughout this file: these tests
+  // exist to lock in Full Block behavior across the assertCanDirectMessage
+  // split, not to exercise the new message-block domain (see
+  // direct-message-block.test.ts for that).
+  senderMessageBlockedRecipient?: boolean;
+  recipientMessageBlockedSender?: boolean;
 };
 
 const userAId = new Types.ObjectId().toString();
@@ -40,6 +47,8 @@ const createService = (options: PermissionOptions = {}) => {
     recipientFollowsSender = false,
     senderBlockedRecipient = false,
     recipientBlockedSender = false,
+    senderMessageBlockedRecipient = false,
+    recipientMessageBlockedSender = false,
   } = options;
   const createdMessages: unknown[] = [];
 
@@ -99,48 +108,60 @@ const createService = (options: PermissionOptions = {}) => {
     } as never,
     {} as never,
     {} as never,
+    {
+      isBlocked: async (blockerId: string, blockedId: string) => {
+        if (blockerId === userAId && blockedId === userBId) return senderMessageBlockedRecipient;
+        if (blockerId === userBId && blockedId === userAId) return recipientMessageBlockedSender;
+        return false;
+      },
+    } as never,
   );
 
   return { service, createdMessages };
 };
 
-test("self-DM is rejected", async () => {
+// ── assertCanSendDirectMessage — Phase 1 regression lock for the send gate.
+// These are the exact same scenarios the old, unsplit assertCanDirectMessage
+// covered; only the method name changed (send now also independently checks
+// message-only block, exercised separately in direct-message-block.test.ts).
+
+test("self-DM is rejected (send)", async () => {
   const { service } = createService();
 
   await assert.rejects(
-    () => service.assertCanDirectMessage(userAId, userAId),
+    () => service.assertCanSendDirectMessage(userAId, userAId),
     /cannot send a direct message to yourself/i,
   );
 });
 
-test("one-way follow is rejected", async () => {
+test("one-way follow is rejected (send)", async () => {
   const { service } = createService({ senderFollowsRecipient: true });
 
   await assert.rejects(
-    () => service.assertCanDirectMessage(userAId, userBId),
+    () => service.assertCanSendDirectMessage(userAId, userBId),
     /only message mutual friends/i,
   );
 });
 
-test("no follow relationship is rejected", async () => {
+test("no follow relationship is rejected (send)", async () => {
   const { service } = createService();
 
   await assert.rejects(
-    () => service.assertCanDirectMessage(userAId, userBId),
+    () => service.assertCanSendDirectMessage(userAId, userBId),
     /only message mutual friends/i,
   );
 });
 
-test("mutual follow is allowed", async () => {
+test("mutual follow is allowed (send)", async () => {
   const { service } = createService({
     senderFollowsRecipient: true,
     recipientFollowsSender: true,
   });
 
-  await assert.doesNotReject(() => service.assertCanDirectMessage(userAId, userBId));
+  await assert.doesNotReject(() => service.assertCanSendDirectMessage(userAId, userBId));
 });
 
-test("sender blocked recipient is rejected", async () => {
+test("sender Full Blocked recipient is rejected (send)", async () => {
   const { service } = createService({
     senderFollowsRecipient: true,
     recipientFollowsSender: true,
@@ -148,12 +169,12 @@ test("sender blocked recipient is rejected", async () => {
   });
 
   await assert.rejects(
-    () => service.assertCanDirectMessage(userAId, userBId),
+    () => service.assertCanSendDirectMessage(userAId, userBId),
     /cannot message this user/i,
   );
 });
 
-test("recipient blocked sender is rejected", async () => {
+test("recipient Full Blocked sender is rejected (send)", async () => {
   const { service } = createService({
     senderFollowsRecipient: true,
     recipientFollowsSender: true,
@@ -161,9 +182,64 @@ test("recipient blocked sender is rejected", async () => {
   });
 
   await assert.rejects(
-    () => service.assertCanDirectMessage(userAId, userBId),
+    () => service.assertCanSendDirectMessage(userAId, userBId),
     /cannot message this user/i,
   );
+});
+
+// ── assertCanReadDirectMessages — Phase 1 regression lock for the read
+// gate. Full Block behavior must be byte-identical to what
+// assertCanDirectMessage did before the split (it currently also gates
+// history reads, not just sends — this locks that in as unchanged).
+
+test("self-DM read is rejected", async () => {
+  const { service } = createService();
+
+  await assert.rejects(
+    () => service.assertCanReadDirectMessages(userAId, userAId),
+    /cannot send a direct message to yourself/i,
+  );
+});
+
+test("no follow relationship read is rejected", async () => {
+  const { service } = createService();
+
+  await assert.rejects(
+    () => service.assertCanReadDirectMessages(userAId, userBId),
+    /only message mutual friends/i,
+  );
+});
+
+test("mutual follow read is allowed", async () => {
+  const { service } = createService({
+    senderFollowsRecipient: true,
+    recipientFollowsSender: true,
+  });
+
+  await assert.doesNotReject(() => service.assertCanReadDirectMessages(userAId, userBId));
+});
+
+test("Full Block still rejects history read (unchanged behavior across the split)", async () => {
+  const { service } = createService({
+    senderFollowsRecipient: true,
+    recipientFollowsSender: true,
+    senderBlockedRecipient: true,
+  });
+
+  await assert.rejects(
+    () => service.assertCanReadDirectMessages(userAId, userBId),
+    /cannot message this user/i,
+  );
+});
+
+test("a message-only block (no Full Block) does NOT reject history read — this is the whole point of the split", async () => {
+  const { service } = createService({
+    senderFollowsRecipient: true,
+    recipientFollowsSender: true,
+    senderMessageBlockedRecipient: true,
+  });
+
+  await assert.doesNotReject(() => service.assertCanReadDirectMessages(userAId, userBId));
 });
 
 test("blocked mutual followers cannot create a DM", async () => {

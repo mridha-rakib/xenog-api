@@ -98,6 +98,47 @@ export interface DirectMessageConversationResponse {
   isBlocked: boolean;
 }
 
+// Chat-only messaging restriction, entirely separate from the user module's
+// UserBlockModel (full/profile block). See direct-message-block.model.ts —
+// same directional shape as UserBlock, but this is a distinct collection so
+// existing UserBlock consumers (Feed/Moment/Event exclusion, profile
+// visibility, follow removal) are never affected by a message-only block.
+export interface IDirectMessageBlock {
+  _id: Types.ObjectId;
+  blockerId: Types.ObjectId;
+  blockedId: Types.ObjectId;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface MessageBlockStatusResponse {
+  userId: string;
+  isMessageBlocked: boolean;
+}
+
+export interface MessageBlockedUserResponse {
+  id: string;
+  name: string;
+  username?: string;
+  avatarKey?: string | null;
+  avatarUrl?: string | null;
+  blockedAt: Date;
+}
+
+// Combined directional state for a single DM pair — lets Chat Detail derive
+// its blocked-state UI from one request instead of one per block type.
+// Deliberately computed and served from the chat module (not merged into
+// the user module's GET /users/:id) to avoid a user->chat module dependency
+// cycle: chat already depends on user (UserBlockRepository), so the reverse
+// direction is avoided by keeping this endpoint chat-owned.
+export interface DirectMessageRelationshipResponse {
+  fullBlockedByMe: boolean;
+  fullBlockedMe: boolean;
+  messageBlockedByMe: boolean;
+  messageBlockedMe: boolean;
+  canMessage: boolean;
+}
+
 export interface DirectMessageResponse {
   id: string;
   conversationId: string;

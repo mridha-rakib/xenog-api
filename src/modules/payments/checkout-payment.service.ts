@@ -2009,7 +2009,7 @@ export class CheckoutPaymentService {
     if (payload.kind === "ticket") {
       const event = await this.eventRepository.findById(payload.eventId);
 
-      if (!event || event.status !== "published") {
+      if (!event || (event.status !== "published" && event.status !== "live")) {
         throw new AppError("Event not found", httpStatus.NOT_FOUND);
       }
 

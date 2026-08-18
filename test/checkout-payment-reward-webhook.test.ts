@@ -992,3 +992,204 @@ test("exhausted reward capacity rejects checkout and releases the pending claim"
     rewardId: "reward-1",
   }]);
 });
+
+// --- Live-event reservation eligibility regression coverage -----------------
+//
+// resolveLineItems() previously accepted only status === "published". That was
+// fixed to accept "published" and "live". A second, independent bug remained
+// downstream in event.repository.ts's reserveTicketCapacity()/
+// reserveTicketAndRewardCapacity(), which still filtered on
+// status === "published" (see ticket-reservation-eligibility.test.ts for the
+// exact Mongo-filter-level regression coverage of that fix). These tests lock
+// in the service-level behavior end-to-end: a live event must be able to
+// complete createIntent(), with or without a BOGO reward, while the paid
+// 2-ticket purchase cap keeps counting only paid quantity — never the
+// reward-expanded total.
+
+test("live event allows ticket checkout intent creation without an offer", async () => {
+  const liveEvent = { ...createEvent(), status: "live" as const };
+  const { service } = await makeCheckoutService({ event: liveEvent });
+
+  const checkout = await service.createIntent(buyer as never, {
+    kind: "ticket",
+    paymentMethod: "card",
+    eventId: eventId.toString(),
+    ticketId,
+    quantity: 2,
+    applyReward: false,
+    rewardId: null,
+    acceptedTerms: true,
+  });
+
+  const lineItem = checkout.order.lineItems.find((item) => item.itemId === ticketId);
+  assert.equal(lineItem?.quantity, 2);
+  assert.equal(lineItem?.freeQuantity ?? 0, 0);
+});
+
+test("live event with a BOGO reward reserves the full issued quantity while the purchase cap only ever sees paid quantity", async () => {
+  const reward = createReward({
+    id: "reward-1",
+    bogoEnabled: true,
+    buyQuantity: 1,
+    freeQuantity: 1,
+    discountEnabled: false,
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+  });
+  const liveEvent = { ...createEvent([reward]), status: "live" as const };
+  const reservationCalls: { ticketQuantity: number; rewardId: string | null; rewardQuantity: number }[] = [];
+
+  const { service } = await makeCheckoutService({
+    event: liveEvent,
+    eventRepository: {
+      reserveTicketAndRewardCapacity: async (
+        _eventId: string,
+        _ticketId: string,
+        ticketQuantity: number,
+        rewardId: string | null,
+        rewardQuantity: number,
+      ) => {
+        reservationCalls.push({ ticketQuantity, rewardId, rewardQuantity });
+        return liveEvent;
+      },
+    },
+  });
+
+  const checkout = await service.createIntent(buyer as never, {
+    kind: "ticket",
+    paymentMethod: "card",
+    eventId: eventId.toString(),
+    ticketId,
+    quantity: 2,
+    applyReward: true,
+    rewardId: "reward-1",
+    acceptedTerms: true,
+  });
+
+  const lineItem = checkout.order.lineItems.find((item) => item.itemId === ticketId);
+  assert.equal(lineItem?.quantity, 2, "paid quantity stays 2");
+  assert.equal(lineItem?.freeQuantity, 2, "BOGO(buy 1 get 1) on 2 paid tickets issues 2 free tickets");
+  assert.equal(lineItem?.totalQuantity, 4, "4 tickets are actually issued");
+
+  assert.equal(reservationCalls.length, 1);
+  assert.equal(reservationCalls[0]?.ticketQuantity, 4, "inventory reservation must cover all 4 issued tickets, not just the 2 paid ones");
+});
+
+test("purchase-limit cap counts only paid quantity, never the BOGO-expanded total, even for a live event", async () => {
+  const reward = createReward({
+    id: "reward-1",
+    bogoEnabled: true,
+    buyQuantity: 1,
+    freeQuantity: 1,
+    discountEnabled: false,
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+  });
+  const liveEvent = { ...createEvent([reward]), status: "live" as const };
+
+  // This user already has 1 paid ticket of this type. Requesting 2 more paid
+  // tickets (which would issue 2 additional free BOGO tickets, i.e. 4 more
+  // tickets total) must be evaluated against the PAID cap only: 1 + 2 = 3 > 2,
+  // so it is correctly rejected — not because 1 + 4 would also exceed 2.
+  const { service } = await makeCheckoutService({
+    event: liveEvent,
+    repository: { getActivePurchasedCountForTicket: async () => 1 },
+  });
+
+  await assert.rejects(
+    () => service.createIntent(buyer as never, {
+      kind: "ticket",
+      paymentMethod: "card",
+      eventId: eventId.toString(),
+      ticketId,
+      quantity: 2,
+      applyReward: true,
+      rewardId: "reward-1",
+      acceptedTerms: true,
+    }),
+    /You can only purchase 1 more ticket of this type/,
+  );
+});
+
+test("a user who already purchased the maximum 2 paid tickets is rejected from buying more during a live event", async () => {
+  const liveEvent = { ...createEvent(), status: "live" as const };
+  const { service } = await makeCheckoutService({
+    event: liveEvent,
+    repository: { getActivePurchasedCountForTicket: async () => 2 },
+  });
+
+  await assert.rejects(
+    () => service.createIntent(buyer as never, {
+      kind: "ticket",
+      paymentMethod: "card",
+      eventId: eventId.toString(),
+      ticketId,
+      quantity: 2,
+      applyReward: false,
+      rewardId: null,
+      acceptedTerms: true,
+    }),
+    /You have already purchased the maximum of 2 tickets of this type/,
+  );
+});
+
+test("draft and cancelled events remain blocked from ticket checkout intent creation", async () => {
+  for (const status of ["draft", "cancelled"] as const) {
+    const blockedEvent = { ...createEvent(), status };
+    const { service } = await makeCheckoutService({ event: blockedEvent });
+
+    await assert.rejects(
+      () => service.createIntent(buyer as never, {
+        kind: "ticket",
+        paymentMethod: "card",
+        eventId: eventId.toString(),
+        ticketId,
+        quantity: 1,
+        applyReward: false,
+        rewardId: null,
+        acceptedTerms: true,
+      }),
+      /Event not found/,
+      `status "${status}" must still be rejected`,
+    );
+  }
+});
+
+test("insufficient ticket inventory without an offer is still rejected for a live event", async () => {
+  const liveEvent = { ...createEvent(), status: "live" as const };
+  const { service } = await makeCheckoutService({
+    event: liveEvent,
+    eventRepository: { reserveTicketAndRewardCapacity: async () => null },
+  });
+
+  await assert.rejects(
+    () => service.createIntent(buyer as never, {
+      kind: "ticket",
+      paymentMethod: "card",
+      eventId: eventId.toString(),
+      ticketId,
+      quantity: 2,
+      applyReward: false,
+      rewardId: null,
+      acceptedTerms: true,
+    }),
+    /Not enough tickets are available/,
+  );
+});
+
+test("terms must be accepted before a live-event checkout intent is created", async () => {
+  const liveEvent = { ...createEvent(), status: "live" as const };
+  const { service } = await makeCheckoutService({ event: liveEvent });
+
+  await assert.rejects(
+    () => service.createIntent(buyer as never, {
+      kind: "ticket",
+      paymentMethod: "card",
+      eventId: eventId.toString(),
+      ticketId,
+      quantity: 1,
+      applyReward: false,
+      rewardId: null,
+      acceptedTerms: false,
+    } as never),
+    /Terms must be accepted/,
+  );
+});

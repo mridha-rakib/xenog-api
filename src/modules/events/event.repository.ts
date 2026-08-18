@@ -1291,8 +1291,7 @@ export class EventRepository {
     return EventModel.findOneAndUpdate(
       {
         _id: eventId,
-        status: "published",
-        scheduledAt: { $ne: null, $gt: new Date() },
+        status: { $in: ["published", "live"] },
         tickets: { $elemMatch: { id: ticketId, availableCount: { $gte: quantity } } },
       },
       { $inc: { "tickets.$.availableCount": -quantity } },
@@ -1338,8 +1337,7 @@ export class EventRepository {
       return EventModel.findOneAndUpdate(
         {
           _id: eventId,
-          status: "published",
-          scheduledAt: { $ne: null, $gt: new Date() },
+          status: { $in: ["published", "live"] },
           tickets: { $elemMatch: { id: ticketId, availableCount: { $gte: ticketQuantity } } },
           rewards: { $elemMatch: { id: rewardId, disabledAt: null } },
         },
@@ -1360,8 +1358,7 @@ export class EventRepository {
     return EventModel.findOneAndUpdate(
       {
         _id: eventId,
-        status: "published",
-        scheduledAt: { $ne: null, $gt: new Date() },
+        status: { $in: ["published", "live"] },
         tickets: { $elemMatch: { id: ticketId, availableCount: { $gte: ticketQuantity } } },
         rewards: { $elemMatch: { id: rewardId, disabledAt: null, availableCount: { $gte: rewardQuantity } } },
       },

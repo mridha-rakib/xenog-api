@@ -9,6 +9,7 @@ import { logger } from "../../core/logger/logger.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { EventRepository } from "../events/event.repository.js";
 import type { EventReward, EventTicket, IEvent } from "../events/event.interface.js";
+import { EventInteractionSummaryService, type EventInteractionSummary } from "../events/event-interaction-summary.js";
 import { RewardClaimRepository } from "../events/reward-claim.repository.js";
 import { ProductRepository } from "../products/product.repository.js";
 import { UserRepository } from "../user/user.repository.js";
@@ -124,6 +125,7 @@ export class CheckoutPaymentService {
     private readonly ticketPassClaimRepository = new TicketPassClaimRepository(),
     private readonly crowdStatusService = new CrowdStatusService(),
     private readonly rewardClaimRepository = new RewardClaimRepository(),
+    private readonly eventInteractionSummaryService = new EventInteractionSummaryService(),
   ) {}
 
   public async getMyTicketPurchaseCounts(
@@ -647,11 +649,20 @@ export class CheckoutPaymentService {
       this.ticketCancellationRepository.findByOrderIds(orderIds),
     ]);
     const eventById = new Map(events.map((event) => [event._id.toString(), event]));
-    const [publicGoingSummaries, crowdStatusByEventId] = await Promise.all([
+    const [publicGoingSummaries, crowdStatusByEventId, interactionSummaryByEventId] = await Promise.all([
       this.getPublicEventGoingSummaries(
         events.map((event) => ({ id: event._id.toString(), status: event.status })),
       ),
       this.crowdStatusService.getCrowdStatusByEventId(events),
+      this.eventInteractionSummaryService.buildForEvents(
+        events.map((event) => ({
+          id: event._id.toString(),
+          userId: event.userId.toString(),
+          name: event.name,
+          description: event.description,
+        })),
+        user.id,
+      ),
     ]);
     const followingIdSet = new Set(followingIds);
     const userIds = [
@@ -710,6 +721,7 @@ export class CheckoutPaymentService {
           followingIdSet.has(event.userId.toString()),
           publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },
           crowdStatusByEventId.get(event._id.toString()) ?? null,
+          interactionSummaryByEventId.get(event._id.toString()),
         );
         const itemKey = `${lineItem.eventId}:${lineItem.itemId}`;
         for (const ticketPass of walletItem.ticketPasses) {
@@ -793,6 +805,7 @@ export class CheckoutPaymentService {
           followingIdSet.has(event.userId.toString()),
           publicGoingSummaries.get(event._id.toString()) ?? { going: 0, avatars: [] },
           crowdStatusByEventId.get(event._id.toString()) ?? null,
+          interactionSummaryByEventId.get(event._id.toString()),
         );
         sharedItem.refund = null;
         return sharedItem;
@@ -3057,6 +3070,7 @@ export class CheckoutPaymentService {
     isFollowing: boolean,
     publicGoingSummary: PublicEventGoingSummaryResponse,
     crowdStatus: TicketWalletItem["event"]["crowdStatus"],
+    interactionSummary?: EventInteractionSummary,
   ): TicketWalletItem {
     const { paidQuantity, freeQuantity, totalQuantity } = this.getEffectiveTicketQuantities(event, lineItem);
     const ticketPasses = this.buildTicketPasses(order, lineItem, event);
@@ -3133,6 +3147,7 @@ export class CheckoutPaymentService {
             }
           : null,
         publicGoingSummary,
+        ...interactionSummary,
       },
     };
   }
@@ -3149,6 +3164,7 @@ export class CheckoutPaymentService {
     isFollowing: boolean,
     publicGoingSummary: PublicEventGoingSummaryResponse,
     crowdStatus: TicketWalletItem["event"]["crowdStatus"],
+    interactionSummary?: EventInteractionSummary,
   ): TicketWalletItem {
     const ticketIndex = share.ticketIndex ?? 1;
     const unitAmount = 0;
@@ -3229,6 +3245,7 @@ export class CheckoutPaymentService {
         cancellationDisplayReason: event.cancellationDisplayReason ?? null,
         host: host ? { ...this.toWalletUser(host), isFollowing } : null,
         publicGoingSummary,
+        ...interactionSummary,
       },
     };
   }

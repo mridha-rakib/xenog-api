@@ -260,6 +260,16 @@ export interface TicketWalletEvent {
   cancellationDisplayReason?: string | null;
   host?: TicketWalletEventHost | null;
   publicGoingSummary?: PublicEventGoingSummaryResponse;
+  // Canonical Event -> Interaction Moment summary, matching the fields the
+  // Feed and Event Details endpoints already return for the same event —
+  // see EventInteractionSummaryService. Kept optional since older cached
+  // clients/tests may not send them.
+  interactionMomentId?: string;
+  likesCount?: number;
+  commentsCount?: number;
+  sharesCount?: number;
+  isLiked?: boolean;
+  isSaved?: boolean;
 }
 
 export interface CheckoutQuoteResponse {

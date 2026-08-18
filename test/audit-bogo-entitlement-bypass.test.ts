@@ -295,6 +295,9 @@ test("BOGO bypass audit: cancelling both paid passes refunds the full captured a
     undefined as never,
     undefined as never,
     ticketPassClaimRepository as never,
+    undefined as never, // crowdStatusService
+    undefined as never, // rewardClaimRepository
+    { buildForEvents: async () => new Map() } as never, // eventInteractionSummaryService
   );
 
   const wallet = await walletService.getMyTicketWallet({ id: buyerId.toString() } as never);

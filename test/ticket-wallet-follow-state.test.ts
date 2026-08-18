@@ -179,6 +179,17 @@ const createWalletFixture = async ({
     { findRefundItemsByOrderIds: async () => [] } as never,
     undefined as never,
     ticketCancellationRepository as never,
+    undefined as never, // ticketCancellationService
+    undefined as never, // taxService
+    undefined as never, // invoiceService
+    undefined as never, // ticketPassClaimRepository
+    undefined as never, // crowdStatusService
+    undefined as never, // rewardClaimRepository
+    // eventInteractionSummaryService — this fixture's events are unrelated to
+    // interaction counts; a no-op keeps these tests off a real Mongo
+    // connection (see event-interaction-consistency.test.ts for coverage of
+    // the interaction fields themselves).
+    { buildForEvents: async () => new Map() } as never,
   );
 
   return {

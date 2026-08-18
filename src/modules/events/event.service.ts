@@ -12,6 +12,7 @@ import { UserRepository } from "../user/user.repository.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
 import { UserBlockRepository } from "../user/user-block.repository.js";
 import { EventSaveRepository } from "./event-save.repository.js";
+import { EventInteractionSummaryService } from "./event-interaction-summary.js";
 import { LiveRoomRepository } from "../live-rooms/live-room.repository.js";
 import { MomentRepository } from "../moments/moment.repository.js";
 import { MomentReactionRepository } from "../moments/moment-reaction.repository.js";
@@ -260,6 +261,7 @@ export class EventService {
     private readonly eventCancellationRefundService = new EventCancellationRefundService(),
     private readonly reportRepository = new ReportRepository(),
     private readonly geoIpService = new GeoIpService(),
+    private readonly eventInteractionSummaryService = new EventInteractionSummaryService(),
   ) {}
 
   public async saveDraft(
@@ -1376,7 +1378,7 @@ export class EventService {
   }
 
   public async listMyProfileEvents(user: AuthUser): Promise<ProfileEventGroupsResponse> {
-    return this.listProfileEventsByUserId(user.id, true);
+    return this.listProfileEventsByUserId(user.id, true, {}, user.id);
   }
 
   public async listProfileEventsForUser(
@@ -1397,7 +1399,7 @@ export class EventService {
       }
     }
 
-    return this.listProfileEventsByUserId(userId, isOwner, query);
+    return this.listProfileEventsByUserId(userId, isOwner, query, user.id);
   }
 
   public async listUserEventsForAdmin(userId: string): Promise<ProfileEventGroupsResponse> {
@@ -1433,6 +1435,7 @@ export class EventService {
     userId: string,
     includePrivateEvents = true,
     query: ProfileEventsQuery = {},
+    viewerId?: string,
   ): Promise<ProfileEventGroupsResponse> {
     if (query.filter) {
       const filter = query.filter;
@@ -1442,9 +1445,23 @@ export class EventService {
         this.eventRepository.countProfileEventsByUserId(userId, includePrivateEvents, filter),
         this.userRepository.findById(userId),
       ]);
+      const interactionSummaries = await this.eventInteractionSummaryService.buildForEvents(
+        events.map((event) => ({
+          id: event._id.toString(),
+          userId: event.userId.toString(),
+          name: event.name,
+          description: event.description,
+        })),
+        viewerId,
+      );
       const responseEvents = await this.withCrowdStatuses(
         events,
-        await this.withPublicGoingSummaries(events.map((event) => this.toResponse(event, host))),
+        await this.withPublicGoingSummaries(
+          events.map((event) => ({
+            ...this.toResponse(event, host),
+            ...interactionSummaries.get(event._id.toString()),
+          })),
+        ),
       );
 
       return {
@@ -1458,7 +1475,8 @@ export class EventService {
     const cachedEvents = await this.getCachedProfileEvents(cacheKey);
 
     if (cachedEvents) {
-      return this.withCrowdStatusesForGroups(await this.withPublicGoingSummariesForGroups(cachedEvents));
+      const withExtras = await this.withCrowdStatusesForGroups(await this.withPublicGoingSummariesForGroups(cachedEvents));
+      return this.withInteractionSummariesForGroups(withExtras, viewerId);
     }
 
     const [events, host] = await Promise.all([
@@ -1473,7 +1491,37 @@ export class EventService {
 
     await this.cacheProfileEvents(cacheKey, response);
 
-    return this.withCrowdStatusesForGroups(await this.withPublicGoingSummariesForGroups(response));
+    const withExtras = await this.withCrowdStatusesForGroups(await this.withPublicGoingSummariesForGroups(response));
+    return this.withInteractionSummariesForGroups(withExtras, viewerId);
+  }
+
+  // Interaction counts are event-wide but isLiked/isSaved are viewer-specific,
+  // so — unlike withCrowdStatusesForGroups/withPublicGoingSummariesForGroups
+  // above, whose outputs also aren't cached — this always runs after the
+  // Redis-cached (viewer-agnostic) response is read, never before it's written.
+  private async withInteractionSummariesForGroups(
+    groups: ProfileEventGroupsResponse,
+    viewerId?: string,
+  ): Promise<ProfileEventGroupsResponse> {
+    const interactionSummaries = await this.eventInteractionSummaryService.buildForEvents(
+      [...groups.active, ...groups.past].map((event) => ({
+        id: event.id,
+        userId: event.userId,
+        name: event.name,
+        description: event.description,
+      })),
+      viewerId,
+    );
+    const applySummary = (event: EventResponse): EventResponse => ({
+      ...event,
+      ...interactionSummaries.get(event.id),
+    });
+
+    return {
+      ...groups,
+      active: groups.active.map(applySummary),
+      past: groups.past.map(applySummary),
+    };
   }
 
   public async startEvent(user: AuthUser, eventId: string): Promise<EventResponse> {

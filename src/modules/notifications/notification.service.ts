@@ -3,7 +3,7 @@ import httpStatus from "http-status";
 import { Types } from "mongoose";
 import { AppError } from "../../core/errors/app-error.js";
 import { StorageService } from "../storage/storage.service.js";
-import type { NotificationResponse, NotificationType } from "./notification.interface.js";
+import type { NotificationContentType, NotificationResponse, NotificationType } from "./notification.interface.js";
 import { NotificationRepository } from "./notification.repository.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
 import { realtimeGateway } from "../realtime/realtime.gateway.js";
@@ -68,7 +68,14 @@ export class NotificationService {
     message: string,
     options: {
       title?: string | null;
+      actorUserId?: string | null;
+      actorName?: string | null;
+      actorUsername?: string | null;
+      actorAvatarKey?: string | null;
       eventId?: string | null;
+      momentId?: string | null;
+      contentType?: NotificationContentType | null;
+      eventName?: string | null;
       orderId?: string | null;
       refundId?: string | null;
       refundStatus?: string | null;
@@ -83,7 +90,14 @@ export class NotificationService {
       type,
       message,
       title: options.title ?? null,
+      actorUserId: options.actorUserId ?? null,
+      actorName: options.actorName ?? null,
+      actorUsername: options.actorUsername ?? null,
+      actorAvatarKey: options.actorAvatarKey ?? null,
       eventId: options.eventId ?? null,
+      momentId: options.momentId ?? null,
+      contentType: options.contentType ?? null,
+      eventName: options.eventName ?? null,
       orderId: options.orderId ?? null,
       refundId: options.refundId ?? null,
       refundStatus: options.refundStatus ?? null,
@@ -95,6 +109,9 @@ export class NotificationService {
       return;
     }
     const unreadCount = await this.repository.countUnreadByRecipientId(recipientUserId);
+    const actorAvatarUrl = notification.actorAvatarKey
+      ? (await this.storageService.createDownloadUrl(notification.actorAvatarKey)).url
+      : null;
 
     realtimeGateway.notifyUser(recipientUserId, {
       type: "notification:new",
@@ -103,7 +120,14 @@ export class NotificationService {
         type: notification.type,
         title: notification.title ?? null,
         message: notification.message ?? null,
+        actorId: notification.actorUserId?.toString() ?? null,
+        actorName: notification.actorName ?? null,
+        actorUsername: notification.actorUsername ?? null,
+        actorAvatarUrl,
         eventId: notification.eventId ?? null,
+        momentId: notification.momentId ?? null,
+        contentType: notification.contentType ?? null,
+        eventName: notification.eventName ?? null,
         orderId: notification.orderId ?? null,
         refundId: notification.refundId ?? null,
         refundStatus: notification.refundStatus ?? null,
@@ -122,6 +146,8 @@ export class NotificationService {
         data: {
           type,
           ...(options.eventId ? { eventId: options.eventId } : {}),
+          ...(options.momentId ? { momentId: options.momentId } : {}),
+          ...(options.contentType ? { contentType: options.contentType } : {}),
           ...(options.orderId ? { orderId: options.orderId } : {}),
           ...(options.refundId ? { refundId: options.refundId } : {}),
           ...(options.deepLink ? { deepLink: options.deepLink } : {}),
@@ -139,6 +165,8 @@ export class NotificationService {
       actorUsername?: string | null;
       actorAvatarKey?: string | null;
       eventId?: string | null;
+      momentId?: string | null;
+      contentType?: NotificationContentType | null;
       orderId?: string | null;
       refundId?: string | null;
       refundStatus?: string | null;
@@ -168,6 +196,8 @@ export class NotificationService {
       actorAvatarUrl,
       isFollowing: actorId ? viewerFollowingSet.has(actorId) : null,
       eventId: n.eventId ?? null,
+      momentId: n.momentId ?? null,
+      contentType: n.contentType ?? null,
       orderId: n.orderId ?? null,
       refundId: n.refundId ?? null,
       refundStatus: n.refundStatus ?? null,

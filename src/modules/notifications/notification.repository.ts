@@ -11,6 +11,8 @@ export class NotificationRepository {
       actorUsername: data.actorUsername ?? null,
       actorAvatarKey: data.actorAvatarKey ?? null,
       eventId: data.eventId ?? null,
+      momentId: data.momentId ?? null,
+      contentType: data.contentType ?? null,
       orderId: data.orderId ?? null,
       refundId: data.refundId ?? null,
       refundStatus: data.refundStatus ?? null,

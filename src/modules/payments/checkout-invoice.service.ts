@@ -181,15 +181,16 @@ export class CheckoutInvoiceService {
 
   public renderHtml(invoice: ICheckoutInvoice): string {
     const snapshot = invoice.snapshot;
+    const wrap = "word-break:break-word;overflow-wrap:break-word;";
     const lineRows = snapshot.lineItems.flatMap((item) => {
       const description = [item.description, item.ticketType ? `${item.ticketType} ticket` : null]
         .filter(Boolean)
         .join(" · ");
       const rows = [
         `<tr>
-          <td style="padding:14px 0;border-bottom:1px solid #ECEEF2;">
-            <div style="font-weight:700;color:#111827;">${escapeHtml(item.name)}</div>
-            ${description ? `<div style="font-size:12px;color:#6B7280;margin-top:4px;">${escapeHtml(description)}</div>` : ""}
+          <td style="padding:14px 0;border-bottom:1px solid #ECEEF2;${wrap}">
+            <div style="font-weight:700;color:#111827;${wrap}">${escapeHtml(item.name)}</div>
+            ${description ? `<div style="font-size:12px;color:#6B7280;margin-top:4px;${wrap}">${escapeHtml(description)}</div>` : ""}
           </td>
           <td style="padding:14px 8px;border-bottom:1px solid #ECEEF2;text-align:center;color:#111827;">${item.paidQuantity}</td>
           <td style="padding:14px 8px;border-bottom:1px solid #ECEEF2;text-align:center;color:#111827;">${item.freeQuantity}</td>
@@ -199,7 +200,7 @@ export class CheckoutInvoiceService {
       ];
       if (item.freeQuantity > 0) {
         rows.push(`<tr>
-          <td style="padding:10px 0 14px 18px;border-bottom:1px solid #ECEEF2;color:#4B5563;">Rewarded ${escapeHtml(item.name)}</td>
+          <td style="padding:10px 0 14px 18px;border-bottom:1px solid #ECEEF2;color:#4B5563;${wrap}">Rewarded ${escapeHtml(item.name)}</td>
           <td style="padding:10px 8px 14px;border-bottom:1px solid #ECEEF2;text-align:center;color:#4B5563;">0</td>
           <td style="padding:10px 8px 14px;border-bottom:1px solid #ECEEF2;text-align:center;color:#4B5563;">${item.freeQuantity}</td>
           <td style="padding:10px 8px 14px;border-bottom:1px solid #ECEEF2;text-align:right;color:#4B5563;">${formatMoney(snapshot.currency, 0)}</td>
@@ -208,43 +209,103 @@ export class CheckoutInvoiceService {
       }
       return rows;
     }).join("");
+
+    const mobileTicketCards = snapshot.lineItems.map((item) => {
+      const description = [item.description, item.ticketType ? `${item.ticketType} ticket` : null]
+        .filter(Boolean)
+        .join(" · ");
+      return `
+        <div style="padding:14px 0;border-bottom:1px solid #ECEEF2;">
+          <div style="font-size:14px;font-weight:700;color:#111827;${wrap}">${escapeHtml(item.name)}</div>
+          ${description ? `<div style="font-size:12px;color:#6B7280;margin-top:4px;${wrap}">${escapeHtml(description)}</div>` : ""}
+          <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px;">
+            <tr>
+              <td style="font-size:11px;color:#6B7280;text-transform:uppercase;">Paid</td>
+              <td style="font-size:11px;color:#6B7280;text-transform:uppercase;text-align:right;">Free</td>
+            </tr>
+            <tr>
+              <td style="font-size:15px;color:#111827;font-weight:700;padding-top:2px;">${item.paidQuantity}</td>
+              <td style="font-size:15px;color:#111827;font-weight:700;text-align:right;padding-top:2px;">${item.freeQuantity}</td>
+            </tr>
+            <tr>
+              <td style="font-size:11px;color:#6B7280;text-transform:uppercase;padding-top:10px;">Unit</td>
+              <td style="font-size:11px;color:#6B7280;text-transform:uppercase;text-align:right;padding-top:10px;">Line total</td>
+            </tr>
+            <tr>
+              <td style="font-size:14px;color:#111827;padding-top:2px;">${formatMoney(snapshot.currency, item.unitAmount)}</td>
+              <td style="font-size:14px;color:#111827;font-weight:700;text-align:right;padding-top:2px;">${formatMoney(snapshot.currency, item.totalAmount)}</td>
+            </tr>
+          </table>
+        </div>`;
+    }).join("");
+
     const venue = snapshot.venue;
     const venueName = venue?.venue || venue?.searchLabel || "Venue TBA";
     const venueAddress = venue?.formattedAddress || venue?.address || "Address TBA";
     const rewardCount = snapshot.lineItems.reduce((sum, item) => sum + item.freeQuantity, 0);
 
-    return `
+    const eventBlock = `
+      <div style="font-size:12px;color:#6B7280;font-weight:700;text-transform:uppercase;">Event</div>
+      <div style="font-size:18px;font-weight:800;color:#111827;margin-top:6px;${wrap}">${escapeHtml(snapshot.eventName || "Event")}</div>
+      <div style="font-size:13px;color:#4B5563;margin-top:6px;${wrap}">${escapeHtml(formatDateTime(snapshot.eventScheduledAt))}</div>
+      <div style="font-size:13px;color:#4B5563;margin-top:6px;${wrap}">${escapeHtml(venueName)}</div>
+      <div style="font-size:13px;color:#6B7280;margin-top:4px;${wrap}">${escapeHtml(venueAddress)}</div>
+    `;
+    const orderBlockDesktop = `
+      <div style="font-size:12px;color:#6B7280;font-weight:700;text-transform:uppercase;">Order</div>
+      <div style="font-size:13px;color:#111827;margin-top:6px;${wrap}">${escapeHtml(snapshot.orderId)}</div>
+      <div style="font-size:13px;color:#4B5563;margin-top:6px;${wrap}">${escapeHtml(formatDateTime(snapshot.purchasedAt))}</div>
+      <div style="font-size:13px;color:#4B5563;margin-top:6px;${wrap}">${escapeHtml(snapshot.paymentMethod)}</div>
+    `;
+
+    return `<!doctype html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Xenog invoice ${escapeHtml(invoice.invoiceNumber)}</title>
+        <style>
+          @media only screen and (max-width: 480px) {
+            .xg-desktop-only { display: none !important; }
+            .xg-mobile-only { display: block !important; }
+            .xg-container { padding: 16px 8px !important; }
+            .xg-card { padding: 20px !important; }
+          }
+        </style>
+      </head>
+      <body style="margin:0;padding:0;background:#F5F6F8;">
       <div style="margin:0;padding:0;background:#F5F6F8;font-family:Arial,Helvetica,sans-serif;color:#111827;">
-        <div style="max-width:680px;margin:0 auto;padding:24px 12px;">
+        <div class="xg-container" style="max-width:680px;margin:0 auto;padding:24px 12px;">
           <div style="background:#0B0B0C;border-radius:18px 18px 0 0;padding:28px 28px 24px;">
             <div style="font-size:24px;font-weight:800;color:#FFFFFF;letter-spacing:0;">Xenog</div>
             <div style="margin-top:16px;color:#D1FAE5;font-size:13px;font-weight:700;">Payment confirmed</div>
             <div style="margin-top:6px;color:#FFFFFF;font-size:28px;font-weight:800;line-height:34px;">Invoice ${escapeHtml(invoice.invoiceNumber)}</div>
           </div>
-          <div style="background:#FFFFFF;border:1px solid #E5E7EB;border-top:0;border-radius:0 0 18px 18px;padding:28px;">
-            <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+          <div class="xg-card" style="background:#FFFFFF;border:1px solid #E5E7EB;border-top:0;border-radius:0 0 18px 18px;padding:28px;">
+            <table class="xg-desktop-only" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
               <tr>
-                <td style="vertical-align:top;padding-right:12px;">
-                  <div style="font-size:12px;color:#6B7280;font-weight:700;text-transform:uppercase;">Event</div>
-                  <div style="font-size:18px;font-weight:800;color:#111827;margin-top:6px;">${escapeHtml(snapshot.eventName || "Event")}</div>
-                  <div style="font-size:13px;color:#4B5563;margin-top:6px;">${escapeHtml(formatDateTime(snapshot.eventScheduledAt))}</div>
-                  <div style="font-size:13px;color:#4B5563;margin-top:6px;">${escapeHtml(venueName)}</div>
-                  <div style="font-size:13px;color:#6B7280;margin-top:4px;">${escapeHtml(venueAddress)}</div>
+                <td style="vertical-align:top;padding-right:12px;width:58%;">
+                  ${eventBlock}
                 </td>
-                <td style="vertical-align:top;text-align:right;">
-                  <div style="font-size:12px;color:#6B7280;font-weight:700;text-transform:uppercase;">Order</div>
-                  <div style="font-size:13px;color:#111827;margin-top:6px;">${escapeHtml(snapshot.orderId)}</div>
-                  <div style="font-size:13px;color:#4B5563;margin-top:6px;">${escapeHtml(formatDateTime(snapshot.purchasedAt))}</div>
-                  <div style="font-size:13px;color:#4B5563;margin-top:6px;">${escapeHtml(snapshot.paymentMethod)}</div>
+                <td style="vertical-align:top;text-align:right;width:42%;">
+                  ${orderBlockDesktop}
                 </td>
               </tr>
             </table>
+            <div class="xg-mobile-only" style="display:none;margin-bottom:24px;">
+              <div>
+                ${eventBlock}
+              </div>
+              <div style="margin-top:16px;">
+                ${orderBlockDesktop}
+              </div>
+            </div>
             <div style="background:#F9FAFB;border:1px solid #ECEEF2;border-radius:12px;padding:16px;margin-bottom:24px;">
-              <div style="font-size:13px;color:#4B5563;"><strong style="color:#111827;">Purchaser:</strong> ${escapeHtml(snapshot.buyerName)} &lt;${escapeHtml(snapshot.buyerEmail)}&gt;</div>
+              <div style="font-size:13px;color:#4B5563;${wrap}"><strong style="color:#111827;">Purchaser:</strong> ${escapeHtml(snapshot.buyerName)} &lt;${escapeHtml(snapshot.buyerEmail)}&gt;</div>
               <div style="font-size:13px;color:#4B5563;margin-top:6px;"><strong style="color:#111827;">Access:</strong> ${escapeHtml(snapshot.eventPrivacy || "public")}</div>
               <div style="font-size:13px;color:#4B5563;margin-top:6px;"><strong style="color:#111827;">Policy:</strong> ${escapeHtml(snapshot.termsVersion || "terms-current")} / ${escapeHtml(snapshot.refundEscrowVersion || "refund-escrow-current")}</div>
             </div>
-            <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+            <table class="xg-desktop-only" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
               <thead>
                 <tr>
                   <th align="left" style="padding:0 0 10px;color:#6B7280;font-size:12px;text-transform:uppercase;">Ticket</th>
@@ -256,6 +317,9 @@ export class CheckoutInvoiceService {
               </thead>
               <tbody>${lineRows}</tbody>
             </table>
+            <div class="xg-mobile-only" style="display:none;">
+              ${mobileTicketCards}
+            </div>
             <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:24px;">
               ${this.summaryRow("Subtotal", formatMoney(snapshot.currency, snapshot.subtotalAmount))}
               ${this.summaryRow("Discount", formatMoney(snapshot.currency, snapshot.discountAmount))}
@@ -270,6 +334,8 @@ export class CheckoutInvoiceService {
           </div>
         </div>
       </div>
+      </body>
+      </html>
     `;
   }
 

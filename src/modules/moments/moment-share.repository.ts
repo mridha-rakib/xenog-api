@@ -5,20 +5,27 @@ import { Types } from "mongoose";
 const toObjectIds = (ids: string[]) => ids.map((id) => new Types.ObjectId(id));
 
 export class MomentShareRepository {
+  // rawResult surfaces the driver's lastErrorObject.upserted (only set when a
+  // new document was inserted) so callers can distinguish a genuinely new
+  // share/repost from an idempotent no-op on an already-existing share —
+  // needed so notification side effects fire only for the former.
   public async share(userId: string, momentId: string, payload: {
     caption?: string | null;
     taggedFriendIds?: string[];
     originalType: "post" | "event";
     originalId: string;
     clientRequestId?: string | null;
-  }): Promise<IMomentShare> {
-    const share = await MomentShareModel.findOneAndUpdate(
+  }): Promise<{ share: IMomentShare; isNew: boolean }> {
+    const result = await MomentShareModel.findOneAndUpdate(
       { userId, momentId },
       { $setOnInsert: { userId, momentId, ...payload } },
-      { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
+      { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true, includeResultMetadata: true },
     );
 
-    return share;
+    return {
+      share: result.value as IMomentShare,
+      isNew: Boolean(result.lastErrorObject?.upserted),
+    };
   }
 
   public async findById(shareId: string): Promise<IMomentShare | null> {

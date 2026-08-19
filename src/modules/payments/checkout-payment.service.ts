@@ -2303,7 +2303,7 @@ export class CheckoutPaymentService {
     return Math.max(0, totalOwned - cancelledCount);
   }
 
-  private async dispatchTicketNotifications(order: ICheckoutOrder): Promise<void> {
+  private async dispatchTicketNotifications(order: ICheckoutOrder, event?: IEvent | null): Promise<void> {
     if (order.kind !== "ticket") {
       return;
     }
@@ -2319,6 +2319,9 @@ export class CheckoutPaymentService {
       const eventId = ticketItem.eventId ?? null;
       const eventName = ticketItem.name ?? null;
       const ticketName = ticketItem.name ?? null;
+      const buyerDisplayEventName = event?.name ?? eventName ?? "your event";
+      const buyerTitle = "Your tickets are ready";
+      const buyerMessage = `Your tickets for ${buyerDisplayEventName} are now available.`;
 
       // Buyer confirmation notification
       const buyerNotification = await this.notificationRepository.create({
@@ -2330,6 +2333,8 @@ export class CheckoutPaymentService {
         eventId,
         eventName,
         ticketName,
+        title: buyerTitle,
+        message: buyerMessage,
       });
 
       realtimeGateway.notifyUser(order.userId.toString(), {
@@ -2344,6 +2349,8 @@ export class CheckoutPaymentService {
           eventId,
           eventName,
           ticketName,
+          title: buyerTitle,
+          message: buyerMessage,
           isRead: false,
           createdAt: buyerNotification.createdAt.toISOString(),
         },
@@ -2467,7 +2474,7 @@ export class CheckoutPaymentService {
         }
 
         await this.finalizePaidSideEffects(updatedOrder);
-        void this.dispatchTicketNotifications(updatedOrder);
+        void this.dispatchTicketNotifications(updatedOrder, ticketEvent);
       }
 
       return updatedOrder ?? await this.repository.findById(order._id.toString()) ?? order;

@@ -17,7 +17,17 @@ export type NotificationType =
   | "ticket_cancelled"
   | "refund_processing"
   | "refund_completed"
-  | "refund_needs_attention";
+  | "refund_needs_attention"
+  | "moment_reaction"
+  | "moment_comment"
+  | "moment_share";
+
+// Only meaningful for the moment_* interaction types above. Distinguishes
+// whether the interacted-with Moment is a standalone Post or an Event's
+// Interaction Moment — deliberately explicit rather than inferred from the
+// notification type name, since both Posts and Events share the same
+// moment_reaction/moment_comment/moment_share types.
+export type NotificationContentType = "post" | "event";
 
 export interface INotification {
   _id: Types.ObjectId;
@@ -28,6 +38,8 @@ export interface INotification {
   actorUsername?: string | null;
   actorAvatarKey?: string | null;
   eventId?: string | null;
+  momentId?: string | null;
+  contentType?: NotificationContentType | null;
   orderId?: string | null;
   refundId?: string | null;
   refundStatus?: string | null;
@@ -51,6 +63,8 @@ export interface CreateNotificationDto {
   actorUsername?: string | null;
   actorAvatarKey?: string | null;
   eventId?: string | null;
+  momentId?: string | null;
+  contentType?: NotificationContentType | null;
   orderId?: string | null;
   refundId?: string | null;
   refundStatus?: string | null;
@@ -72,6 +86,8 @@ export interface NotificationResponse {
   actorAvatarUrl?: string | null;
   isFollowing?: boolean | null;
   eventId?: string | null;
+  momentId?: string | null;
+  contentType?: NotificationContentType | null;
   orderId?: string | null;
   refundId?: string | null;
   refundStatus?: string | null;

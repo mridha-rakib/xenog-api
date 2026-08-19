@@ -44,6 +44,7 @@ import { TicketShareRepository } from "../payments/ticket-share.repository.js";
 import { isOwnedMomentVideoStorageKey, MomentVideoService } from "./moment-video.service.js";
 import { TranscodingMomentSyncService } from "../transcoding/transcoding-moment-sync.service.js";
 import { ReportRepository } from "../reports/report.repository.js";
+import { NotificationService } from "../notifications/notification.service.js";
 import {
   buildReactionSocialContext,
   calculateFreshnessScore,
@@ -100,6 +101,7 @@ export class MomentService {
     private readonly transcodingMomentSyncService = new TranscodingMomentSyncService(),
     private readonly reportRepository = new ReportRepository(),
     private readonly geoIpService = new GeoIpService(),
+    private readonly notificationService = new NotificationService(),
   ) {}
 
   public async createVideoUpload(user: AuthUser, contentType: string): Promise<Record<string, unknown>> {
@@ -482,13 +484,25 @@ export class MomentService {
       throw new AppError("The original item is unavailable", httpStatus.NOT_FOUND);
     }
 
-    const share = await this.momentShareRepository.share(user.id, momentId, {
+    const { share, isNew } = await this.momentShareRepository.share(user.id, momentId, {
       caption: payload.caption?.trim() || null,
       taggedFriendIds,
       originalType,
       originalId,
       clientRequestId: payload.clientRequestId ?? null,
     });
+
+    // Only a genuinely new share (isNew) notifies — the share() upsert is a
+    // deliberate no-op when this user already reposted this content, and
+    // that idempotent retry must never re-notify the owner.
+    if (isNew) {
+      await this.sendMomentInteractionNotification({
+        moment,
+        actor: user,
+        type: "moment_share",
+        sourceKey: `share:${share._id.toString()}`,
+      });
+    }
 
     const interactionContext = await this.buildInteractionContext([moment], user);
 
@@ -602,8 +616,21 @@ export class MomentService {
   }
 
   public async toggleMomentReaction(momentId: string, user: AuthUser): Promise<MomentInteractionSummaryResponse> {
-    await this.getViewableMoment(momentId, user);
-    await this.momentReactionRepository.toggleLike(user.id, momentId);
+    const moment = await this.getViewableMoment(momentId, user);
+    const { isLiked, reaction } = await this.momentReactionRepository.toggleLike(user.id, momentId);
+
+    // Only a newly-created reaction (a fresh like, not an unlike/toggle-off)
+    // should notify — reaction is only non-null when toggleLike just created
+    // a row, so this is the backend-authoritative "like created" signal, not
+    // an inference from the previous frontend isLiked boolean.
+    if (isLiked && reaction) {
+      await this.sendMomentInteractionNotification({
+        moment,
+        actor: user,
+        type: "moment_reaction",
+        sourceKey: `reaction:${momentId}:${user.id}`,
+      });
+    }
 
     return this.getInteractionSummary(momentId, user);
   }
@@ -805,7 +832,7 @@ export class MomentService {
     payload: CreateMomentCommentDto,
     user: AuthUser,
   ): Promise<{ comment: MomentCommentResponse; summary: MomentInteractionSummaryResponse }> {
-    await this.getViewableMoment(momentId, user);
+    const moment = await this.getViewableMoment(momentId, user);
 
     if (payload.parentCommentId) {
       const parentComment = await this.momentCommentRepository.findById(payload.parentCommentId);
@@ -820,6 +847,18 @@ export class MomentService {
       userId: user.id,
       parentCommentId: payload.parentCommentId ?? null,
       text: payload.text.trim(),
+    });
+
+    // sourceKey is the comment's own id, so every successfully-created
+    // comment produces exactly one notification — this does not dedupe two
+    // distinct (possibly duplicate-submitted) comment documents against each
+    // other, which is intentional: comment creation has no request-level
+    // idempotency today, and fixing that is out of scope here.
+    await this.sendMomentInteractionNotification({
+      moment,
+      actor: user,
+      type: "moment_comment",
+      sourceKey: `comment:${comment._id.toString()}`,
     });
 
     return {
@@ -1341,6 +1380,67 @@ export class MomentService {
     }
 
     return moment;
+  }
+
+  /**
+   * Central notification side effect for the three social interaction write
+   * paths (reaction/comment/share), shared by every calling surface (Feed,
+   * Profile Timeline, Event Details, Profile Events) since they all funnel
+   * through toggleMomentReaction/createMomentComment/shareMoment. Resolves
+   * the recipient from the Moment's own userId — for an Event's Interaction
+   * Moment this is kept in lockstep with Event.userId by
+   * MomentRepository.ensureEventAnnouncement, so it already identifies the
+   * real Event host, not some other account. contentType/eventId/momentId
+   * are set explicitly (never inferred from the notification type alone) so
+   * the frontend can never mistake an Event interaction for a standalone
+   * Post — an Interaction Moment is never eligible as a Post navigation
+   * target. Failures here are caught and logged, never thrown: a push/DB
+   * hiccup must not turn a successful reaction/comment/share into a failed
+   * request.
+   */
+  private async sendMomentInteractionNotification(params: {
+    moment: IMoment;
+    actor: AuthUser;
+    type: "moment_reaction" | "moment_comment" | "moment_share";
+    sourceKey: string;
+  }): Promise<void> {
+    const { moment, actor, type, sourceKey } = params;
+    const recipientUserId = moment.userId.toString();
+
+    if (recipientUserId === actor.id) {
+      return;
+    }
+
+    try {
+      const isEvent = Boolean(moment.isEventAnnouncement && moment.eventId);
+      const contentType = isEvent ? "event" as const : "post" as const;
+      const targetLabel = isEvent ? "event" : "post";
+      const verb = type === "moment_reaction" ? "liked" : type === "moment_comment" ? "commented on" : "shared";
+      const title = type === "moment_reaction" ? "New reaction" : type === "moment_comment" ? "New comment" : "New share";
+
+      await this.notificationService.sendSystemNotification(
+        recipientUserId,
+        type,
+        `${actor.name} ${verb} your ${targetLabel}.`,
+        {
+          title,
+          actorUserId: actor.id,
+          actorName: actor.name,
+          actorUsername: actor.username ?? null,
+          actorAvatarKey: actor.avatarKey ?? null,
+          contentType,
+          eventId: isEvent ? moment.eventId!.toString() : null,
+          momentId: isEvent ? null : moment._id.toString(),
+          eventName: isEvent ? (moment.eventTitle ?? null) : null,
+          sourceKey,
+        },
+      );
+    } catch (error) {
+      logger.warn(
+        { err: error, momentId: moment._id.toString(), actorId: actor.id, type },
+        "Failed to send moment interaction notification",
+      );
+    }
   }
 
   private async getInteractionSummary(momentId: string, viewer?: AuthUser): Promise<MomentInteractionSummaryResponse> {

@@ -4,12 +4,14 @@ import type { INotification } from "./notification.interface.js";
 const notificationSchema = new Schema<INotification>(
   {
     recipientUserId: { type: Schema.Types.ObjectId, required: true, index: true },
-    type: { type: String, enum: ["follow", "ticket_buyer", "ticket_creator", "ticket_share", "join_request", "join_request_accepted", "event_member_added", "moderation_warning", "payout_requested", "payout_processing", "payout_completed", "payout_failed", "event_cancelled", "ticket_cancelled", "refund_processing", "refund_completed", "refund_needs_attention"], required: true },
+    type: { type: String, enum: ["follow", "ticket_buyer", "ticket_creator", "ticket_share", "join_request", "join_request_accepted", "event_member_added", "moderation_warning", "payout_requested", "payout_processing", "payout_completed", "payout_failed", "event_cancelled", "ticket_cancelled", "refund_processing", "refund_completed", "refund_needs_attention", "moment_reaction", "moment_comment", "moment_share"], required: true },
     actorUserId: { type: Schema.Types.ObjectId, default: null },
     actorName: { type: String, default: null },
     actorUsername: { type: String, default: null },
     actorAvatarKey: { type: String, default: null },
     eventId: { type: String, default: null },
+    momentId: { type: String, default: null },
+    contentType: { type: String, enum: ["post", "event"], default: null },
     orderId: { type: String, default: null },
     refundId: { type: String, default: null },
     refundStatus: { type: String, default: null },

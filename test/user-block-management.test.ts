@@ -197,6 +197,9 @@ const createService = (options: {
       countByHostUserId: async () => 0,
       findByHostUserId: async () => [],
     } as never,
+    {
+      countDistinctAcceptedWindowsByUser: async () => 0,
+    } as never,
   );
 
   return { service, blocks, follows };

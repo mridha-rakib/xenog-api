@@ -156,6 +156,41 @@ export class UserController {
     });
   };
 
+  public listProfileWindowEvents = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as { id: string };
+    const result = await this.userService.listProfileWindowEvents(
+      id,
+      req.authUser as AuthUser,
+      req.query as { page?: number; limit?: number },
+    );
+
+    ApiResponse.success(res, {
+      message: "Profile window events retrieved",
+      data: {
+        events: result.events,
+      },
+      meta: { pagination: result.pagination },
+    });
+  };
+
+  public listProfileWindowPosts = async (req: Request, res: Response): Promise<void> => {
+    const { id, eventId } = req.params as { id: string; eventId: string };
+    const result = await this.userService.listProfileWindowPosts(
+      id,
+      eventId,
+      req.authUser as AuthUser,
+      req.query as { page?: number; limit?: number },
+    );
+
+    ApiResponse.success(res, {
+      message: "Profile window posts retrieved",
+      data: {
+        posts: result.posts,
+      },
+      meta: { pagination: result.pagination },
+    });
+  };
+
   public follow = async (req: Request, res: Response): Promise<void> => {
     const { id } = req.params as { id: string };
     const follow = await this.userService.followUser(req.authUser as AuthUser, id);

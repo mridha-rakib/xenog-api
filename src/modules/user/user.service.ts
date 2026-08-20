@@ -7,7 +7,16 @@ import {
   type PaginatedResult,
 } from "../../core/utils/pagination.js";
 import type { AuthUser } from "../auth/auth.interface.js";
+import type { IEvent } from "../events/event.interface.js";
 import { EventRepository } from "../events/event.repository.js";
+import {
+  DEFAULT_EVENT_WINDOW_PARTICIPANT_POST_VISIBILITY,
+  type EventWindowMediaItem,
+  type EventWindowPostMediaResponse,
+  type IEventWindow,
+  type IEventWindowPost,
+} from "../event-windows/event-window.interface.js";
+import { EventWindowRepository } from "../event-windows/event-window.repository.js";
 import { StorageService } from "../storage/storage.service.js";
 import type {
   AdminManagedUserResponse,
@@ -19,6 +28,9 @@ import type {
   FriendUserResponse,
   IUser,
   ProfileFollowUserResponse,
+  ProfileWindowPostAuthorResponse,
+  ProfileWindowEventSummary,
+  ProfileWindowPostResponse,
   SuggestedUserResponse,
   UpdateUserDto,
   UserProfileStatsResponse,
@@ -63,6 +75,7 @@ export class UserService {
     private readonly notificationRepository = new NotificationRepository(),
     private readonly eventRepository = new EventRepository(),
     private readonly eventHostReviewRepository = new EventHostReviewRepository(),
+    private readonly eventWindowRepository = new EventWindowRepository(),
   ) {}
 
   public async create(payload: CreateUserDto): Promise<IUser> {
@@ -220,16 +233,124 @@ export class UserService {
     await this.assertFollowTarget(targetUserId);
     await this.assertProfileAccessible(viewer, targetUserId);
 
-    const [followers, following, reviews] = await Promise.all([
+    const [followers, following, reviews, windows] = await Promise.all([
       this.userFollowRepository.countFollowers(targetUserId),
       this.userFollowRepository.countFollowing(targetUserId),
       this.eventHostReviewRepository.countByHostUserId(targetUserId),
+      this.eventWindowRepository.countDistinctAcceptedWindowsByUser(targetUserId),
     ]);
 
     return {
       reviews,
       followers,
       following,
+      windows,
+    };
+  }
+
+  public async listProfileWindowEvents(
+    targetUserId: string,
+    viewer: AuthUser,
+    query: { page?: number; limit?: number },
+  ): Promise<{
+    events: ProfileWindowEventSummary[];
+    pagination: ReturnType<typeof createPaginationMeta>;
+  }> {
+    await this.assertFollowTarget(targetUserId);
+    await this.assertProfileAccessible(viewer, targetUserId);
+
+    const { page, limit, skip } = getPaginationOptions({ page: query.page, limit: query.limit ?? 20 });
+    const [groups, total] = await Promise.all([
+      this.eventWindowRepository.listAcceptedPostEventGroupsByUser(targetUserId, skip, limit),
+      this.eventWindowRepository.countAcceptedPostEventGroupsByUser(targetUserId),
+    ]);
+    const events = await this.eventRepository.findByIds(groups.map((group) => group.eventId.toString()));
+    const eventsById = new Map(events.map((event) => [event._id.toString(), event]));
+    const summaries: ProfileWindowEventSummary[] = [];
+
+    for (const group of groups) {
+      const event = eventsById.get(group.eventId.toString());
+      if (!event || !this.canAccessEventForProfileWindows(viewer, event)) {
+        continue;
+      }
+
+      summaries.push({
+        id: event._id.toString(),
+        name: event.name ?? "",
+        bannerImageKey: event.bannerImageKey ?? null,
+        bannerImageDisplay: event.bannerImageDisplay ?? null,
+        scheduledAt: event.scheduledAt ?? null,
+        endAt: event.endAt ?? null,
+        status: event.status,
+        windowCount: group.windowCount,
+        lastParticipatedAt: group.lastParticipatedAt,
+      });
+    }
+
+    return {
+      events: summaries,
+      pagination: createPaginationMeta(page, limit, total),
+    };
+  }
+
+  public async listProfileWindowPosts(
+    targetUserId: string,
+    eventId: string,
+    viewer: AuthUser,
+    query: { page?: number; limit?: number },
+  ): Promise<{
+    posts: ProfileWindowPostResponse[];
+    pagination: ReturnType<typeof createPaginationMeta>;
+  }> {
+    await this.assertFollowTarget(targetUserId);
+    await this.assertProfileAccessible(viewer, targetUserId);
+
+    const event = await this.eventRepository.findById(eventId);
+    if (!event || !this.canAccessEventForProfileWindows(viewer, event)) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    const { page, limit, skip } = getPaginationOptions({ page: query.page, limit: query.limit ?? 20 });
+    const [posts, total, targetUser] = await Promise.all([
+      this.eventWindowRepository.listAcceptedPostsByUserForEvent(targetUserId, eventId, skip, limit),
+      this.eventWindowRepository.countAcceptedPostsByUserForEvent(targetUserId, eventId),
+      this.userRepository.findById(targetUserId),
+    ]);
+    const windows = await this.eventWindowRepository.findByIds(posts.map((post) => post.windowId.toString()));
+    const windowsById = new Map(windows.map((window) => [window._id.toString(), window]));
+    const visiblePosts: ProfileWindowPostResponse[] = [];
+    const author = await this.toProfileWindowPostAuthorResponse(targetUser);
+
+    for (const post of posts) {
+      const window = windowsById.get(post.windowId.toString());
+      if (!window || !(await this.canViewProfileWindowPost(viewer, event, window))) {
+        continue;
+      }
+
+      visiblePosts.push({
+        id: post._id.toString(),
+        eventId: post.eventId.toString(),
+        windowId: post.windowId.toString(),
+        userId: post.userId.toString(),
+        author,
+        contentType: post.contentType,
+        text: post.text ?? null,
+        mediaItems: post.mediaItems.map((mediaItem, index) => this.toProfileWindowPostMediaResponse(post, mediaItem, index)),
+        status: post.status,
+        window: {
+          id: window._id.toString(),
+          title: window.title ?? null,
+          startsAt: window.startsAt,
+          endsAt: window.endsAt,
+        },
+        createdAt: post.createdAt,
+        updatedAt: post.updatedAt,
+      });
+    }
+
+    return {
+      posts: visiblePosts,
+      pagination: createPaginationMeta(page, limit, total),
     };
   }
 
@@ -573,6 +694,87 @@ export class UserService {
     if (relationship.viewerHasBlockedTarget || relationship.targetHasBlockedViewer) {
       throw new AppError("Profile unavailable", httpStatus.FORBIDDEN);
     }
+  }
+
+  private canAccessEventForProfileWindows(viewer: AuthUser, event: IEvent): boolean {
+    if (viewer.role === "admin" || event.userId.toString() === viewer.id) {
+      return true;
+    }
+
+    if (event.status === "draft") {
+      return false;
+    }
+
+    if (event.status !== "published" && event.status !== "live" && event.status !== "completed") {
+      return false;
+    }
+
+    if (event.privacy === "private" && !event.memberUserIds.some((id) => id.toString() === viewer.id)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  private hasEventEnded(event: IEvent): boolean {
+    return event.status === "completed";
+  }
+
+  private resolveParticipantPostVisibility(window: IEventWindow) {
+    return window.participantPostVisibility ?? DEFAULT_EVENT_WINDOW_PARTICIPANT_POST_VISIBILITY;
+  }
+
+  private async canViewProfileWindowPost(viewer: AuthUser, event: IEvent, window: IEventWindow): Promise<boolean> {
+    if (viewer.role === "admin" || event.userId.toString() === viewer.id) {
+      return true;
+    }
+
+    const viewerPost = await this.eventWindowRepository.findAcceptedPostByUser(window._id.toString(), viewer.id);
+    if (!viewerPost) {
+      return false;
+    }
+
+    return this.resolveParticipantPostVisibility(window) === "instant" || this.hasEventEnded(event);
+  }
+
+  private toProfileWindowPostMediaResponse(
+    post: IEventWindowPost,
+    mediaItem: EventWindowMediaItem,
+    index: number,
+  ): EventWindowPostMediaResponse {
+    const base = {
+      type: mediaItem.type,
+      source: mediaItem.source,
+      contentType: mediaItem.contentType ?? null,
+      durationSeconds: mediaItem.durationSeconds ?? null,
+    };
+
+    if (!mediaItem.storageKey) {
+      return base;
+    }
+
+    return {
+      ...base,
+      url: `/events/${post.eventId.toString()}/windows/${post.windowId.toString()}/posts/${post._id.toString()}/media/${index}`,
+    };
+  }
+
+  private async toProfileWindowPostAuthorResponse(user: IUser | null): Promise<ProfileWindowPostAuthorResponse | null> {
+    if (!user) {
+      return null;
+    }
+
+    const avatarUrl = user.avatarKey
+      ? await this.storageService.createDownloadUrl(user.avatarKey).then((download) => download.url).catch(() => null)
+      : null;
+
+    return {
+      id: user._id.toString(),
+      name: user.name,
+      username: user.username,
+      avatarKey: user.avatarKey ?? null,
+      avatarUrl,
+    };
   }
 
   private async toSuggestedUserResponse(user: IUser, isFollowing: boolean): Promise<SuggestedUserResponse> {

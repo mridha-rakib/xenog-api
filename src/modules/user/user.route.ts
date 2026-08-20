@@ -80,6 +80,18 @@ router.get(
   validate(userValidation.profileReviews),
   catchAsync(controller.listReviews),
 );
+router.get(
+  "/:id/profile-windows",
+  authenticate,
+  validate(userValidation.profileWindows),
+  catchAsync(controller.listProfileWindowEvents),
+);
+router.get(
+  "/:id/profile-windows/:eventId/posts",
+  authenticate,
+  validate(userValidation.profileWindowPosts),
+  catchAsync(controller.listProfileWindowPosts),
+);
 router.post(
   "/:id/follow",
   authenticate,

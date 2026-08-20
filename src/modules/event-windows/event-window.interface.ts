@@ -162,11 +162,20 @@ export interface EventWindowPostMediaResponse {
   durationSeconds?: number | null;
 }
 
+export interface EventWindowPostAuthorResponse {
+  id: string;
+  name: string;
+  username?: string;
+  avatarKey?: string | null;
+  avatarUrl?: string | null;
+}
+
 export interface EventWindowPostResponse {
   id: string;
   eventId: string;
   windowId: string;
   userId: string;
+  author?: EventWindowPostAuthorResponse | null;
   contentType: EventWindowContentType;
   text?: string | null;
   mediaItems: EventWindowPostMediaResponse[];

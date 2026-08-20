@@ -111,6 +111,25 @@ export const userValidation = {
       page: z.coerce.number().int().positive().optional(),
     }),
   }),
+  profileWindows: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+      page: z.coerce.number().int().positive().optional(),
+    }),
+  }),
+  profileWindowPosts: z.object({
+    params: z.object({
+      id: objectId,
+      eventId: objectId,
+    }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+      page: z.coerce.number().int().positive().optional(),
+    }),
+  }),
   profileResource: z.object({
     params: z.object({
       id: objectId,

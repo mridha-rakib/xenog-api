@@ -8,6 +8,8 @@ import { TicketEntitlementService } from "../payments/ticket-entitlement.service
 import type { TicketEntitlement } from "../payments/ticket-entitlement.service.js";
 import { TicketUsageRepository } from "../payments/ticket-usage.repository.js";
 import { StorageService } from "../storage/storage.service.js";
+import type { IUser } from "../user/user.interface.js";
+import { UserRepository } from "../user/user.repository.js";
 import type {
   CreateEventWindowDto,
   CreateEventWindowPostDto,
@@ -15,6 +17,7 @@ import type {
   EventWindowMediaItem,
   EventWindowParticipantPostVisibility,
   EventWindowPostingEligibility,
+  EventWindowPostAuthorResponse,
   EventWindowPostMediaResponse,
   EventWindowPostListResponse,
   EventWindowPostResponse,
@@ -58,6 +61,7 @@ export class EventWindowService {
     private readonly ticketUsageRepository = new TicketUsageRepository(),
     private readonly ticketEntitlementService = new TicketEntitlementService(),
     private readonly storageService = new StorageService(),
+    private readonly userRepository = new UserRepository(),
   ) {}
 
   // Hosts can no longer opt a new/updated window into "video" while video is
@@ -411,9 +415,10 @@ export class EventWindowService {
     const posts = await this.eventWindowRepository.listAcceptedPosts(windowId, options);
     const pagePosts = posts.slice(0, options.limit);
     const nextCursor = posts.length > options.limit ? posts[options.limit]!._id.toString() : null;
+    const authorsById = await this.getPostAuthorsById(pagePosts);
 
     return {
-      posts: await Promise.all(pagePosts.map((post) => this.toPostResponse(post))),
+      posts: await Promise.all(pagePosts.map((post) => this.toPostResponse(post, authorsById.get(post.userId.toString())))),
       nextCursor,
     };
   }
@@ -749,12 +754,37 @@ export class EventWindowService {
     }));
   }
 
-  private async toPostResponse(post: IEventWindowPost): Promise<EventWindowPostResponse> {
+  private async getPostAuthorsById(posts: IEventWindowPost[]): Promise<Map<string, IUser>> {
+    const userIds = [...new Set(posts.map((post) => post.userId.toString()))];
+    const users = await this.userRepository.findByIds(userIds);
+    return new Map(users.map((user) => [user._id.toString(), user]));
+  }
+
+  private async toPostAuthorResponse(user?: IUser): Promise<EventWindowPostAuthorResponse | null> {
+    if (!user) {
+      return null;
+    }
+
+    const avatarUrl = user.avatarKey
+      ? await this.storageService.createDownloadUrl(user.avatarKey).then((download) => download.url).catch(() => null)
+      : null;
+
+    return {
+      id: user._id.toString(),
+      name: user.name,
+      username: user.username,
+      avatarKey: user.avatarKey ?? null,
+      avatarUrl,
+    };
+  }
+
+  private async toPostResponse(post: IEventWindowPost, author?: IUser): Promise<EventWindowPostResponse> {
     return {
       id: post._id.toString(),
       eventId: post.eventId.toString(),
       windowId: post.windowId.toString(),
       userId: post.userId.toString(),
+      author: await this.toPostAuthorResponse(author),
       contentType: post.contentType,
       text: post.text ?? null,
       mediaItems: post.mediaItems.map((mediaItem, index) => this.toMediaResponse(post, mediaItem, index)),

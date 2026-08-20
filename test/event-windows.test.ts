@@ -255,6 +255,23 @@ const createService = async (overrides: {
       return overrides.storageMetadata ?? { contentLength: 1024, contentType: "image/jpeg" };
     },
   };
+  const userRepository = {
+    findByIds: async (ids: string[]) => ids.map((id) => ({
+      _id: new Types.ObjectId(id),
+      name: id === attendee.id ? attendee.name : "Participant",
+      username: id === attendee.id ? attendee.username : "participant",
+      email: "participant@example.com",
+      accountType: "personal",
+      avatarKey: null,
+      currentLocationSharingEnabled: false,
+      notificationsEnabled: true,
+      role: "user",
+      isActive: true,
+      emailVerified: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })),
+  };
 
   return new EventWindowService(
     eventWindowRepository,
@@ -262,6 +279,7 @@ const createService = async (overrides: {
     ticketUsageRepository,
     ticketEntitlementService,
     storageService,
+    userRepository as never,
   );
 };
 

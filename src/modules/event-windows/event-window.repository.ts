@@ -41,6 +41,13 @@ export type CreatePostWithCapacityResult =
   | { status: "duplicate" }
   | { status: "unavailable" };
 
+export interface ProfileWindowEventGroupRecord {
+  eventId: Types.ObjectId;
+  windowIds: Types.ObjectId[];
+  windowCount: number;
+  lastParticipatedAt: Date;
+}
+
 const isDuplicateKeyError = (error: unknown): boolean => {
   if (!error || typeof error !== "object") {
     return false;
@@ -85,6 +92,50 @@ export class EventWindowRepository {
     return EventWindowPostModel.find({ userId, status: "accepted" })
       .sort({ createdAt: -1, _id: -1 })
       .limit(PARTICIPATED_POSTS_SCAN_LIMIT);
+  }
+
+  public async countDistinctAcceptedWindowsByUser(userId: string): Promise<number> {
+    const windowIds = await EventWindowPostModel.distinct("windowId", { userId, status: "accepted" });
+    return windowIds.length;
+  }
+
+  public async countAcceptedPostEventGroupsByUser(userId: string): Promise<number> {
+    const result = await EventWindowPostModel.aggregate<{ total: number }>([
+      { $match: { userId: new Types.ObjectId(userId), status: "accepted" } },
+      { $group: { _id: "$eventId" } },
+      { $count: "total" },
+    ]);
+
+    return result[0]?.total ?? 0;
+  }
+
+  public async listAcceptedPostEventGroupsByUser(
+    userId: string,
+    skip: number,
+    limit: number,
+  ): Promise<ProfileWindowEventGroupRecord[]> {
+    return EventWindowPostModel.aggregate<ProfileWindowEventGroupRecord>([
+      { $match: { userId: new Types.ObjectId(userId), status: "accepted" } },
+      {
+        $group: {
+          _id: "$eventId",
+          windowIds: { $addToSet: "$windowId" },
+          lastParticipatedAt: { $max: "$createdAt" },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          eventId: "$_id",
+          windowIds: 1,
+          windowCount: { $size: "$windowIds" },
+          lastParticipatedAt: 1,
+        },
+      },
+      { $sort: { lastParticipatedAt: -1, eventId: -1 } },
+      { $skip: skip },
+      { $limit: limit },
+    ]);
   }
 
   // Event start moving no longer invalidates a window (a window may start
@@ -164,6 +215,22 @@ export class EventWindowRepository {
     })
       .sort({ _id: 1 })
       .limit(options.limit + 1);
+  }
+
+  public async countAcceptedPostsByUserForEvent(userId: string, eventId: string): Promise<number> {
+    return EventWindowPostModel.countDocuments({ userId, eventId, status: "accepted" });
+  }
+
+  public async listAcceptedPostsByUserForEvent(
+    userId: string,
+    eventId: string,
+    skip: number,
+    limit: number,
+  ): Promise<IEventWindowPost[]> {
+    return EventWindowPostModel.find({ userId, eventId, status: "accepted" })
+      .sort({ createdAt: -1, _id: -1 })
+      .skip(skip)
+      .limit(limit);
   }
 
   public async createPostWithCapacity(payload: CreateWindowPostRecord): Promise<CreatePostWithCapacityResult> {

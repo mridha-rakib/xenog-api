@@ -1,4 +1,10 @@
 import type { Types } from "mongoose";
+import type { EventImageDisplay } from "../events/event.interface.js";
+import type {
+  EventWindowContentType,
+  EventWindowPostMediaResponse,
+  EventWindowPostStatus,
+} from "../event-windows/event-window.interface.js";
 
 export const payoutPreferences = ["manual", "weekly", "monthly"] as const;
 export type PayoutPreference = (typeof payoutPreferences)[number];
@@ -177,6 +183,47 @@ export interface UserProfileStatsResponse {
   reviews: number;
   followers: number;
   following: number;
+  windows: number;
+}
+
+export interface ProfileWindowEventSummary {
+  id: string;
+  name: string;
+  bannerImageKey?: string | null;
+  bannerImageDisplay?: EventImageDisplay | null;
+  scheduledAt?: Date | null;
+  endAt?: Date | null;
+  status: string;
+  windowCount: number;
+  lastParticipatedAt: Date;
+}
+
+export interface ProfileWindowPostAuthorResponse {
+  id: string;
+  name: string;
+  username?: string;
+  avatarKey?: string | null;
+  avatarUrl?: string | null;
+}
+
+export interface ProfileWindowPostResponse {
+  id: string;
+  eventId: string;
+  windowId: string;
+  userId: string;
+  author?: ProfileWindowPostAuthorResponse | null;
+  contentType: EventWindowContentType;
+  text?: string | null;
+  mediaItems: EventWindowPostMediaResponse[];
+  status: EventWindowPostStatus;
+  window: {
+    id: string;
+    title?: string | null;
+    startsAt: Date;
+    endsAt: Date;
+  };
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface ProfileFollowUserResponse {

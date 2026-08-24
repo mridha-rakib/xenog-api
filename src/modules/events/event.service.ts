@@ -1141,7 +1141,12 @@ export class EventService {
     );
     const momentIds = interactionMoments.map((moment) => moment._id.toString());
     const publicGoingSummariesPromise = this.checkoutPaymentService.getPublicEventGoingSummaries(
-      events.map((event) => ({ id: event._id.toString(), status: event.status })),
+      events.map((event) => ({
+        id: event._id.toString(),
+        status: event.status,
+        hostUserId: event.userId.toString(),
+      })),
+      user?.id,
     );
     const eventIds = events.map((event) => event._id.toString());
     const smartFeedFriendIds = isSmartFeedEnabled
@@ -1461,6 +1466,7 @@ export class EventService {
             ...this.toResponse(event, host),
             ...interactionSummaries.get(event._id.toString()),
           })),
+          viewerId,
         ),
       );
 
@@ -1475,7 +1481,7 @@ export class EventService {
     const cachedEvents = await this.getCachedProfileEvents(cacheKey);
 
     if (cachedEvents) {
-      const withExtras = await this.withCrowdStatusesForGroups(await this.withPublicGoingSummariesForGroups(cachedEvents));
+      const withExtras = await this.withCrowdStatusesForGroups(await this.withPublicGoingSummariesForGroups(cachedEvents, viewerId));
       return this.withInteractionSummariesForGroups(withExtras, viewerId);
     }
 
@@ -1491,7 +1497,7 @@ export class EventService {
 
     await this.cacheProfileEvents(cacheKey, response);
 
-    const withExtras = await this.withCrowdStatusesForGroups(await this.withPublicGoingSummariesForGroups(response));
+    const withExtras = await this.withCrowdStatusesForGroups(await this.withPublicGoingSummariesForGroups(response, viewerId));
     return this.withInteractionSummariesForGroups(withExtras, viewerId);
   }
 
@@ -1806,8 +1812,8 @@ export class EventService {
       this.momentSaveRepository.findSavedMomentIds(user.id, [interactionMomentId]),
       this.ticketUsageRepository.findByEventIdAndHolderUserId(event._id.toString(), user.id),
       this.checkoutPaymentService.getPublicEventGoingSummaries([
-        { id: event._id.toString(), status: event.status },
-      ]),
+        { id: event._id.toString(), status: event.status, hostUserId: event.userId.toString() },
+      ], user.id),
       this.crowdStatusService.getCrowdStatusByEventId([event]),
       this.reportRepository.hasReported(user.id, "event", event._id.toString()),
     ]);
@@ -3530,13 +3536,14 @@ export class EventService {
     };
   }
 
-  private async withPublicGoingSummaries(events: EventResponse[]): Promise<EventResponse[]> {
+  private async withPublicGoingSummaries(events: EventResponse[], viewerId?: string): Promise<EventResponse[]> {
     if (events.length === 0) {
       return events;
     }
 
     const summaries = await this.checkoutPaymentService.getPublicEventGoingSummaries(
-      events.map((event) => ({ id: event.id, status: event.status })),
+      events.map((event) => ({ id: event.id, status: event.status, hostUserId: event.userId })),
+      viewerId,
     );
 
     return events.map((event) => ({
@@ -3547,10 +3554,11 @@ export class EventService {
 
   private async withPublicGoingSummariesForGroups(
     groups: ProfileEventGroupsResponse,
+    viewerId?: string,
   ): Promise<ProfileEventGroupsResponse> {
     const [active, past] = await Promise.all([
-      this.withPublicGoingSummaries(groups.active),
-      this.withPublicGoingSummaries(groups.past),
+      this.withPublicGoingSummaries(groups.active, viewerId),
+      this.withPublicGoingSummaries(groups.past, viewerId),
     ]);
 
     return {

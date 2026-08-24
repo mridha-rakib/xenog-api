@@ -416,6 +416,7 @@ export interface EventTicketStatUserResponse {
   username?: string;
   avatarKey?: string | null;
   isFollowing?: boolean;
+  anonymous?: boolean;
 }
 
 export interface EventTicketStatItemResponse {
@@ -445,6 +446,7 @@ export interface PublicEventGoingAvatarResponse {
   userId: string;
   name: string;
   avatarKey?: string | null;
+  anonymous?: boolean;
 }
 
 export interface PublicEventGoingSummaryResponse {
@@ -455,4 +457,5 @@ export interface PublicEventGoingSummaryResponse {
 export interface PublicEventGoingItemResponse {
   id: string;
   attendee: EventTicketStatUserResponse | null;
+  ticketCount: number;
 }

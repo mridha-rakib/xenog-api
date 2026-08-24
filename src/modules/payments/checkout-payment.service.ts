@@ -72,11 +72,20 @@ type CheckoutOrderCreatePayload = Parameters<CheckoutPaymentRepository["create"]
 type PublicGoingEventRef = {
   id: string;
   status?: string | null;
+  hostUserId?: string | null;
 };
 type PublicGoingPass = {
   id: string;
   eventId: string;
   holderUserId: string;
+  anonymous: boolean;
+};
+type PublicGoingHolderGroup = {
+  id: string;
+  eventId: string;
+  holderUserId: string;
+  anonymous: boolean;
+  ticketCount: number;
 };
 type CheckoutAmounts = {
   currency: string;
@@ -441,6 +450,7 @@ export class CheckoutPaymentService {
 
   public async getPublicEventGoingSummaries(
     eventRefs: PublicGoingEventRef[],
+    viewerUserId?: string,
   ): Promise<Map<string, PublicEventGoingSummaryResponse>> {
     const eventById = new Map(
       eventRefs
@@ -449,6 +459,7 @@ export class CheckoutPaymentService {
         .map((event) => [event.id, event]),
     );
     const summaries = new Map<string, PublicEventGoingSummaryResponse>();
+    const viewerId = viewerUserId?.trim() || "";
 
     for (const event of eventById.values()) {
       summaries.set(event.id, { going: 0, avatars: [] });
@@ -463,7 +474,7 @@ export class CheckoutPaymentService {
     }
 
     const passes = await this.getPublicGoingPasses(activeEventIds);
-    const avatarIdsByEventId = new Map<string, string[]>();
+    const avatarPassesByEventId = new Map<string, PublicGoingPass[]>();
     const avatarIdSetsByEventId = new Map<string, Set<string>>();
     const userIds = new Set<string>();
 
@@ -475,15 +486,23 @@ export class CheckoutPaymentService {
       }
 
       summary.going += 1;
-      userIds.add(pass.holderUserId);
+      const event = eventById.get(pass.eventId);
+      const canViewRealIdentity = event
+        ? this.canViewPublicGoingHolderIdentity(pass, viewerId, event.hostUserId?.trim() || "")
+        : !pass.anonymous;
 
-      const avatarIds = avatarIdsByEventId.get(pass.eventId) ?? [];
+      if (canViewRealIdentity) {
+        userIds.add(pass.holderUserId);
+      }
+
+      const avatarPasses = avatarPassesByEventId.get(pass.eventId) ?? [];
       const avatarIdSet = avatarIdSetsByEventId.get(pass.eventId) ?? new Set<string>();
+      const avatarDedupeId = pass.anonymous ? `anonymous:${pass.holderUserId}` : pass.holderUserId;
 
-      if (avatarIds.length < 3 && !avatarIdSet.has(pass.holderUserId)) {
-        avatarIds.push(pass.holderUserId);
-        avatarIdSet.add(pass.holderUserId);
-        avatarIdsByEventId.set(pass.eventId, avatarIds);
+      if (avatarPasses.length < 3 && !avatarIdSet.has(avatarDedupeId)) {
+        avatarPasses.push(pass);
+        avatarIdSet.add(avatarDedupeId);
+        avatarPassesByEventId.set(pass.eventId, avatarPasses);
         avatarIdSetsByEventId.set(pass.eventId, avatarIdSet);
       }
     }
@@ -491,16 +510,25 @@ export class CheckoutPaymentService {
     const users = userIds.size > 0 ? await this.userRepository.findByIds([...userIds]) : [];
     const userById = new Map(users.map((user) => [user._id.toString(), user]));
 
-    for (const [eventId, avatarIds] of avatarIdsByEventId.entries()) {
+    for (const [eventId, avatarPasses] of avatarPassesByEventId.entries()) {
       const summary = summaries.get(eventId);
 
       if (!summary) {
         continue;
       }
 
-      summary.avatars = avatarIds
-        .map((userId) => {
-          const user = userById.get(userId);
+      summary.avatars = avatarPasses
+        .map((pass, index) => {
+          const event = eventById.get(pass.eventId);
+          const canViewRealIdentity = event
+            ? this.canViewPublicGoingHolderIdentity(pass, viewerId, event.hostUserId?.trim() || "")
+            : !pass.anonymous;
+
+          if (!canViewRealIdentity) {
+            return this.toAnonymousPublicGoingAvatar(this.getAnonymousPublicGoingId(pass.eventId, index));
+          }
+
+          const user = userById.get(pass.holderUserId);
           return user ? this.toPublicEventGoingAvatar(user) : null;
         })
         .filter((avatar): avatar is PublicEventGoingAvatarResponse => Boolean(avatar));
@@ -541,6 +569,10 @@ export class CheckoutPaymentService {
     const passes = await this.getPublicGoingPasses(activeEventIds);
 
     for (const pass of passes) {
+      if (pass.anonymous) {
+        continue;
+      }
+
       if (!friendIdSet.has(pass.holderUserId)) {
         continue;
       }
@@ -577,19 +609,40 @@ export class CheckoutPaymentService {
     const passes = this.canExposePublicGoingForStatus(event.status)
       ? await this.getPublicGoingPasses([eventId])
       : [];
-    const userIds = [...new Set(passes.map((pass) => pass.holderUserId))];
+    const eventHostId = event.userId.toString();
+    const holderGroups = this.groupPublicGoingPassesByHolder(passes);
+    const userIds = [
+      ...new Set(
+        holderGroups
+          .filter((group) => this.canViewPublicGoingHolderIdentity(group, user.id, eventHostId))
+          .map((group) => group.holderUserId),
+      ),
+    ];
     const [users, viewerFollowingIds] = await Promise.all([
       userIds.length > 0 ? this.userRepository.findByIds(userIds) : Promise.resolve([]),
       this.userFollowRepository.findFollowingIds(user.id),
     ]);
     const userById = new Map(users.map((item) => [item._id.toString(), item]));
     const viewerFollowingIdSet = new Set(viewerFollowingIds);
-    const tickets = passes.map((pass) => {
-      const attendee = userById.get(pass.holderUserId) ?? null;
+    const tickets = holderGroups.map((group, index) => {
+      const canViewRealIdentity = this.canViewPublicGoingHolderIdentity(group, user.id, eventHostId);
+
+      if (!canViewRealIdentity) {
+        const publicId = this.getAnonymousPublicGoingId(group.eventId, index);
+
+        return {
+          id: publicId,
+          attendee: this.toAnonymousTicketStatUser(publicId),
+          ticketCount: group.ticketCount,
+        };
+      }
+
+      const attendee = userById.get(group.holderUserId) ?? null;
 
       return {
-        id: pass.id,
+        id: group.id,
         attendee: attendee ? this.toTicketStatUser(attendee, viewerFollowingIdSet) : null,
+        ticketCount: group.ticketCount,
       };
     });
 
@@ -651,7 +704,12 @@ export class CheckoutPaymentService {
     const eventById = new Map(events.map((event) => [event._id.toString(), event]));
     const [publicGoingSummaries, crowdStatusByEventId, interactionSummaryByEventId] = await Promise.all([
       this.getPublicEventGoingSummaries(
-        events.map((event) => ({ id: event._id.toString(), status: event.status })),
+        events.map((event) => ({
+          id: event._id.toString(),
+          status: event.status,
+          hostUserId: event.userId.toString(),
+        })),
+        user.id,
       ),
       this.crowdStatusService.getCrowdStatusByEventId(events),
       this.eventInteractionSummaryService.buildForEvents(
@@ -2890,16 +2948,52 @@ export class CheckoutPaymentService {
 
         const activeShare = activeShareByTicketPass.get(key) ?? null;
         const holderUserId = activeShare?.recipientUserId.toString() ?? order.userId.toString();
+        const anonymous = Boolean(order.anonymous) && holderUserId === order.userId.toString();
 
         passes.push({
           id: key,
           eventId: ticketPass.eventId,
           holderUserId,
+          anonymous,
         });
       }
     }
 
     return passes;
+  }
+
+  private groupPublicGoingPassesByHolder(passes: PublicGoingPass[]): PublicGoingHolderGroup[] {
+    const groupByHolderId = new Map<string, PublicGoingHolderGroup>();
+
+    for (const pass of passes) {
+      const existing = groupByHolderId.get(pass.holderUserId);
+
+      if (existing) {
+        existing.ticketCount += 1;
+        existing.anonymous = existing.anonymous || pass.anonymous;
+        continue;
+      }
+
+      groupByHolderId.set(pass.holderUserId, {
+        id: pass.id,
+        eventId: pass.eventId,
+        holderUserId: pass.holderUserId,
+        anonymous: pass.anonymous,
+        ticketCount: 1,
+      });
+    }
+
+    return [...groupByHolderId.values()];
+  }
+
+  private canViewPublicGoingHolderIdentity(
+    group: Pick<PublicGoingHolderGroup, "anonymous" | "holderUserId">,
+    viewerUserId: string,
+    eventHostId: string,
+  ): boolean {
+    return !group.anonymous
+      || Boolean(viewerUserId && group.holderUserId === viewerUserId)
+      || Boolean(viewerUserId && eventHostId === viewerUserId);
   }
 
   private canExposePublicGoingForStatus(status?: string | null): boolean {
@@ -2997,12 +3091,32 @@ export class CheckoutPaymentService {
     };
   }
 
+  private toAnonymousTicketStatUser(publicId: string): EventTicketStatUserResponse {
+    return {
+      id: publicId,
+      name: "Anonymous",
+      anonymous: true,
+    };
+  }
+
   private toPublicEventGoingAvatar(user: IUser): PublicEventGoingAvatarResponse {
     return {
       userId: user._id.toString(),
       name: user.name,
       avatarKey: user.avatarKey ?? null,
     };
+  }
+
+  private toAnonymousPublicGoingAvatar(publicId: string): PublicEventGoingAvatarResponse {
+    return {
+      userId: publicId,
+      name: "Anonymous",
+      anonymous: true,
+    };
+  }
+
+  private getAnonymousPublicGoingId(eventId: string, index: number): string {
+    return `anonymous:${eventId}:${index + 1}`;
   }
 
   private async toEventAttendanceSummaryAvatar(user: IUser): Promise<EventAttendanceSummaryAvatarResponse> {

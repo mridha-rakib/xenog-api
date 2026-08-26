@@ -464,7 +464,11 @@ export class MomentService {
 
     if (moment.isEventAnnouncement) {
       const event = moment.eventId ? await this.eventRepository.findById(moment.eventId.toString()) : null;
-      if (!event || event.status !== "published" || event.privacy !== "public") {
+      if (
+        !event ||
+        (event.status !== "published" && event.status !== "live") ||
+        event.privacy !== "public"
+      ) {
         throw new AppError("Only public events can be reposted", httpStatus.BAD_REQUEST);
       }
     }
@@ -585,7 +589,11 @@ export class MomentService {
       const event = entry.moment.eventId
         ? await this.eventRepository.findById(entry.moment.eventId.toString())
         : null;
-      return Boolean(event && event.status === "published" && event.privacy === "public");
+      return Boolean(
+        event &&
+        (event.status === "published" || event.status === "live") &&
+        event.privacy === "public",
+      );
     }));
     const visible = candidates.filter((_entry, index) => visibility[index]);
     const visibleMoments = visible.map((entry) => entry.moment);

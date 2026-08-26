@@ -419,8 +419,9 @@ export class EventService {
     const existingEvent = await this.getModifiableEventForOwner(user, eventId);
     const normalizedPayload = this.normalizeDraftPayload(payload, existingEvent);
     this.assertPublishableCategories(this.getCategoryCandidate(existingEvent, normalizedPayload));
-    await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
     const scheduleCandidate = this.getEventScheduleCandidate(existingEvent, normalizedPayload);
+    this.assertOngoingEventScheduleUpdateAllowed(existingEvent, normalizedPayload, scheduleCandidate);
+    await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
     this.assertEndAtChangeDoesNotEnterTicketCreationCutoff(existingEvent, normalizedPayload);
     this.assertBulkTicketMutationsRespectCutoffs(existingEvent, scheduleCandidate.tickets, scheduleCandidate.endAt);
     this.assertTicketAndRewardDatesFitEventSchedule(scheduleCandidate);
@@ -2830,6 +2831,47 @@ export class EventService {
     );
   }
 
+  private assertOngoingEventScheduleUpdateAllowed(
+    event: Pick<IEvent, "scheduledAt" | "endAt">,
+    payload: Pick<SaveEventDraftDto, "scheduledAt" | "endAt">,
+    scheduleCandidate: Pick<SaveEventDraftDto, "endAt">,
+  ): void {
+    const persistedStartAt = this.getValidDateOrNull(event.scheduledAt);
+    const persistedEndAt = this.getValidDateOrNull(event.endAt);
+
+    if (!persistedStartAt || !persistedEndAt) {
+      return;
+    }
+
+    const now = this.getServerNow();
+
+    if (persistedStartAt.getTime() > now.getTime() || now.getTime() >= persistedEndAt.getTime()) {
+      return;
+    }
+
+    if (payload.scheduledAt !== undefined) {
+      const submittedStartAt = this.getValidDateOrNull(payload.scheduledAt);
+
+      if (!submittedStartAt || submittedStartAt.getTime() !== persistedStartAt.getTime()) {
+        throw new AppError(
+          "Event start date and time cannot be changed after the event has started.",
+          httpStatus.UNPROCESSABLE_ENTITY,
+        );
+      }
+    }
+
+    if (payload.endAt !== undefined) {
+      const submittedEndAt = this.getValidDateOrNull(scheduleCandidate.endAt);
+
+      if (!submittedEndAt || submittedEndAt.getTime() <= now.getTime()) {
+        throw new AppError(
+          "Event end date and time must remain in the future for an ongoing event.",
+          httpStatus.UNPROCESSABLE_ENTITY,
+        );
+      }
+    }
+  }
+
   private assertEndAtChangeDoesNotEnterTicketCreationCutoff(
     event: Pick<IEvent, "endAt">,
     payload: Pick<SaveEventDraftDto, "endAt">,
@@ -3270,6 +3312,15 @@ export class EventService {
     if (event.status === "completed" || event.status === "cancelled") {
       throw new AppError(
         "This event cannot be modified because it has been completed or cancelled.",
+        httpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    const eventEndsAt = this.getValidDateOrNull(event.endAt);
+
+    if (eventEndsAt && this.getServerNow().getTime() >= eventEndsAt.getTime()) {
+      throw new AppError(
+        "This event cannot be modified because it has already ended.",
         httpStatus.UNPROCESSABLE_ENTITY,
       );
     }

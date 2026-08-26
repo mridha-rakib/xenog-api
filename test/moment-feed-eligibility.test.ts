@@ -601,6 +601,171 @@ test("friends feed shares keep only reposts created by mutual friends", async ()
   assert.deepEqual(shares.map((share) => share.id), [friendShare._id.toString()]);
 });
 
+// Covers the "public LIVE event repost missing from Feed" fix in
+// listFeedShares's event-repost visibility re-check. Root cause: that check
+// required event.status === "published" exactly, so a repost of an event
+// that had progressed to the real, persisted "live" status (see
+// EventRepository's start-event updates) was silently filtered out of both
+// Discover and Friends Feed responses even though it displayed correctly on
+// Profile Timeline (getProfileTimeline never re-checks event status at all).
+// The fix widens the check to accept "published" or "live", matching the
+// same active-status pair already used elsewhere (e.g. the repost-creation
+// guard in shareMoment, and EventService.submitJoinRequest).
+
+const makeEventShare = (momentId: Types.ObjectId, overrides: { userId?: Types.ObjectId } = {}) => ({
+  _id: new Types.ObjectId(),
+  userId: overrides.userId ?? viewerId,
+  momentId,
+  caption: "Going to this one",
+  taggedFriendIds: [],
+  originalType: "event" as const,
+  originalId: momentId,
+  createdAt: now,
+  updatedAt: now,
+});
+
+test("Test 1 — published public event repost appears in Discover Feed (existing behavior preserved)", async () => {
+  const eventId = new Types.ObjectId();
+  const announcementMoment = makeMoment({ mode: "event", eventId, isEventAnnouncement: true });
+  const event = makeEvent(eventId, "public", { status: "published" });
+  const share = makeEventShare(announcementMoment._id);
+
+  const service = createMomentService({
+    momentRepository: { findByIds: async () => [announcementMoment] },
+    momentShareRepository: { findRecent: async () => [share] },
+    eventRepository: { findById: async () => event },
+  });
+
+  const shares = await service.listFeedShares(viewer as never, 50, "discover");
+
+  assert.deepEqual(shares.map((entry) => entry.id), [share._id.toString()]);
+});
+
+test("Test 2 — live public event repost now appears in Discover Feed (the regression this fix targets)", async () => {
+  const eventId = new Types.ObjectId();
+  const announcementMoment = makeMoment({ mode: "event", eventId, isEventAnnouncement: true });
+  const event = makeEvent(eventId, "public", { status: "live" });
+  const share = makeEventShare(announcementMoment._id);
+
+  const service = createMomentService({
+    momentRepository: { findByIds: async () => [announcementMoment] },
+    momentShareRepository: { findRecent: async () => [share] },
+    eventRepository: { findById: async () => event },
+  });
+
+  const shares = await service.listFeedShares(viewer as never, 50, "discover");
+
+  assert.deepEqual(shares.map((entry) => entry.id), [share._id.toString()]);
+});
+
+test("Test 3 — live non-public event repost stays excluded from Feed", async () => {
+  const eventId = new Types.ObjectId();
+  const announcementMoment = makeMoment({ mode: "event", eventId, isEventAnnouncement: true });
+  const event = makeEvent(eventId, "private", { status: "live" });
+  const share = makeEventShare(announcementMoment._id);
+
+  const service = createMomentService({
+    momentRepository: { findByIds: async () => [announcementMoment] },
+    momentShareRepository: { findRecent: async () => [share] },
+    eventRepository: { findById: async () => event },
+  });
+
+  const shares = await service.listFeedShares(viewer as never, 50, "discover");
+
+  assert.deepEqual(shares, []);
+});
+
+test("Test 4 — draft public event repost stays excluded from Feed", async () => {
+  const eventId = new Types.ObjectId();
+  const announcementMoment = makeMoment({ mode: "event", eventId, isEventAnnouncement: true });
+  const event = makeEvent(eventId, "public", { status: "draft" });
+  const share = makeEventShare(announcementMoment._id);
+
+  const service = createMomentService({
+    momentRepository: { findByIds: async () => [announcementMoment] },
+    momentShareRepository: { findRecent: async () => [share] },
+    eventRepository: { findById: async () => event },
+  });
+
+  const shares = await service.listFeedShares(viewer as never, 50, "discover");
+
+  assert.deepEqual(shares, []);
+});
+
+test("Test 5 — cancelled public event repost stays excluded from Feed", async () => {
+  const eventId = new Types.ObjectId();
+  const announcementMoment = makeMoment({ mode: "event", eventId, isEventAnnouncement: true });
+  const event = makeEvent(eventId, "public", { status: "cancelled" });
+  const share = makeEventShare(announcementMoment._id);
+
+  const service = createMomentService({
+    momentRepository: { findByIds: async () => [announcementMoment] },
+    momentShareRepository: { findRecent: async () => [share] },
+    eventRepository: { findById: async () => event },
+  });
+
+  const shares = await service.listFeedShares(viewer as never, 50, "discover");
+
+  assert.deepEqual(shares, []);
+});
+
+test("Test 6 — generic non-event repost never consults the event-status branch", async () => {
+  const postMoment = makeMoment({ mode: "feed", caption: "A real post" });
+  const share = {
+    _id: new Types.ObjectId(),
+    userId: viewerId,
+    momentId: postMoment._id,
+    caption: null,
+    taggedFriendIds: [],
+    originalType: "post" as const,
+    originalId: postMoment._id,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const service = createMomentService({
+    momentRepository: { findByIds: async () => [postMoment] },
+    momentShareRepository: { findRecent: async () => [share] },
+    // Throws if listFeedShares ever calls eventRepository.findById for a
+    // non-event moment — proving the event-status branch is skipped entirely.
+    eventRepository: {
+      findById: async () => {
+        throw new Error("eventRepository.findById must not be called for a non-event repost");
+      },
+    },
+  });
+
+  const shares = await service.listFeedShares(viewer as never, 50, "discover");
+
+  assert.deepEqual(shares.map((entry) => entry.id), [share._id.toString()]);
+});
+
+test("Test 7 — the live-event visibility correction applies identically under Discover and Friends", async () => {
+  const eventId = new Types.ObjectId();
+  const announcementMoment = makeMoment({ mode: "event", eventId, isEventAnnouncement: true, userId: authorId });
+  const event = makeEvent(eventId, "public", { status: "live" });
+  const share = makeEventShare(announcementMoment._id, { userId: authorId });
+
+  const discoverService = createMomentService({
+    momentRepository: { findByIds: async () => [announcementMoment] },
+    momentShareRepository: { findRecent: async () => [share] },
+    eventRepository: { findById: async () => event },
+  });
+  const discoverShares = await discoverService.listFeedShares(viewer as never, 50, "discover");
+  assert.deepEqual(discoverShares.map((entry) => entry.id), [share._id.toString()]);
+
+  const friendsService = createMomentService({
+    momentRepository: { findByIds: async () => [announcementMoment] },
+    momentShareRepository: { findRecent: async () => [share] },
+    eventRepository: { findById: async () => event },
+    // authorId must remain a mutual friend for this to be visible under
+    // Friends — unrelated to (and unchanged by) the event-status fix.
+    friendUserIds: [authorId.toString()],
+  });
+  const friendsShares = await friendsService.listFeedShares(viewer as never, 50, "friends");
+  assert.deepEqual(friendsShares.map((entry) => entry.id), [share._id.toString()]);
+});
+
 test("profile timeline keeps authored event-tagged posts", async () => {
   const eventPost = makeMoment({
     mode: "event",

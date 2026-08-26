@@ -391,6 +391,97 @@ test("existing ticket id is preserved during edit", async () => {
   assert.equal(response.tickets[0]?.id, "ticket-1");
 });
 
+test("ongoing event update allows unchanged persisted start with a future end", async () => {
+  let updatePayload: Record<string, unknown> | null = null;
+  const nextEndAt = new Date("2026-07-20T23:00:00.000Z");
+  const service = createService({
+    event: createEvent({ status: "live", scheduledAt: eventStart, endAt: eventEnd }),
+    now: baseNow,
+    onUpdateEvent: (payload) => {
+      updatePayload = payload;
+    },
+  });
+
+  const response = await service.updateEvent(owner as never, eventId.toString(), {
+    categories: ["Live Music & Concerts"],
+    scheduledAt: eventStart,
+    endAt: nextEndAt,
+  } as never);
+
+  assert.equal(response.scheduledAt?.getTime(), eventStart.getTime());
+  assert.equal(response.endAt?.getTime(), nextEndAt.getTime());
+  assert.equal(updatePayload?.scheduledAt, eventStart);
+  assert.equal(updatePayload?.endAt, nextEndAt);
+});
+
+test("ongoing event update rejects changing persisted start time", async () => {
+  let updatePayload: Record<string, unknown> | null = null;
+  const service = createService({
+    event: createEvent({ status: "live", scheduledAt: eventStart, endAt: eventEnd }),
+    now: baseNow,
+    onUpdateEvent: (payload) => {
+      updatePayload = payload;
+    },
+  });
+
+  await assertTicketError(
+    () => service.updateEvent(owner as never, eventId.toString(), {
+      categories: ["Live Music & Concerts"],
+      scheduledAt: new Date("2026-07-20T19:30:00.000Z"),
+      endAt: new Date("2026-07-20T23:00:00.000Z"),
+    } as never),
+    422,
+  );
+  assert.equal(updatePayload, null);
+});
+
+test("ongoing event update rejects submitted endAt at or before current time", async () => {
+  let updatePayload: Record<string, unknown> | null = null;
+  const service = createService({
+    event: createEvent({ status: "live", scheduledAt: eventStart, endAt: eventEnd }),
+    now: baseNow,
+    onUpdateEvent: (payload) => {
+      updatePayload = payload;
+    },
+  });
+
+  await assertTicketError(
+    () => service.updateEvent(owner as never, eventId.toString(), {
+      categories: ["Live Music & Concerts"],
+      scheduledAt: eventStart,
+      endAt: baseNow,
+    } as never),
+    422,
+  );
+  assert.equal(updatePayload, null);
+});
+
+for (const status of ["published", "live"] as const) {
+  test(`event update rejects ${status} event that already ended by persisted time`, async () => {
+    let updatePayload: Record<string, unknown> | null = null;
+    const service = createService({
+      event: createEvent({
+        status,
+        scheduledAt: new Date("2026-07-20T18:00:00.000Z"),
+        endAt: new Date("2026-07-20T19:30:00.000Z"),
+      }),
+      now: baseNow,
+      onUpdateEvent: (payload) => {
+        updatePayload = payload;
+      },
+    });
+
+    await assertTicketError(
+      () => service.updateEvent(owner as never, eventId.toString(), {
+        categories: ["Live Music & Concerts"],
+        endAt: new Date("2026-07-20T21:00:00.000Z"),
+      } as never),
+      422,
+    );
+    assert.equal(updatePayload, null);
+  });
+}
+
 test("invalid creation does not create a duplicate ticket", async () => {
   let draftUpdatePayload: Record<string, unknown> | null = null;
   const existingTicket = createTicket();

@@ -474,9 +474,14 @@ export class CheckoutPaymentService {
     }
 
     const passes = await this.getPublicGoingPasses(activeEventIds);
-    const avatarPassesByEventId = new Map<string, PublicGoingPass[]>();
-    const avatarIdSetsByEventId = new Map<string, Set<string>>();
-    const userIds = new Set<string>();
+    // Group avatar candidates by holder so a single holder yields exactly one
+    // avatar entry, even when they hold a mix of anonymous and non-anonymous
+    // passes. Anonymous state OR-merges per holder, matching
+    // groupPublicGoingPassesByHolder — a holder with any anonymous pass stays
+    // subject to anonymous masking. Only the first 3 distinct holders per event
+    // are kept for the preview.
+    const avatarGroupsByEventId = new Map<string, PublicGoingHolderGroup[]>();
+    const avatarGroupByHolderByEventId = new Map<string, Map<string, PublicGoingHolderGroup>>();
 
     for (const pass of passes) {
       const summary = summaries.get(pass.eventId);
@@ -486,49 +491,69 @@ export class CheckoutPaymentService {
       }
 
       summary.going += 1;
-      const event = eventById.get(pass.eventId);
-      const canViewRealIdentity = event
-        ? this.canViewPublicGoingHolderIdentity(pass, viewerId, event.hostUserId?.trim() || "")
-        : !pass.anonymous;
 
-      if (canViewRealIdentity) {
-        userIds.add(pass.holderUserId);
+      const groups = avatarGroupsByEventId.get(pass.eventId) ?? [];
+      const groupByHolder = avatarGroupByHolderByEventId.get(pass.eventId) ?? new Map<string, PublicGoingHolderGroup>();
+      const existingGroup = groupByHolder.get(pass.holderUserId);
+
+      if (existingGroup) {
+        existingGroup.ticketCount += 1;
+        existingGroup.anonymous = existingGroup.anonymous || pass.anonymous;
+        continue;
       }
 
-      const avatarPasses = avatarPassesByEventId.get(pass.eventId) ?? [];
-      const avatarIdSet = avatarIdSetsByEventId.get(pass.eventId) ?? new Set<string>();
-      const avatarDedupeId = pass.anonymous ? `anonymous:${pass.holderUserId}` : pass.holderUserId;
+      if (groups.length >= 3) {
+        continue;
+      }
 
-      if (avatarPasses.length < 3 && !avatarIdSet.has(avatarDedupeId)) {
-        avatarPasses.push(pass);
-        avatarIdSet.add(avatarDedupeId);
-        avatarPassesByEventId.set(pass.eventId, avatarPasses);
-        avatarIdSetsByEventId.set(pass.eventId, avatarIdSet);
+      const group: PublicGoingHolderGroup = {
+        id: pass.id,
+        eventId: pass.eventId,
+        holderUserId: pass.holderUserId,
+        anonymous: pass.anonymous,
+        ticketCount: 1,
+      };
+      groups.push(group);
+      groupByHolder.set(pass.holderUserId, group);
+      avatarGroupsByEventId.set(pass.eventId, groups);
+      avatarGroupByHolderByEventId.set(pass.eventId, groupByHolder);
+    }
+
+    const canViewGroupIdentity = (group: PublicGoingHolderGroup): boolean => {
+      const event = eventById.get(group.eventId);
+
+      return event
+        ? this.canViewPublicGoingHolderIdentity(group, viewerId, event.hostUserId?.trim() || "")
+        : !group.anonymous;
+    };
+
+    const userIds = new Set<string>();
+
+    for (const groups of avatarGroupsByEventId.values()) {
+      for (const group of groups) {
+        if (canViewGroupIdentity(group)) {
+          userIds.add(group.holderUserId);
+        }
       }
     }
 
     const users = userIds.size > 0 ? await this.userRepository.findByIds([...userIds]) : [];
     const userById = new Map(users.map((user) => [user._id.toString(), user]));
 
-    for (const [eventId, avatarPasses] of avatarPassesByEventId.entries()) {
+    for (const [eventId, groups] of avatarGroupsByEventId.entries()) {
       const summary = summaries.get(eventId);
 
       if (!summary) {
         continue;
       }
 
-      summary.avatars = avatarPasses
-        .map((pass, index) => {
-          const event = eventById.get(pass.eventId);
-          const canViewRealIdentity = event
-            ? this.canViewPublicGoingHolderIdentity(pass, viewerId, event.hostUserId?.trim() || "")
-            : !pass.anonymous;
-
-          if (!canViewRealIdentity) {
-            return this.toAnonymousPublicGoingAvatar(this.getAnonymousPublicGoingId(pass.eventId, index));
+      summary.avatars = groups
+        .map((group, index) => {
+          if (!canViewGroupIdentity(group)) {
+            return this.toAnonymousPublicGoingAvatar(this.getAnonymousPublicGoingId(group.eventId, index));
           }
 
-          const user = userById.get(pass.holderUserId);
+          const user = userById.get(group.holderUserId);
           return user ? this.toPublicEventGoingAvatar(user) : null;
         })
         .filter((avatar): avatar is PublicEventGoingAvatarResponse => Boolean(avatar));
@@ -1438,35 +1463,13 @@ export class CheckoutPaymentService {
           };
         }
 
-        // Idempotency: return existing paid free ticket order
-        const existingFree = await this.repository.findExistingPaidFreeOrder(
-          user.id,
-          payload.eventId,
-          payload.ticketId,
-          payload.applyReward ? payload.rewardId ?? null : null,
-        );
-
-        if (existingFree) {
-          const freeLineItem = existingFree.lineItems.find(
-            (item) => item.itemType === "ticket" && item.eventId === payload.eventId && item.itemId === payload.ticketId,
-          );
-          const freeOrderQuantity = freeLineItem?.totalQuantity ?? freeLineItem?.quantity ?? 0;
-          const cancelledFreeCount = await this.ticketCancellationRepository.countByOrderEventTicket(
-            existingFree._id.toString(),
-            payload.eventId,
-            payload.ticketId,
-          );
-
-          if (cancelledFreeCount < freeOrderQuantity) {
-            return {
-              order: this.toOrderResponse(existingFree),
-              paymentIntentClientSecret: null,
-              publishableKey: null,
-              merchantDisplayName: env.APP_NAME,
-              merchantCountryCode: env.STRIPE_MERCHANT_COUNTRY,
-            };
-          }
-        }
+        // Free ticket orders are NOT short-circuited on the mere existence of a
+        // prior free order. The max-2 checks above already reject anything past
+        // the per-user/per-ticket-type allowance, so reaching this point means
+        // the user is still entitled to another ticket of this type and a new
+        // free order must be created (a legitimate second claim). Concurrent
+        // duplicate submissions of the same claim are prevented by the Redis
+        // checkout_lock acquired above, and per-pass check-in codes are unique.
       }
 
       const lineItems = await this.resolveLineItems(user, payload);

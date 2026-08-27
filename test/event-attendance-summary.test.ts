@@ -792,6 +792,101 @@ test("public going summary masks anonymous and preserves normal preview per view
   });
 });
 
+test("public going summary shows a mixed anonymous/non-anonymous holder exactly once to themselves", async () => {
+  const mixedUserId = new Types.ObjectId();
+  const anonOrder = createOrder({ userId: mixedUserId, anonymous: true });
+  const namedOrder = createOrder({ userId: mixedUserId, anonymous: false });
+  const service = await createSummaryService({
+    orders: [anonOrder, namedOrder],
+    users: [createUser(mixedUserId, "Mixed User", "mixed.png")],
+  });
+  const summaries = await service.getPublicEventGoingSummaries([
+    { id: eventId.toString(), status: "published", hostUserId: hostId.toString() },
+  ], mixedUserId.toString());
+  const summary = summaries.get(eventId.toString());
+
+  assert.equal(summary?.going, 2, "going semantics unchanged (per pass)");
+  assert.deepEqual(summary?.avatars, [{
+    userId: mixedUserId.toString(),
+    name: "Mixed User",
+    avatarKey: "mixed.png",
+  }]);
+  assert.equal(new Set(summary?.avatars.map((a) => a.userId)).size, summary?.avatars.length);
+});
+
+test("public going summary shows a mixed anonymous/non-anonymous holder exactly once to the host", async () => {
+  const mixedUserId = new Types.ObjectId();
+  const service = await createSummaryService({
+    orders: [
+      createOrder({ userId: mixedUserId, anonymous: true }),
+      createOrder({ userId: mixedUserId, anonymous: false }),
+    ],
+    users: [createUser(mixedUserId, "Mixed User", "mixed.png")],
+  });
+  const summaries = await service.getPublicEventGoingSummaries([
+    { id: eventId.toString(), status: "published", hostUserId: hostId.toString() },
+  ], hostId.toString());
+  const summary = summaries.get(eventId.toString());
+
+  assert.deepEqual(summary?.avatars, [{
+    userId: mixedUserId.toString(),
+    name: "Mixed User",
+    avatarKey: "mixed.png",
+  }]);
+});
+
+test("public going summary keeps a mixed holder masked (and single) for other viewers", async () => {
+  const mixedUserId = new Types.ObjectId();
+  const viewerId = new Types.ObjectId();
+  const service = await createSummaryService({
+    orders: [
+      createOrder({ userId: mixedUserId, anonymous: true }),
+      createOrder({ userId: mixedUserId, anonymous: false }),
+    ],
+    users: [createUser(mixedUserId, "Mixed User", "mixed.png")],
+  });
+  const summaries = await service.getPublicEventGoingSummaries([
+    { id: eventId.toString(), status: "published", hostUserId: hostId.toString() },
+  ], viewerId.toString());
+  const summary = summaries.get(eventId.toString());
+
+  assert.equal(summary?.avatars.length, 1);
+  assert.equal(summary?.avatars[0]?.name, "Anonymous");
+  assert.equal(summary?.avatars[0]?.anonymous, true);
+  assert.notEqual(summary?.avatars[0]?.userId, mixedUserId.toString());
+});
+
+test("public going summary preview stays within 3 unique holder avatars when one holder is mixed", async () => {
+  const mixedUserId = new Types.ObjectId();
+  const secondUserId = new Types.ObjectId();
+  const thirdUserId = new Types.ObjectId();
+  const service = await createSummaryService({
+    orders: [
+      createOrder({ userId: mixedUserId, anonymous: true }),
+      createOrder({ userId: mixedUserId, anonymous: false }),
+      createOrder({ userId: secondUserId }),
+      createOrder({ userId: thirdUserId }),
+    ],
+    users: [
+      createUser(mixedUserId, "Mixed User", "mixed.png"),
+      createUser(secondUserId, "Second User", "second.png"),
+      createUser(thirdUserId, "Third User", "third.png"),
+    ],
+  });
+  const summaries = await service.getPublicEventGoingSummaries([
+    { id: eventId.toString(), status: "published", hostUserId: hostId.toString() },
+  ], hostId.toString());
+  const summary = summaries.get(eventId.toString());
+
+  assert.equal(summary?.avatars.length, 3);
+  assert.deepEqual(summary?.avatars.map((a) => a.userId), [
+    mixedUserId.toString(),
+    secondUserId.toString(),
+    thirdUserId.toString(),
+  ]);
+  assert.equal(new Set(summary?.avatars.map((a) => a.userId)).size, 3);
+});
+
 test("public going list masks anonymous attendees for other viewers while preserving normal rows and totals", async () => {
   const normalUserId = new Types.ObjectId();
   const anonymousUserId = new Types.ObjectId();

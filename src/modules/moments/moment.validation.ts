@@ -179,6 +179,7 @@ export const momentValidation = {
     params: z.object({ shareId: objectId }),
     body: z.object({
       caption: optionalText("Repost caption", 2000),
+      taggedFriendIds: z.array(objectId).max(20).transform((ids) => [...new Set(ids)]).optional(),
     }).strict(),
   }),
   commentReaction: z.object({

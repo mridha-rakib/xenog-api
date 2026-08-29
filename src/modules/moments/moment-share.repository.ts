@@ -32,22 +32,36 @@ export class MomentShareRepository {
     return MomentShareModel.findById(shareId);
   }
 
-  // Targeted $set of only caption. Distinct from share() above (which is a
-  // create-only upsert via $setOnInsert and is a no-op on an existing share) —
-  // this is the sole write path for editing repost commentary. Scoped to
-  // {_id, userId} so only the share's owner can ever update it, and never
-  // touches taggedFriendIds/momentId/originalType/originalId/clientRequestId/
-  // createdAt/userId. Mongoose's timestamps:true advances updatedAt naturally.
-  public async updateCaptionForUser(
+  // Owner-scoped repost edit: updates only the explicitly supported mutable
+  // fields on the share row, never the original content linkage or ownership.
+  public async updateForUser(
     shareId: string,
     userId: string,
-    caption: string | null,
+    payload: {
+      caption: string | null;
+      taggedFriendIds?: string[];
+    },
   ): Promise<IMomentShare | null> {
+    const nextUpdate: {
+      caption: string | null;
+      taggedFriendIds?: Types.ObjectId[];
+    } = {
+      caption: payload.caption,
+    };
+
+    if (payload.taggedFriendIds) {
+      nextUpdate.taggedFriendIds = toObjectIds(payload.taggedFriendIds);
+    }
+
     return MomentShareModel.findOneAndUpdate(
       { _id: shareId, userId },
-      { $set: { caption } },
+      { $set: nextUpdate },
       { new: true, runValidators: true },
     );
+  }
+
+  public async deleteByIdForUser(shareId: string, userId: string): Promise<IMomentShare | null> {
+    return MomentShareModel.findOneAndDelete({ _id: shareId, userId });
   }
 
   public async findRecent(limit = 50): Promise<IMomentShare[]> {

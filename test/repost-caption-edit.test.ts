@@ -90,17 +90,24 @@ test.after(async () => {
 // Validation contract
 // ---------------------------------------------------------------------------
 
-test("updateMomentShare validation accepts a caption-only body and rejects unknown fields", () => {
+test("updateMomentShare validation accepts caption-only and tags-only bodies, and rejects unknown fields", () => {
   const shareId = new Types.ObjectId().toString();
+  const friendId = new Types.ObjectId().toString();
   const accepted = momentValidation.updateMomentShare.safeParse({
     params: { shareId },
     body: { caption: "Really worth checking out" },
   });
   assert.equal(accepted.success, true);
 
+  const acceptedTags = momentValidation.updateMomentShare.safeParse({
+    params: { shareId },
+    body: { taggedFriendIds: [friendId] },
+  });
+  assert.equal(acceptedTags.success, true);
+
   const rejected = momentValidation.updateMomentShare.safeParse({
     params: { shareId },
-    body: { caption: "x", taggedFriendIds: [] },
+    body: { caption: "x", unexpected: true },
   });
   assert.equal(rejected.success, false);
 });
@@ -263,5 +270,5 @@ test("the create-repost upsert path still does not modify an existing share's ca
     clientRequestId: null,
   });
 
-  assert.equal(result.caption, "Everyone should see this");
+  assert.equal(result.share.caption, "Everyone should see this");
 });

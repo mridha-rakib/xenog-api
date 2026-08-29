@@ -52,6 +52,11 @@ router.patch(
   validate(momentValidation.updateMomentShare),
   catchAsync(controller.updateMomentShare),
 );
+router.delete(
+  "/shares/:shareId",
+  validate(momentValidation.updateMomentShare.pick({ params: true })),
+  catchAsync(controller.deleteMomentShare),
+);
 router.post(
   "/:id/share",
   validate(momentValidation.shareMoment),

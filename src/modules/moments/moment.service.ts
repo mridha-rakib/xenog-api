@@ -473,14 +473,7 @@ export class MomentService {
       }
     }
 
-    const taggedFriendIds = [...new Set(payload.taggedFriendIds ?? [])];
-    if (taggedFriendIds.length > 0) {
-      const mutualFriendIds = new Set(await this.userFollowRepository.findMutualFriendIds(user.id));
-      const blockedIds = new Set(await this.userBlockRepository.findBlockedIds(user.id));
-      if (taggedFriendIds.some((id) => !mutualFriendIds.has(id) || blockedIds.has(id))) {
-        throw new AppError("You can only tag friends in a repost", httpStatus.BAD_REQUEST);
-      }
-    }
+    const taggedFriendIds = await this.validateRepostTaggedFriendIds(user.id, payload.taggedFriendIds ?? []);
 
     const originalType = moment.isEventAnnouncement ? "event" as const : "post" as const;
     const originalId = originalType === "event" ? moment.eventId?.toString() : momentId;
@@ -519,9 +512,9 @@ export class MomentService {
    * against the SHARE's userId (the reposter), never the original content's
    * author — a user may always edit their own repost commentary regardless
    * of who authored the original Post/Event, and can never touch the
-   * original content, taggedFriendIds, momentId, originalType/originalId, or
-   * clientRequestId through this path. Uses MomentShareRepository's
-   * updateCaptionForUser (a real $set), never the create-only share() upsert.
+   * original content, momentId, originalType/originalId, or clientRequestId
+   * through this path. Uses the owner-scoped share update path, never the
+   * create-only share() upsert.
    */
   public async updateMomentShare(
     shareId: string,
@@ -545,7 +538,14 @@ export class MomentService {
     }
 
     const caption = payload.caption?.trim() || null;
-    const updated = await this.momentShareRepository.updateCaptionForUser(shareId, user.id, caption);
+    const shouldUpdateTags = Object.prototype.hasOwnProperty.call(payload, "taggedFriendIds");
+    const taggedFriendIds = shouldUpdateTags
+      ? await this.validateRepostTaggedFriendIds(user.id, payload.taggedFriendIds ?? [])
+      : undefined;
+    const updated = await this.momentShareRepository.updateForUser(shareId, user.id, {
+      caption,
+      ...(shouldUpdateTags ? { taggedFriendIds } : {}),
+    });
 
     if (!updated) {
       throw new AppError("Repost not found", httpStatus.NOT_FOUND);
@@ -557,6 +557,24 @@ export class MomentService {
     ]);
 
     return this.toShareResponse(updated, moment, user, viewerFollowingIds, interactionContext);
+  }
+
+  public async deleteMomentShare(shareId: string, user: AuthUser): Promise<void> {
+    const share = await this.momentShareRepository.findById(shareId);
+
+    if (!share) {
+      throw new AppError("Repost not found", httpStatus.NOT_FOUND);
+    }
+
+    if (share.userId.toString() !== user.id) {
+      throw new AppError("You can only delete your own repost", httpStatus.FORBIDDEN);
+    }
+
+    const deleted = await this.momentShareRepository.deleteByIdForUser(shareId, user.id);
+
+    if (!deleted) {
+      throw new AppError("Repost not found", httpStatus.NOT_FOUND);
+    }
   }
 
   public async listFeedShares(
@@ -1010,6 +1028,23 @@ export class MomentService {
       originalItem: originalId ? { type: originalType, id: originalId } : undefined,
       moment: await this.toResponse(moment, undefined, viewer, viewerFollowingIds, interactionContext),
     };
+  }
+
+  private async validateRepostTaggedFriendIds(userId: string, taggedFriendIds: string[]): Promise<string[]> {
+    const uniqueTaggedFriendIds = [...new Set(taggedFriendIds)];
+
+    if (uniqueTaggedFriendIds.length === 0) {
+      return uniqueTaggedFriendIds;
+    }
+
+    const mutualFriendIds = new Set(await this.userFollowRepository.findMutualFriendIds(userId));
+    const blockedIds = new Set(await this.userBlockRepository.findBlockedIds(userId));
+
+    if (uniqueTaggedFriendIds.some((id) => !mutualFriendIds.has(id) || blockedIds.has(id))) {
+      throw new AppError("You can only tag friends in a repost", httpStatus.BAD_REQUEST);
+    }
+
+    return uniqueTaggedFriendIds;
   }
 
   private async toResponse(

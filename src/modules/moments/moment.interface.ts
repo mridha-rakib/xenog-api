@@ -252,6 +252,7 @@ export interface CreateMomentShareDto {
 
 export interface UpdateMomentShareDto {
   caption?: string | null;
+  taggedFriendIds?: string[];
 }
 
 export interface MomentInteractionSummaryResponse {

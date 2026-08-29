@@ -115,6 +115,15 @@ export class MomentController {
     });
   };
 
+  public deleteMomentShare = async (req: Request, res: Response): Promise<void> => {
+    const { shareId } = req.params as { shareId: string };
+    await this.momentService.deleteMomentShare(shareId, req.authUser as AuthUser);
+
+    ApiResponse.success(res, {
+      message: "Repost deleted",
+    });
+  };
+
   public listFeedShares = async (req: Request, res: Response): Promise<void> => {
     const shares = await this.momentService.listFeedShares(
       req.authUser as AuthUser,

@@ -5,23 +5,22 @@ import { UserRepository } from "../user/user.repository.js";
 import type { IBusinessProfileSettings } from "../user/user.interface.js";
 import { StripeConnectService } from "./stripe-connect.service.js";
 import type { PayoutSettingsView, UpdatePayoutSettingsDto } from "./payout-settings.interface.js";
+import type { InstantDebitCardEligibility } from "./stripe-connect.interface.js";
 
 const BUSINESS_ONLY_ERROR = "Payout settings are only available for business accounts";
 
 const resolveInstantEligible = async (
   userId: string,
   stripeConnectService: StripeConnectService,
-): Promise<boolean> => {
+): Promise<InstantDebitCardEligibility> => {
   try {
-    const account = await stripeConnectService.getAccount(userId);
-
-    if (!account?.payoutsEnabled) return false;
-
-    return account.payoutAccounts.some((a) =>
-      (a.availablePayoutMethods ?? []).includes("instant"),
-    );
+    return await stripeConnectService.getInstantDebitCardEligibility(userId);
   } catch {
-    return false;
+    return {
+      eligible: false,
+      eligibleInstantDebitCard: null,
+      unavailableReason: "unsupported_configuration",
+    };
   }
 };
 
@@ -36,7 +35,7 @@ export class PayoutSettingsService {
       throw new AppError(BUSINESS_ONLY_ERROR, httpStatus.FORBIDDEN);
     }
 
-    const [dbUser, instantPayoutEligible] = await Promise.all([
+    const [dbUser, instantPayoutEligibility] = await Promise.all([
       this.userRepository.findById(user.id),
       resolveInstantEligible(user.id, this.stripeConnectService),
     ]);
@@ -44,7 +43,9 @@ export class PayoutSettingsService {
     return {
       payoutPreference: dbUser?.businessProfile?.payoutPreference ?? "manual",
       withdrawalMethod: dbUser?.businessProfile?.withdrawalMethod ?? "bank_transfer",
-      instantPayoutEligible,
+      instantPayoutEligible: instantPayoutEligibility.eligible,
+      eligibleInstantDebitCard: instantPayoutEligibility.eligibleInstantDebitCard,
+      instantPayoutUnavailableReason: instantPayoutEligibility.unavailableReason,
     };
   }
 
@@ -56,18 +57,19 @@ export class PayoutSettingsService {
       throw new AppError(BUSINESS_ONLY_ERROR, httpStatus.FORBIDDEN);
     }
 
-    const [dbUser, instantPayoutEligible] = await Promise.all([
+    const [dbUser, instantPayoutEligibility] = await Promise.all([
       this.userRepository.findById(user.id),
-      dto.withdrawalMethod === "instant_debit_card"
-        ? resolveInstantEligible(user.id, this.stripeConnectService)
-        : Promise.resolve(true),
+      resolveInstantEligible(user.id, this.stripeConnectService),
     ]);
 
-    if (dto.withdrawalMethod === "instant_debit_card" && !instantPayoutEligible) {
+    if (dto.withdrawalMethod === "instant_debit_card" && !instantPayoutEligibility.eligible) {
       throw new AppError(
         "Instant payout is not available for your account",
         httpStatus.BAD_REQUEST,
-        { code: "INSTANT_PAYOUT_NOT_ELIGIBLE" },
+        {
+          code: "INSTANT_PAYOUT_NOT_ELIGIBLE",
+          reason: instantPayoutEligibility.unavailableReason,
+        },
       );
     }
 
@@ -82,14 +84,12 @@ export class PayoutSettingsService {
 
     await this.userRepository.updateById(user.id, { businessProfile: updatedProfile });
 
-    const finalInstantEligible = dto.withdrawalMethod === "instant_debit_card"
-      ? instantPayoutEligible
-      : await resolveInstantEligible(user.id, this.stripeConnectService);
-
     return {
       payoutPreference: updatedProfile.payoutPreference,
       withdrawalMethod: updatedProfile.withdrawalMethod,
-      instantPayoutEligible: finalInstantEligible,
+      instantPayoutEligible: instantPayoutEligibility.eligible,
+      eligibleInstantDebitCard: instantPayoutEligibility.eligibleInstantDebitCard,
+      instantPayoutUnavailableReason: instantPayoutEligibility.unavailableReason,
     };
   }
 }

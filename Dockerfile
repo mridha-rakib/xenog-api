@@ -7,7 +7,7 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-ARG TYPESCRIPT_HEAP_MB=1024
+ARG TYPESCRIPT_HEAP_MB=2048
 RUN NODE_OPTIONS="--max-old-space-size=${TYPESCRIPT_HEAP_MB}" npm run build
 
 FROM node:22-alpine AS runner

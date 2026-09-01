@@ -5,7 +5,10 @@ import { AppError } from "../../core/errors/app-error.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import type {
   CreateStripeConnectOnboardingLinkDto,
+  EligibleInstantDebitCardView,
+  InstantDebitCardEligibility,
   IStripeConnectAccount,
+  StripePayoutReadiness,
   StripeConnectAccountView,
   StripeConnectOnboardingLinkResult,
   StripeConnectOnboardingStatus,
@@ -81,6 +84,102 @@ const toPayoutAccountView = (account: StripeExternalAccount): StripeConnectPayou
 const toPayoutAccounts = (account: StripeAccount): StripeConnectPayoutAccountView[] =>
   account.external_accounts?.data.map(toPayoutAccountView) ?? [];
 
+const requiresConnectOnboarding = (account: IStripeConnectAccount): boolean =>
+  !account.detailsSubmitted ||
+  account.onboardingStatus !== "completed" ||
+  account.requirements.currentlyDue.length > 0 ||
+  account.requirements.pastDue.length > 0;
+
+const isValidPayoutCard = (
+  account: StripeConnectPayoutAccountView,
+): account is StripeConnectPayoutAccountView & { type: "card"; id: string; last4: string } =>
+  account.type === "card" &&
+  typeof account.id === "string" &&
+  account.id.trim().length > 0 &&
+  typeof account.last4 === "string" &&
+  account.last4.trim().length > 0;
+
+const toEligibleInstantDebitCard = (
+  account: StripeConnectPayoutAccountView & { type: "card"; id: string; last4: string },
+): EligibleInstantDebitCardView => ({
+  id: account.id,
+  brand: account.brand ?? null,
+  last4: account.last4,
+  currency: account.currency ?? null,
+  country: account.country ?? null,
+  availablePayoutMethods: [...(account.availablePayoutMethods ?? [])],
+});
+
+export const resolveInstantDebitCardEligibilityFromPayoutAccounts = (
+  payoutAccounts: StripeConnectPayoutAccountView[],
+): InstantDebitCardEligibility => {
+  const payoutCards = payoutAccounts.filter(isValidPayoutCard);
+
+  if (payoutCards.length === 0) {
+    return {
+      eligible: false,
+      eligibleInstantDebitCard: null,
+      unavailableReason: "no_external_card",
+    };
+  }
+
+  const instantCards = payoutCards.filter((account) =>
+    (account.availablePayoutMethods ?? []).includes("instant"),
+  );
+
+  if (instantCards.length === 0) {
+    return {
+      eligible: false,
+      eligibleInstantDebitCard: null,
+      unavailableReason: "card_not_instant_eligible",
+    };
+  }
+
+  if (instantCards.length === 1) {
+    const [instantCard] = instantCards;
+
+    if (!instantCard) {
+      return {
+        eligible: false,
+        eligibleInstantDebitCard: null,
+        unavailableReason: "unsupported_configuration",
+      };
+    }
+
+    return {
+      eligible: true,
+      eligibleInstantDebitCard: toEligibleInstantDebitCard(instantCard),
+      unavailableReason: null,
+    };
+  }
+
+  const defaultInstantCards = instantCards.filter((account) => account.defaultForCurrency === true);
+
+  if (defaultInstantCards.length === 1) {
+    const [defaultInstantCard] = defaultInstantCards;
+
+    if (!defaultInstantCard) {
+      return {
+        eligible: false,
+        eligibleInstantDebitCard: null,
+        unavailableReason: "unsupported_configuration",
+      };
+    }
+
+    return {
+      eligible: true,
+      eligibleInstantDebitCard: toEligibleInstantDebitCard(defaultInstantCard),
+      unavailableReason: null,
+    };
+  }
+
+  return {
+    eligible: false,
+    eligibleInstantDebitCard: null,
+    unavailableReason: "multiple_eligible_cards",
+  };
+};
+
 const toAccountView = (
   account: IStripeConnectAccount,
   payoutAccounts: StripeConnectPayoutAccountView[] = [],
@@ -107,12 +206,39 @@ export class StripeConnectService {
 
   public constructor(private readonly repository = new StripeConnectRepository()) {}
 
-  public async validateReadyForPayout(userId: string, payoutType: CreatorPayoutType = "bank_transfer"): Promise<string> {
+  public async getInstantDebitCardEligibility(userId: string): Promise<InstantDebitCardEligibility> {
+    const account = await this.getAccount(userId);
+
+    if (!account) {
+      return {
+        eligible: false,
+        eligibleInstantDebitCard: null,
+        unavailableReason: "stripe_account_not_ready",
+      };
+    }
+
+    if (!account.payoutsEnabled) {
+      return {
+        eligible: false,
+        eligibleInstantDebitCard: null,
+        unavailableReason: "payouts_disabled",
+      };
+    }
+
+    return resolveInstantDebitCardEligibilityFromPayoutAccounts(account.payoutAccounts);
+  }
+
+  public async validateReadyForPayoutDestination(
+    userId: string,
+    payoutType: CreatorPayoutType = "bank_transfer",
+  ): Promise<StripePayoutReadiness> {
     const account = await this.getAccount(userId);
 
     if (!account) {
       throw new AppError(
-        "Bank account not connected. Please connect your bank account in Settings → Bank Account.",
+        payoutType === "bank_transfer"
+          ? "Bank account not connected. Please connect your bank account in Settings → Bank Account."
+          : "Stripe payout account not connected. Please complete Stripe onboarding.",
         httpStatus.BAD_REQUEST,
         { code: "STRIPE_NOT_CONNECTED" },
       );
@@ -126,6 +252,26 @@ export class StripeConnectService {
       );
     }
 
+    if (payoutType === "instant_debit_card") {
+      const eligibility = resolveInstantDebitCardEligibilityFromPayoutAccounts(account.payoutAccounts);
+
+      if (!eligibility.eligible || !eligibility.eligibleInstantDebitCard) {
+        throw new AppError(
+          "Instant payout is not available. Your account has no eligible debit card. Please switch to Bank Transfer in Settings → Withdrawal Method.",
+          httpStatus.BAD_REQUEST,
+          {
+            code: "INSTANT_PAYOUT_NOT_ELIGIBLE",
+            reason: eligibility.unavailableReason ?? "unsupported_configuration",
+          },
+        );
+      }
+
+      return {
+        stripeAccountId: account.stripeAccountId,
+        eligibleInstantDebitCard: eligibility.eligibleInstantDebitCard,
+      };
+    }
+
     const hasBankAccount = account.payoutAccounts.some((a) => a.type === "bank_account");
 
     if (!hasBankAccount) {
@@ -136,21 +282,16 @@ export class StripeConnectService {
       );
     }
 
-    if (payoutType === "instant_debit_card") {
-      const hasInstantCard = account.payoutAccounts.some(
-        (a) => a.type === "card" && (a.availablePayoutMethods ?? []).includes("instant"),
-      );
+    return {
+      stripeAccountId: account.stripeAccountId,
+      eligibleInstantDebitCard: null,
+    };
+  }
 
-      if (!hasInstantCard) {
-        throw new AppError(
-          "Instant payout is not available. Your account has no eligible debit card. Please switch to Bank Transfer in Settings → Withdrawal Method.",
-          httpStatus.BAD_REQUEST,
-          { code: "INSTANT_PAYOUT_NOT_ELIGIBLE" },
-        );
-      }
-    }
+  public async validateReadyForPayout(userId: string, payoutType: CreatorPayoutType = "bank_transfer"): Promise<string> {
+    const readiness = await this.validateReadyForPayoutDestination(userId, payoutType);
 
-    return account.stripeAccountId;
+    return readiness.stripeAccountId;
   }
 
   public async createTransfer(params: {
@@ -178,6 +319,7 @@ export class StripeConnectService {
 
   public async createInstantPayoutOnConnectedAccount(params: {
     stripeAccountId: string;
+    destination: string;
     amountCents: number;
     currency: string;
     idempotencyKey: string;
@@ -187,6 +329,7 @@ export class StripeConnectService {
       {
         amount: params.amountCents,
         currency: params.currency,
+        destination: params.destination,
         method: "instant",
       },
       {
@@ -220,10 +363,27 @@ export class StripeConnectService {
     const stripe = this.getStripe();
     const redirectUrls = this.resolveRedirectUrls(payload);
     const account = await this.ensureConnectedAccount(user);
+
+    if (!requiresConnectOnboarding(account)) {
+      const loginLink = await stripe.accounts.createLoginLink(account.stripeAccountId);
+
+      return {
+        onboardingUrl: loginLink.url,
+        returnUrl: redirectUrls.returnUrl,
+        refreshUrl: redirectUrls.refreshUrl,
+        expiresAt: null,
+        linkType: "express_dashboard",
+        account: toAccountView(account),
+      };
+    }
+
     const accountLink = await stripe.accountLinks.create({
       account: account.stripeAccountId,
       refresh_url: redirectUrls.refreshUrl,
       return_url: redirectUrls.returnUrl,
+      collection_options: {
+        fields: "currently_due",
+      },
       type: "account_onboarding",
     });
 
@@ -232,6 +392,7 @@ export class StripeConnectService {
       returnUrl: redirectUrls.returnUrl,
       refreshUrl: redirectUrls.refreshUrl,
       expiresAt: accountLink.expires_at ? new Date(accountLink.expires_at * 1000) : null,
+      linkType: "account_onboarding",
       account: toAccountView(account),
     };
   }

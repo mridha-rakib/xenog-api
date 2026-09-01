@@ -14,7 +14,31 @@ const eventRepository = new EventRepository();
 const stripeConnectService = new StripeConnectService();
 const notificationService = new NotificationService();
 
-const notify = async (userId: string, type: Parameters<typeof notificationService.sendSystemNotification>[1], message: string): Promise<void> => {
+type CreatorPayoutProcessorDependencies = {
+  payoutRepository: Pick<CreatorPayoutRepository, "markProcessingIfPending" | "markCompleted" | "markFailed">;
+  earningRepository: Pick<CreatorEarningRepository, "findByIds" | "releaseToEligible">;
+  eventRepository: Pick<EventRepository, "findManyByIds">;
+  stripeConnectService: Pick<
+    StripeConnectService,
+    "validateReadyForPayoutDestination" | "createTransfer" | "createInstantPayoutOnConnectedAccount"
+  >;
+  notificationService: Pick<NotificationService, "sendSystemNotification">;
+};
+
+const defaultProcessorDependencies: CreatorPayoutProcessorDependencies = {
+  payoutRepository,
+  earningRepository,
+  eventRepository,
+  stripeConnectService,
+  notificationService,
+};
+
+const notify = async (
+  notificationService: Pick<NotificationService, "sendSystemNotification">,
+  userId: string,
+  type: Parameters<NotificationService["sendSystemNotification"]>[1],
+  message: string,
+): Promise<void> => {
   try {
     await notificationService.sendSystemNotification(userId, type, message);
   } catch (err) {
@@ -22,7 +46,10 @@ const notify = async (userId: string, type: Parameters<typeof notificationServic
   }
 };
 
-const processPayout = async (payout: ICreatorPayout): Promise<void> => {
+export const processPayout = async (
+  payout: ICreatorPayout,
+  dependencies: CreatorPayoutProcessorDependencies = defaultProcessorDependencies,
+): Promise<void> => {
   const payoutId = payout._id.toString();
   const creatorUserId = payout.creatorUserId.toString();
   const earningIds = payout.earningIds.map((id) => id.toString());
@@ -31,7 +58,7 @@ const processPayout = async (payout: ICreatorPayout): Promise<void> => {
 
   // Atomic claim: only proceed if the payout is still "pending".
   // This prevents duplicate processing if the scheduler tick overlaps with another instance.
-  const claimed = await payoutRepository.markProcessingIfPending(payoutId);
+  const claimed = await dependencies.payoutRepository.markProcessingIfPending(payoutId);
 
   if (!claimed) {
     logger.info({ payoutId }, "Payout already claimed by another process — skipping");
@@ -44,13 +71,14 @@ const processPayout = async (payout: ICreatorPayout): Promise<void> => {
   );
 
   await notify(
+    dependencies.notificationService,
     creatorUserId,
     "payout_processing",
     `Your withdrawal of ${amountLabel} is now being processed.`,
   );
 
   try {
-    const earnings = await earningRepository.findByIds(earningIds);
+    const earnings = await dependencies.earningRepository.findByIds(earningIds);
     const eventIds = [
       ...new Set(
         earnings
@@ -58,7 +86,7 @@ const processPayout = async (payout: ICreatorPayout): Promise<void> => {
           .filter((eventId): eventId is string => Boolean(eventId)),
       ),
     ];
-    const events = await eventRepository.findManyByIds(eventIds);
+    const events = await dependencies.eventRepository.findManyByIds(eventIds);
     const eventStatusById = new Map(events.map((event) => [event._id.toString(), event.status]));
     const blockedEarning = earnings.find((earning) => {
       const eventId = earning.eventId?.toString();
@@ -70,12 +98,22 @@ const processPayout = async (payout: ICreatorPayout): Promise<void> => {
     }
 
     // Validate that Stripe is still ready (onboarding or debit card could have changed since request)
-    const stripeAccountId = await stripeConnectService.validateReadyForPayout(creatorUserId, payout.payoutType);
+    const payoutReadiness = await dependencies.stripeConnectService.validateReadyForPayoutDestination(
+      creatorUserId,
+      payout.payoutType,
+    );
+    const instantPayoutDestinationId = payout.payoutType === "instant_debit_card"
+      ? payoutReadiness.eligibleInstantDebitCard?.id ?? null
+      : null;
+
+    if (payout.payoutType === "instant_debit_card" && !instantPayoutDestinationId) {
+      throw new Error("Instant payout is not available. Your account has no eligible debit card.");
+    }
 
     // Transfer funds from platform balance → connected account.
     // Idempotency key ensures a server crash and retry doesn't create a duplicate transfer.
-    const stripeTransferId = await stripeConnectService.createTransfer({
-      stripeAccountId,
+    const stripeTransferId = await dependencies.stripeConnectService.createTransfer({
+      stripeAccountId: payoutReadiness.stripeAccountId,
       amountCents: Math.round(payout.totalAmount * 100),
       currency,
       transferGroup: payoutId,
@@ -87,8 +125,14 @@ const processPayout = async (payout: ICreatorPayout): Promise<void> => {
 
     // For instant debit card: also trigger an immediate payout to the connected account's debit card.
     if (payout.payoutType === "instant_debit_card") {
-      const stripePayoutId = await stripeConnectService.createInstantPayoutOnConnectedAccount({
-        stripeAccountId,
+      const destination = instantPayoutDestinationId;
+      if (!destination) {
+        throw new Error("Instant payout is not available. Your account has no eligible debit card.");
+      }
+
+      const stripePayoutId = await dependencies.stripeConnectService.createInstantPayoutOnConnectedAccount({
+        stripeAccountId: payoutReadiness.stripeAccountId,
+        destination,
         amountCents: Math.round(payout.totalAmount * 100),
         currency,
         idempotencyKey: `instant-payout-${payoutId}`,
@@ -97,7 +141,7 @@ const processPayout = async (payout: ICreatorPayout): Promise<void> => {
       logger.info({ payoutId, stripePayoutId }, "Stripe instant payout triggered");
     }
 
-    await payoutRepository.markCompleted(payoutId, stripeTransferId);
+    await dependencies.payoutRepository.markCompleted(payoutId, stripeTransferId);
 
     logger.info({ payoutId, stripeTransferId, creatorUserId, payoutType: payout.payoutType }, "Payout completed");
 
@@ -106,6 +150,7 @@ const processPayout = async (payout: ICreatorPayout): Promise<void> => {
       : "Funds should arrive within 1–3 business days.";
 
     await notify(
+      dependencies.notificationService,
       creatorUserId,
       "payout_completed",
       `Your withdrawal of ${amountLabel} has been completed. ${arrivalNote}`,
@@ -117,11 +162,12 @@ const processPayout = async (payout: ICreatorPayout): Promise<void> => {
 
     // Roll back atomically: mark payout failed and release reserved earnings in parallel.
     await Promise.all([
-      payoutRepository.markFailed(payoutId, reason),
-      earningRepository.releaseToEligible(earningIds),
+      dependencies.payoutRepository.markFailed(payoutId, reason),
+      dependencies.earningRepository.releaseToEligible(earningIds),
     ]);
 
     await notify(
+      dependencies.notificationService,
       creatorUserId,
       "payout_failed",
       `Your withdrawal of ${amountLabel} could not be completed. ${reason.slice(0, 120)}. Your funds have been returned to your available balance.`,

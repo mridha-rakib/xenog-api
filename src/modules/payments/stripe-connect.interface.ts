@@ -25,6 +25,34 @@ export interface StripeConnectPayoutAccountView {
   availablePayoutMethods?: string[] | null;
 }
 
+export type InstantPayoutUnavailableReason =
+  | "stripe_account_not_ready"
+  | "payouts_disabled"
+  | "no_external_card"
+  | "card_not_instant_eligible"
+  | "multiple_eligible_cards"
+  | "unsupported_configuration";
+
+export interface EligibleInstantDebitCardView {
+  id: string;
+  brand?: string | null;
+  last4: string;
+  currency?: string | null;
+  country?: string | null;
+  availablePayoutMethods: string[];
+}
+
+export interface InstantDebitCardEligibility {
+  eligible: boolean;
+  eligibleInstantDebitCard: EligibleInstantDebitCardView | null;
+  unavailableReason: InstantPayoutUnavailableReason | null;
+}
+
+export interface StripePayoutReadiness {
+  stripeAccountId: string;
+  eligibleInstantDebitCard: EligibleInstantDebitCardView | null;
+}
+
 export interface IStripeConnectAccount {
   _id: Types.ObjectId;
   userId: Types.ObjectId;
@@ -70,5 +98,6 @@ export interface StripeConnectOnboardingLinkResult {
   returnUrl: string;
   refreshUrl: string;
   expiresAt?: Date | null;
+  linkType?: "account_onboarding" | "express_dashboard";
   account: StripeConnectAccountView;
 }

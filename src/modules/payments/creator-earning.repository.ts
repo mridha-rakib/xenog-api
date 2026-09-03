@@ -88,6 +88,16 @@ export class CreatorEarningRepository {
     return CreatorEarningModel.countDocuments({ eventId, status: "withdrawn" });
   }
 
+  // Read-only obligation check for the account-deletion flow: counts earnings
+  // still owed to this creator (money held or eligible but not yet withdrawn
+  // or refunded). Never mutates earning records.
+  public async countUnsettledByCreatorUserId(creatorUserId: string): Promise<number> {
+    return CreatorEarningModel.countDocuments({
+      creatorUserId,
+      status: { $in: ["held", "eligible"] },
+    });
+  }
+
   public async findEligibleByCreatorUserId(creatorUserId: string): Promise<ICreatorEarning[]> {
     const now = new Date();
 

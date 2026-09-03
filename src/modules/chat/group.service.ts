@@ -203,6 +203,13 @@ export class GroupService {
   // made here against fresh in-transaction DB state — never trusting
   // role/owner info the frontend might supply.
   public async leaveGroup(user: AuthUser, groupId: string): Promise<LeaveGroupResponse> {
+    return this.performLeave(user.id, groupId);
+  }
+
+  // Shared leave logic, keyed only by userId so both the interactive
+  // "leave group" action and the account-deletion detach path go through
+  // exactly the same owner-succession / sole-member-deletion rules.
+  private async performLeave(userId: string, groupId: string): Promise<LeaveGroupResponse> {
     return this.groupRepository.runTransaction(async (session) => {
       const group = await this.groupRepository.findByIdInSession(groupId, session);
 
@@ -210,15 +217,15 @@ export class GroupService {
         throw new AppError("Group not found.", httpStatus.NOT_FOUND);
       }
 
-      const isMember = group.members.some((member) => member.userId.toString() === user.id);
+      const isMember = group.members.some((member) => member.userId.toString() === userId);
       if (!isMember) {
         throw new AppError("You are not a member of this group.", httpStatus.FORBIDDEN);
       }
 
-      const isOwner = group.createdBy.toString() === user.id;
+      const isOwner = group.createdBy.toString() === userId;
 
       if (!isOwner) {
-        const removed = await this.groupRepository.pullNonOwnerMember(groupId, user.id, session);
+        const removed = await this.groupRepository.pullNonOwnerMember(groupId, userId, session);
         if (!removed) {
           throw new AppError("Group membership changed, please try again.", httpStatus.CONFLICT);
         }
@@ -226,7 +233,7 @@ export class GroupService {
         return { groupId, status: "left" };
       }
 
-      const remainingMembers = group.members.filter((member) => member.userId.toString() !== user.id);
+      const remainingMembers = group.members.filter((member) => member.userId.toString() !== userId);
 
       if (remainingMembers.length === 0) {
         const deleted = await this.groupRepository.deleteGroupWithMessages(groupId, session);
@@ -241,7 +248,7 @@ export class GroupService {
 
       const transferred = await this.groupRepository.transferOwnership(
         groupId,
-        user.id,
+        userId,
         successor.userId.toString(),
         session,
       );
@@ -249,13 +256,50 @@ export class GroupService {
         throw new AppError("Group membership changed, please try again.", httpStatus.CONFLICT);
       }
 
-      const removed = await this.groupRepository.pullFormerOwnerMember(groupId, user.id, session);
+      const removed = await this.groupRepository.pullFormerOwnerMember(groupId, userId, session);
       if (!removed) {
         throw new AppError("Group membership changed, please try again.", httpStatus.CONFLICT);
       }
 
       return { groupId, status: "left", newOwnerId: successor.userId.toString() };
     });
+  }
+
+  // Account-deletion support: detaches `userId` from every group they belong
+  // to, reusing the exact performLeave rules (non-owner members are simply
+  // pulled; an owner hands off to the deterministic successor, or the group
+  // is removed only when they were the sole remaining member — an existing
+  // behaviour, never a new group deletion). Best-effort per group so a single
+  // concurrent membership change can never block account deletion.
+  public async removeUserFromAllGroups(userId: string): Promise<void> {
+    const groups = await this.groupRepository.findGroupsForUser(userId, 1000);
+
+    for (const group of groups) {
+      const groupId = group._id.toString();
+
+      try {
+        await this.performLeave(userId, groupId);
+      } catch (error) {
+        if (error instanceof AppError && error.statusCode === httpStatus.CONFLICT) {
+          try {
+            await this.performLeave(userId, groupId);
+          } catch {
+            // Leave for the next reconciliation pass rather than failing deletion.
+          }
+          continue;
+        }
+
+        if (
+          error instanceof AppError &&
+          (error.statusCode === httpStatus.NOT_FOUND || error.statusCode === httpStatus.FORBIDDEN)
+        ) {
+          // Group already gone or the user was already removed — nothing to do.
+          continue;
+        }
+
+        throw error;
+      }
+    }
   }
 
   // Deterministic successor selection: regular members are preferred over

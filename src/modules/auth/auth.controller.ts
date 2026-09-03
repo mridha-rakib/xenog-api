@@ -133,7 +133,7 @@ export class AuthController {
       throw new Error("Authenticated user missing from request");
     }
 
-    await this.authService.deleteCurrentUser(userId);
+    await this.authService.deleteCurrentUser(userId, req.body.password);
 
     ApiResponse.success(res, {
       message: "Account deleted successfully",

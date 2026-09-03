@@ -9,6 +9,10 @@ import { UserRepository } from "../user/user.repository.js";
 import type { IUser } from "../user/user.interface.js";
 import { LegalDocumentService } from "../settings/legal-document.service.js";
 import type { LegalDocumentType } from "../settings/legal-document.interface.js";
+import { EventRepository } from "../events/event.repository.js";
+import { CreatorEarningRepository } from "../payments/creator-earning.repository.js";
+import { CreatorPayoutRepository } from "../payments/creator-payout.repository.js";
+import { GroupService } from "../chat/group.service.js";
 import { UserConsentRepository } from "./user-consent.repository.js";
 import type {
   AuthSession,
@@ -82,6 +86,10 @@ export class AuthService {
     private readonly emailService = new EmailService(),
     private readonly legalDocumentService = new LegalDocumentService(),
     private readonly userConsentRepository = new UserConsentRepository(),
+    private readonly eventRepository = new EventRepository(),
+    private readonly creatorEarningRepository = new CreatorEarningRepository(),
+    private readonly creatorPayoutRepository = new CreatorPayoutRepository(),
+    private readonly groupService = new GroupService(),
   ) {}
 
   public async register(payload: RegisterDto, context: RegisterContext = {}): Promise<RegistrationResult> {
@@ -402,11 +410,57 @@ export class AuthService {
     return toAuthUser(user);
   }
 
-  public async deleteCurrentUser(userId: string): Promise<void> {
-    const user = await this.userRepository.deactivateAccountById(userId);
+  public async deleteCurrentUser(userId: string, password: string): Promise<void> {
+    const user = await this.userRepository.findByIdWithPassword(userId);
 
     if (!user) {
       throw new AppError("User not found", httpStatus.NOT_FOUND);
+    }
+
+    // Password re-verification — same bcrypt flow as changePassword/login.
+    if (!user.passwordHash) {
+      throw new AppError("Invalid password", httpStatus.UNAUTHORIZED);
+    }
+
+    const passwordMatches = await bcrypt.compare(password, user.passwordHash);
+
+    if (!passwordMatches) {
+      throw new AppError("Invalid password", httpStatus.UNAUTHORIZED);
+    }
+
+    // Block deletion while money/obligations are still outstanding. This only
+    // reads payment/event state — it never cancels events, refunds tickets,
+    // or touches any payment record.
+    await this.assertNoPendingObligations(userId);
+
+    // Detach from group chats before anonymizing so ownership succession runs
+    // against the still-named member (reuses the existing leaveGroup rules).
+    await this.groupService.removeUserFromAllGroups(userId);
+
+    // Existing soft-delete + anonymization — unchanged. Posts, tickets,
+    // events and chat history keep pointing at this (now "Deleted User") row.
+    const deactivated = await this.userRepository.deactivateAccountById(userId);
+
+    if (!deactivated) {
+      throw new AppError("User not found", httpStatus.NOT_FOUND);
+    }
+  }
+
+  // 409 guard for account deletion. "Pending obligations" = an active paid
+  // event the user still hosts, a pending/processing payout, or creator
+  // earnings that are still held/eligible (money owed but not withdrawn).
+  private async assertNoPendingObligations(userId: string): Promise<void> {
+    const [activePaidEvents, pendingPayouts, unsettledEarnings] = await Promise.all([
+      this.eventRepository.countActivePaidHostedEventsByUserId(userId),
+      this.creatorPayoutRepository.findPendingOrProcessingByCreatorUserId(userId),
+      this.creatorEarningRepository.countUnsettledByCreatorUserId(userId),
+    ]);
+
+    if (activePaidEvents > 0 || pendingPayouts.length > 0 || unsettledEarnings > 0) {
+      throw new AppError(
+        "Please complete pending obligations before deleting your account.",
+        httpStatus.CONFLICT,
+      );
     }
   }
 

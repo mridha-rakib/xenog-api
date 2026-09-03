@@ -41,6 +41,10 @@ const changePasswordBody = z.object({
   newPassword: z.string().min(8).max(128),
 });
 
+const deleteAccountBody = z.object({
+  password: z.string().min(1, "Password is required"),
+});
+
 const requestPasswordResetBody = z.object({
   email: z.string().trim().email(),
 });
@@ -122,5 +126,8 @@ export const authValidation = {
   }),
   updateProfile: z.object({
     body: updateProfileBody,
+  }),
+  deleteAccount: z.object({
+    body: deleteAccountBody,
   }),
 };

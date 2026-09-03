@@ -523,7 +523,17 @@ export class ChatService {
       this.userBlockRepository.isBlocked(friendId, userId),
     ]);
 
-    if (!friend || friend.role !== "user" || !friend.isActive || !friend.emailVerified) {
+    if (!friend || friend.role !== "user") {
+      throw new AppError("Friend not found.", httpStatus.NOT_FOUND);
+    }
+
+    // A deactivated (deleted) account keeps its rows so history stays intact,
+    // but no new direct message may be started with it.
+    if (!friend.isActive) {
+      throw new AppError("This user is no longer available.", httpStatus.NOT_FOUND);
+    }
+
+    if (!friend.emailVerified) {
       throw new AppError("Friend not found.", httpStatus.NOT_FOUND);
     }
 

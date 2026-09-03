@@ -32,7 +32,7 @@ router.post(
 router.post("/reset-password", validate(authValidation.resetPassword), catchAsync(controller.resetPassword));
 router.get("/me", authenticate, catchAsync(controller.me));
 router.patch("/me", authenticate, validate(authValidation.updateProfile), catchAsync(controller.updateMe));
-router.delete("/me", authenticate, catchAsync(controller.deleteMe));
+router.delete("/me", authenticate, validate(authValidation.deleteAccount), catchAsync(controller.deleteMe));
 router.post("/logout", authenticate, catchAsync(controller.logout));
 
 export const authRoutes = router;

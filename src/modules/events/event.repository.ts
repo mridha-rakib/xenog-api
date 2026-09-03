@@ -572,6 +572,20 @@ export class EventRepository {
     return EventModel.find({ userId }).sort({ createdAt: -1, _id: -1 });
   }
 
+  // Read-only obligation check for the account-deletion flow: counts events
+  // this user hosts that are still published/live, have not yet ended, and
+  // sell at least one paid ticket. Never mutates event data.
+  public async countActivePaidHostedEventsByUserId(userId: string): Promise<number> {
+    const now = new Date();
+
+    return EventModel.countDocuments({
+      userId,
+      status: { $in: ["published", "live"] },
+      "tickets.price": { $gt: 0 },
+      $or: [{ endAt: { $gte: now } }, { endAt: null }, { endAt: { $exists: false } }],
+    });
+  }
+
   public async findDraftsByUserId(userId: string): Promise<IEvent[]> {
     return EventModel.find({ userId, status: "draft" }).sort({ updatedAt: -1, _id: -1 });
   }

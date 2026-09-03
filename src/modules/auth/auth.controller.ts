@@ -6,7 +6,9 @@ export class AuthController {
   public constructor(private readonly authService = new AuthService()) {}
 
   public register = async (req: Request, res: Response): Promise<void> => {
-    const result = await this.authService.register(req.body);
+    const result = await this.authService.register(req.body, {
+      acceptLanguage: req.get("accept-language") ?? undefined,
+    });
 
     ApiResponse.success(res, {
       message: "Verification code sent. Please verify your email.",

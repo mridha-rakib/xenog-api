@@ -9,6 +9,12 @@ export interface RegisterDto {
   email: string;
   password: string;
   accountType: "personal" | "business";
+  acceptedLegal: true;
+  locale?: string;
+}
+
+export interface RegisterContext {
+  acceptLanguage?: string;
 }
 
 export interface VerifyEmailDto {

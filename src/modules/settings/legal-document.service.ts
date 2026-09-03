@@ -19,6 +19,10 @@ const legalDocumentCopy: Record<LegalDocumentType, { title: string; subtitle: st
     title: "Privacy & Policy",
     subtitle: "Set privacy & policy of your Mooment app",
   },
+  refund: {
+    title: "Refund Policy",
+    subtitle: "Set refund policy of your Mooment app",
+  },
 };
 
 const defaultLegalClauses: Record<LegalDocumentType, UpdateLegalDocumentDto["clauses"]> = {
@@ -33,6 +37,13 @@ const defaultLegalClauses: Record<LegalDocumentType, UpdateLegalDocumentDto["cla
     {
       title: "Data Collection",
       body: "We value your privacy and are committed to protecting your personal data. This policy outlines how we collect, use, and safeguard your information when you use our Mooment application and services.",
+      sortOrder: 0,
+    },
+  ],
+  refund: [
+    {
+      title: "Overview",
+      body: "This policy explains when and how refunds are issued for tickets and purchases made through the Mooment application. It does not change the payment terms agreed at checkout.",
       sortOrder: 0,
     },
   ],

@@ -1,8 +1,15 @@
 import { z } from "zod";
+import { passwordSchema } from "./password.schema.js";
 
 const loginBody = z.object({
   email: z.string().trim().min(1, "Email or username is required"),
   password: z.string().min(1, "Password is required"),
+});
+
+// errorMap (not `message`) so the same copy is returned whether the field is
+// missing or explicitly false — z.literal's `message` only covers the missing case.
+const acceptedLegal = z.literal(true, {
+  errorMap: () => ({ message: "You must accept the Terms & Conditions and Privacy Policy" }),
 });
 
 const registerBody = z.object({
@@ -14,8 +21,10 @@ const registerBody = z.object({
     .max(40)
     .regex(/^[a-zA-Z0-9_]+$/, "Username can only contain letters, numbers, and underscores"),
   email: z.string().trim().email(),
-  password: z.string().min(8).max(128),
+  password: passwordSchema,
   accountType: z.enum(["personal", "business"]),
+  acceptedLegal,
+  locale: z.string().trim().min(2).max(35).optional(),
 });
 
 const verifyEmailBody = z.object({

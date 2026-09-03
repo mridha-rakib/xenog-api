@@ -1,6 +1,6 @@
 import type { Types } from "mongoose";
 
-export const legalDocumentTypes = ["terms", "privacy"] as const;
+export const legalDocumentTypes = ["terms", "privacy", "refund"] as const;
 
 export type LegalDocumentType = (typeof legalDocumentTypes)[number];
 

@@ -11,7 +11,7 @@ const legalDocumentType = z
   .trim()
   .refine(
     (value) => legalDocumentTypes.includes(value as (typeof legalDocumentTypes)[number]),
-    "Document type must be either terms or privacy",
+    "Document type must be terms, privacy or refund",
   );
 
 const htmlToText = (value: string): string =>

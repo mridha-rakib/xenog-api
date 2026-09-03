@@ -7,6 +7,9 @@ import { EmailService } from "../../core/email/email.service.js";
 import { AppError } from "../../core/errors/app-error.js";
 import { UserRepository } from "../user/user.repository.js";
 import type { IUser } from "../user/user.interface.js";
+import { LegalDocumentService } from "../settings/legal-document.service.js";
+import type { LegalDocumentType } from "../settings/legal-document.interface.js";
+import { UserConsentRepository } from "./user-consent.repository.js";
 import type {
   AuthSession,
   AuthUser,
@@ -14,6 +17,7 @@ import type {
   LoginDto,
   PasswordResetRequestResult,
   RefreshTokenDto,
+  RegisterContext,
   RegisterDto,
   RegistrationResult,
   RequestPasswordResetDto,
@@ -76,9 +80,11 @@ export class AuthService {
   public constructor(
     private readonly userRepository = new UserRepository(),
     private readonly emailService = new EmailService(),
+    private readonly legalDocumentService = new LegalDocumentService(),
+    private readonly userConsentRepository = new UserConsentRepository(),
   ) {}
 
-  public async register(payload: RegisterDto): Promise<RegistrationResult> {
+  public async register(payload: RegisterDto, context: RegisterContext = {}): Promise<RegistrationResult> {
     const existingEmail = await this.userRepository.findByEmailWithVerification(payload.email);
 
     if (existingEmail) {
@@ -93,6 +99,8 @@ export class AuthService {
           throw new AppError("Username already exists", httpStatus.CONFLICT);
         }
       }
+
+      await this.recordSignupConsent(existingEmail._id.toString(), payload, context);
 
       return this.issueVerificationCode(existingEmail);
     }
@@ -117,6 +125,8 @@ export class AuthService {
       emailVerificationExpiresAt: new Date(Date.now() + VERIFICATION_CODE_TTL_MS),
     });
 
+    await this.recordSignupConsent(user._id.toString(), payload, context);
+
     await this.emailService.sendVerificationCode({
       to: user.email,
       name: user.name,
@@ -127,6 +137,49 @@ export class AuthService {
       email: user.email,
       verificationRequired: true,
     };
+  }
+
+  private async recordSignupConsent(
+    userId: string,
+    payload: RegisterDto,
+    context: RegisterContext,
+  ): Promise<void> {
+    const [termsVersion, privacyVersion] = await Promise.all([
+      this.getLegalDocumentVersion("terms"),
+      this.getLegalDocumentVersion("privacy"),
+    ]);
+
+    await this.userConsentRepository.record({
+      userId,
+      context: "signup",
+      termsVersion,
+      privacyVersion,
+      acceptedAt: new Date(),
+      locale: this.resolveConsentLocale(payload.locale, context.acceptLanguage),
+    });
+  }
+
+  // Option B versioning: the admin-managed legal document's `updatedAt`
+  // timestamp is the policy version snapshot. No numeric version field.
+  private async getLegalDocumentVersion(type: LegalDocumentType): Promise<string> {
+    const document = await this.legalDocumentService.getDocument(type);
+
+    return new Date(document.updatedAt).toISOString();
+  }
+
+  private resolveConsentLocale(locale?: string, acceptLanguage?: string): string {
+    const fromBody = locale?.trim();
+    if (fromBody) {
+      return fromBody;
+    }
+
+    // First language of an Accept-Language header, without its ";q=" weight.
+    const fromHeader = acceptLanguage?.split(",")[0]?.split(";")[0]?.trim();
+    if (fromHeader) {
+      return fromHeader;
+    }
+
+    return "en-US";
   }
 
   public async login(payload: LoginDto, requiredRole?: AuthUser["role"]): Promise<AuthSession> {

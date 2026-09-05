@@ -9,6 +9,7 @@ import type { IUser } from "../user/user.interface.js";
 import { UserRepository } from "../user/user.repository.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
 import { UserBlockRepository } from "../user/user-block.repository.js";
+import { isBlockedBetween, isUserPubliclyViewable } from "../user/user-access.js";
 import { MomentShareRepository } from "./moment-share.repository.js";
 import { MomentRepository } from "./moment.repository.js";
 import type {
@@ -160,12 +161,16 @@ export class MomentService {
     if (taggedFriendIds.length > 0) {
       const taggedUsers = await this.userRepository.findByIds(taggedFriendIds);
       const taggedUserById = new Map(taggedUsers
-        .filter((taggedUser) => taggedUser.isActive && taggedUser.role === "user")
+        .filter((taggedUser) => isUserPubliclyViewable(taggedUser))
         .map((taggedUser) => [taggedUser._id.toString(), taggedUser]));
 
       if (taggedFriendIds.some((id) => !taggedUserById.has(id))) {
         throw new AppError("Tagged users not found.", httpStatus.BAD_REQUEST);
       }
+
+      // Same rule the repost tag path already enforces: you may only tag a
+      // mutual friend, and never someone on either side of a block.
+      await this.assertTaggableFriendIds(user.id, taggedFriendIds);
 
       if (taggedPeople.length === 0) {
         taggedPeople = taggedFriendIds.map((id) => taggedUserById.get(id)?.name).filter(Boolean) as string[];
@@ -328,13 +333,19 @@ export class MomentService {
     // scoring can reuse the exact same query — no second follow-graph read.
     const [excludeUserIds, blockerUserIds, friendIds, followingIds] = await Promise.all([
       this.userBlockRepository.findBlockedIds(user.id),
-      isSmartFeedEnabled ? this.userBlockRepository.findBlockerIds(user.id) : Promise.resolve([]),
+      // Always loaded (previously Smart-Feed only): content from anyone who
+      // blocked the viewer must be filtered out of the feed regardless of
+      // Smart Feed.
+      this.userBlockRepository.findBlockerIds(user.id),
       shouldLoadFriendIds
         ? this.userFollowRepository.findMutualFriendIds(user.id)
         : Promise.resolve([]),
       this.userFollowRepository.findFollowingIds(user.id),
     ]);
     const viewerFollowingIds = new Set(followingIds);
+    // Blocked in EITHER direction — the authoritative exclusion set for every
+    // feed content query below.
+    const feedExcludedUserIds = [...new Set([...excludeUserIds, ...blockerUserIds])];
     // Friends candidate authors = self + mutual friends. findMutualFriendIds
     // never includes the viewer's own id (a user isn't their own
     // follower/following), so without this the viewer's own Moments were
@@ -346,19 +357,19 @@ export class MomentService {
     const candidateEventIds = await this.momentRepository.findFeedCandidateEventIds({
       ...query,
       hashtags,
-      excludeUserIds,
+      excludeUserIds: feedExcludedUserIds,
       authorUserIds,
     });
     const visibleEvents = await this.eventRepository.findFeedVisibleByIdsForUser(
       candidateEventIds,
       user.id,
-      excludeUserIds,
+      feedExcludedUserIds,
     );
     const visibleEventIds = visibleEvents.map((event) => event._id.toString());
     const moments = await this.momentRepository.findFeed({
       ...query,
       hashtags,
-      excludeUserIds,
+      excludeUserIds: feedExcludedUserIds,
       visibleEventIds,
       authorUserIds,
     });
@@ -406,15 +417,21 @@ export class MomentService {
   ): Promise<MomentResponse[]> {
     const hashtag = normalizeHashtag(hashtagValue);
     const isSmartFeedEnabled = env.ENABLE_SMART_FEED === true;
-    const moments = hashtag ? await this.momentRepository.findPublicByHashtag(hashtag, limit) : [];
+    // Block relationships (either direction) always filter hashtag results,
+    // independent of Smart Feed.
+    const [excludeUserIds, blockerUserIds] = await Promise.all([
+      this.userBlockRepository.findBlockedIds(user.id),
+      this.userBlockRepository.findBlockerIds(user.id),
+    ]);
+    const blockedRelationUserIds = new Set([...excludeUserIds, ...blockerUserIds]);
+    const rawMoments = hashtag ? await this.momentRepository.findPublicByHashtag(hashtag, limit) : [];
+    const moments = rawMoments.filter((moment) => !blockedRelationUserIds.has(moment.userId.toString()));
     const uniqueUserIds = [...new Set(moments.map((m) => m.userId.toString()))];
-    const [authors, viewerFollowingIds, interactionContext, excludeUserIds, blockerUserIds, friendIds, followingIds] =
+    const [authors, viewerFollowingIds, interactionContext, friendIds, followingIds] =
       await Promise.all([
         this.userRepository.findByIds(uniqueUserIds),
         this.getViewerFollowingIdSet(user),
         this.buildInteractionContext(moments, user),
-        isSmartFeedEnabled ? this.userBlockRepository.findBlockedIds(user.id) : Promise.resolve([]),
-        isSmartFeedEnabled ? this.userBlockRepository.findBlockerIds(user.id) : Promise.resolve([]),
         isSmartFeedEnabled ? this.userFollowRepository.findMutualFriendIds(user.id) : Promise.resolve([]),
         isSmartFeedEnabled ? this.userFollowRepository.findFollowingIds(user.id) : Promise.resolve([]),
       ]);
@@ -630,6 +647,10 @@ export class MomentService {
 
     if (!moment || moment.isEventAnnouncement || (moment.audience !== "public" && moment.userId.toString() !== user.id)) {
       throw new AppError("Moment not found", httpStatus.NOT_FOUND);
+    }
+
+    if (moment.userId.toString() !== user.id) {
+      await this.assertMomentAuthorAccessible(moment.userId.toString(), user.id);
     }
 
     const [author, viewerFollowingIds, interactionContext] = await Promise.all([
@@ -1037,14 +1058,38 @@ export class MomentService {
       return uniqueTaggedFriendIds;
     }
 
-    const mutualFriendIds = new Set(await this.userFollowRepository.findMutualFriendIds(userId));
-    const blockedIds = new Set(await this.userBlockRepository.findBlockedIds(userId));
-
-    if (uniqueTaggedFriendIds.some((id) => !mutualFriendIds.has(id) || blockedIds.has(id))) {
-      throw new AppError("You can only tag friends in a repost", httpStatus.BAD_REQUEST);
-    }
+    await this.assertTaggableFriendIds(userId, uniqueTaggedFriendIds, "You can only tag friends in a repost");
 
     return uniqueTaggedFriendIds;
+  }
+
+  // Shared tag-eligibility gate for the post composer and the repost
+  // composer. A tagged user must be a mutual friend and must not be on
+  // either side of a block. (Blocking already clears the follow edges, so a
+  // freshly-blocked user also fails the mutual-friend check — the explicit
+  // block set is defence-in-depth and also covers the "blocked me" side.)
+  private async assertTaggableFriendIds(
+    userId: string,
+    taggedFriendIds: string[],
+    message = "You can only tag friends.",
+  ): Promise<void> {
+    const uniqueIds = [...new Set(taggedFriendIds)];
+
+    if (uniqueIds.length === 0) {
+      return;
+    }
+
+    const [mutualFriendIds, blockedIds, blockerIds] = await Promise.all([
+      this.userFollowRepository.findMutualFriendIds(userId),
+      this.userBlockRepository.findBlockedIds(userId),
+      this.userBlockRepository.findBlockerIds(userId),
+    ]);
+    const mutual = new Set(mutualFriendIds);
+    const blocked = new Set([...blockedIds, ...blockerIds]);
+
+    if (uniqueIds.some((id) => !mutual.has(id) || blocked.has(id))) {
+      throw new AppError(message, httpStatus.BAD_REQUEST);
+    }
   }
 
   private async toResponse(
@@ -1415,6 +1460,13 @@ export class MomentService {
       throw new AppError("You do not have access to this moment", httpStatus.FORBIDDEN);
     }
 
+    // A blocked user (either direction) or a suspended / deleted author's
+    // (non-event) Moment must not be readable or interactable. Event
+    // announcement Moments keep their existing Event-driven visibility.
+    if (moment.userId.toString() !== viewer.id && !moment.isEventAnnouncement) {
+      await this.assertMomentAuthorAccessible(moment.userId.toString(), viewer.id);
+    }
+
     if (moment.isEventAnnouncement && moment.eventId) {
       const event = await this.eventRepository.findById(moment.eventId.toString());
       if (!event || event.status === "draft") {
@@ -1423,6 +1475,26 @@ export class MomentService {
     }
 
     return moment;
+  }
+
+  // Additive privacy gate shared by getMoment / getViewableMoment. A
+  // non-owner viewer must not reach a (non-event) Moment when its author is
+  // not publicly viewable (suspended / banned / deleted / non-user) or when
+  // either side has blocked the other. Presented as a plain 404 so it leaks
+  // nothing about the author or the content.
+  private async assertMomentAuthorAccessible(authorId: string, viewerId: string): Promise<void> {
+    const [author, blocked] = await Promise.all([
+      this.userRepository.findById(authorId),
+      isBlockedBetween(this.userBlockRepository, viewerId, authorId),
+    ]);
+
+    // Hide on a block (either direction), or when the author record exists
+    // but is suspended / banned / deleted / non-user. A missing author
+    // record is treated as "cannot determine" and left to existing rules,
+    // so this never changes behaviour for well-formed data.
+    if (blocked || (author !== null && !isUserPubliclyViewable(author))) {
+      throw new AppError("Moment not found", httpStatus.NOT_FOUND);
+    }
   }
 
   /**

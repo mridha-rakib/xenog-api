@@ -37,18 +37,18 @@ export class StoryRepository {
       userId: { $in: userIds },
       expiresAt: { $gt: now },
     })
-      .populate("userId", "name username avatarKey")
+      .populate("userId", "name username avatarKey isActive role deletedAt")
       .sort({ createdAt: -1 });
   }
 
   public async findAllActive(now = new Date()): Promise<IStory[]> {
     return StoryModel.find({ expiresAt: { $gt: now } })
-      .populate("userId", "name username avatarKey")
+      .populate("userId", "name username avatarKey isActive role deletedAt")
       .sort({ createdAt: -1 });
   }
 
   public async findActiveById(id: string, now = new Date()): Promise<IStory | null> {
-    return StoryModel.findOne({ _id: id, expiresAt: { $gt: now } }).populate("userId", "name username avatarKey");
+    return StoryModel.findOne({ _id: id, expiresAt: { $gt: now } }).populate("userId", "name username avatarKey isActive role deletedAt");
   }
 
   public async deleteByIdForUser(id: string, userId: string): Promise<IStory | null> {
@@ -84,7 +84,7 @@ export class StoryRepository {
   }
 
   public async findComments(storyId: string) {
-    return StoryCommentModel.find({ storyId }).populate("userId", "name username avatarKey").sort({ createdAt: 1 });
+    return StoryCommentModel.find({ storyId }).populate("userId", "name username avatarKey isActive role deletedAt").sort({ createdAt: 1 });
   }
 
   public async deleteInteractions(storyId: string): Promise<void> {
@@ -100,7 +100,7 @@ export class StoryRepository {
       userId,
       expiresAt: { $gt: now },
     })
-      .populate("userId", "name username avatarKey")
+      .populate("userId", "name username avatarKey isActive role deletedAt")
       .sort({ createdAt: -1 });
   }
 }

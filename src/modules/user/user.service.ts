@@ -39,6 +39,7 @@ import type {
 } from "./user.interface.js";
 import { UserFollowRepository } from "./user-follow.repository.js";
 import { UserBlockRepository } from "./user-block.repository.js";
+import { getBlockRelationship, isUserPubliclyViewable } from "./user-access.js";
 import { UserRepository } from "./user.repository.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
 import { realtimeGateway } from "../realtime/realtime.gateway.js";
@@ -676,12 +677,9 @@ export class UserService {
     viewerHasBlockedTarget: boolean;
     targetHasBlockedViewer: boolean;
   }> {
-    const [viewerHasBlockedTarget, targetHasBlockedViewer] = await Promise.all([
-      this.userBlockRepository.isBlocked(viewerId, targetUserId),
-      this.userBlockRepository.isBlocked(targetUserId, viewerId),
-    ]);
-
-    return { viewerHasBlockedTarget, targetHasBlockedViewer };
+    // Delegates to the shared helper so profile / moment / story surfaces all
+    // read block state the same way. Behaviour is unchanged.
+    return getBlockRelationship(this.userBlockRepository, viewerId, targetUserId);
   }
 
   private async assertProfileAccessible(viewer: AuthUser, targetUserId: string): Promise<void> {
@@ -847,6 +845,22 @@ export class UserService {
         : Promise.resolve({ viewerHasBlockedTarget: false, targetHasBlockedViewer: false }),
     ]);
     const isBlockedProfile = relationship.viewerHasBlockedTarget || relationship.targetHasBlockedViewer;
+    const isSelf = Boolean(viewer && viewer.id === userId);
+
+    // Suspended / banned / deleted / non-user accounts must never expose
+    // private profile fields (email, bio, accountType, follow state) to
+    // anyone but the account itself. Return a safe, minimal "unavailable"
+    // shape instead. The owner viewing their own profile is unaffected.
+    if (!isSelf && !isUserPubliclyViewable(user)) {
+      return {
+        id: userId,
+        name: "Unavailable",
+        username: null,
+        avatarKey: null,
+        avatarUrl: null,
+        profileAccess: "unavailable",
+      };
+    }
 
     if (isBlockedProfile) {
       return {

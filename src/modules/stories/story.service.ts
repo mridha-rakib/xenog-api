@@ -3,6 +3,9 @@ import type { AuthUser } from "../auth/auth.interface.js";
 import { env } from "../../config/env.js";
 import { StorageService } from "../storage/storage.service.js";
 import { UserFollowRepository } from "../user/user-follow.repository.js";
+import { UserBlockRepository } from "../user/user-block.repository.js";
+import { UserRepository } from "../user/user.repository.js";
+import { isBlockedBetween, isUserPubliclyViewable } from "../user/user-access.js";
 import { AppError } from "../../core/errors/app-error.js";
 import { StoryRepository } from "./story.repository.js";
 import type { CreateStoryDto, IStory, StoryAuthorResponse, StoryCommentResponse, StoryResponse } from "./story.interface.js";
@@ -16,6 +19,9 @@ type PopulatedStoryUser = {
   name?: string;
   username?: string;
   avatarKey?: string | null;
+  isActive?: boolean;
+  role?: string;
+  deletedAt?: Date | null;
 };
 
 export class StoryService {
@@ -24,6 +30,8 @@ export class StoryService {
     private readonly userFollowRepository = new UserFollowRepository(),
     private readonly storageService = new StorageService(),
     private readonly momentRepository = new MomentRepository(),
+    private readonly userBlockRepository = new UserBlockRepository(),
+    private readonly userRepository = new UserRepository(),
   ) {}
 
   public async createStory(payload: CreateStoryDto, user: AuthUser): Promise<StoryResponse> {
@@ -90,7 +98,10 @@ export class StoryService {
       this.userFollowRepository.findMutualFriendIds(user.id),
     ]);
     const visibleUserIds = [...new Set([user.id, ...followingIds, ...friendIds])];
-    const stories = this.filterVisibleStories(await this.storyRepository.findActiveByViewerNetwork(visibleUserIds));
+    const stories = await this.filterAccessibleStories(
+      this.filterVisibleStories(await this.storyRepository.findActiveByViewerNetwork(visibleUserIds)),
+      user.id,
+    );
 
     return Promise.all(stories.map((story) => this.toResponse(story, user)));
   }
@@ -102,34 +113,43 @@ export class StoryService {
   }
 
   public async listUserStories(userId: string, viewer: AuthUser): Promise<StoryResponse[]> {
-    const stories = this.filterVisibleStories(await this.storyRepository.findActiveByUserId(userId));
+    const stories = await this.filterAccessibleStories(
+      this.filterVisibleStories(await this.storyRepository.findActiveByUserId(userId)),
+      viewer.id,
+    );
     return Promise.all(stories.map((story) => this.toResponse(story, viewer)));
   }
 
   public async listDiscoverStories(user: AuthUser): Promise<StoryResponse[]> {
-    const stories = this.filterVisibleStories(await this.storyRepository.findAllActive());
+    const stories = await this.filterAccessibleStories(
+      this.filterVisibleStories(await this.storyRepository.findAllActive()),
+      user.id,
+    );
     return Promise.all(stories.map((story) => this.toResponse(story, user)));
   }
 
   public async listFriendStories(user: AuthUser): Promise<StoryResponse[]> {
     const friendIds = await this.userFollowRepository.findMutualFriendIds(user.id);
-    const stories = this.filterVisibleStories(await this.storyRepository.findActiveByViewerNetwork(friendIds));
+    const stories = await this.filterAccessibleStories(
+      this.filterVisibleStories(await this.storyRepository.findActiveByViewerNetwork(friendIds)),
+      user.id,
+    );
     return Promise.all(stories.map((story) => this.toResponse(story, user)));
   }
 
   public async getStoryDetails(id: string, user: AuthUser): Promise<StoryResponse> {
-    const story = await this.getActiveStory(id);
+    const story = await this.getViewableStory(id, user);
     return this.toResponse(story, user);
   }
 
   public async recordView(id: string, user: AuthUser) {
-    const story = await this.getActiveStory(id);
+    const story = await this.getViewableStory(id, user);
     await this.storyRepository.recordView(user.id, id, story.expiresAt);
     return this.storyRepository.getInteraction(id, user.id);
   }
 
   public async toggleReaction(id: string, user: AuthUser) {
-    const story = await this.getActiveStory(id);
+    const story = await this.getViewableStory(id, user);
     await this.storyRepository.toggleReaction(user.id, id, story.expiresAt);
     return this.storyRepository.getInteraction(id, user.id);
   }
@@ -140,8 +160,8 @@ export class StoryService {
     await this.storyRepository.deleteInteractions(id);
   }
 
-  public async listComments(id: string, _user: AuthUser) {
-    await this.getActiveStory(id);
+  public async listComments(id: string, user: AuthUser) {
+    await this.getViewableStory(id, user);
     const comments = await this.storyRepository.findComments(id);
     const responses: StoryCommentResponse[] = await Promise.all(comments.map(async (comment) => {
       const author = this.getCommentAuthor(comment.userId);
@@ -168,7 +188,7 @@ export class StoryService {
   }
 
   public async createComment(id: string, user: AuthUser, payload: { text: string; parentCommentId?: string | null }) {
-    const story = await this.getActiveStory(id);
+    const story = await this.getViewableStory(id, user);
     if (payload.parentCommentId) {
       const comments = await this.storyRepository.findComments(id);
       if (!comments.some((comment) => comment._id.toString() === payload.parentCommentId)) {
@@ -190,7 +210,7 @@ export class StoryService {
   }
 
   public async shareToFeed(id: string, user: AuthUser, payload: { caption?: string | null; taggedFriendIds?: string[]; clientRequestId?: string | null }) {
-    const story = await this.getActiveStory(id);
+    const story = await this.getViewableStory(id, user);
     const mediaType = story.mediaType === "text" ? null : story.mediaType;
     const taggedPeople = [...new Set(payload.taggedFriendIds ?? [])];
     const moment = await this.momentRepository.createStoryShare({
@@ -225,6 +245,96 @@ export class StoryService {
       throw new AppError("Story not found or expired", httpStatus.NOT_FOUND);
     }
     return story;
+  }
+
+  // Per-id read / interact privacy gate. getActiveStory already enforces
+  // expiry + the video kill-switch; this additionally hides a Story — as a
+  // plain 404, leaking nothing — when the viewer and the author have blocked
+  // each other in either direction, or the author is suspended / banned /
+  // deleted / not a regular user. The author viewing their own Story is
+  // always allowed.
+  private async getViewableStory(id: string, viewer: AuthUser): Promise<IStory> {
+    const story = await this.getActiveStory(id);
+    const authorId = this.resolveStoryAuthorId(story);
+
+    if (authorId !== viewer.id) {
+      const [blocked, authorViewable] = await Promise.all([
+        isBlockedBetween(this.userBlockRepository, viewer.id, authorId),
+        this.resolveAuthorPubliclyViewable(story, authorId),
+      ]);
+
+      if (blocked || !authorViewable) {
+        throw new AppError("Story not found or expired", httpStatus.NOT_FOUND);
+      }
+    }
+
+    return story;
+  }
+
+  // List filter counterpart of getViewableStory: drops Stories authored by a
+  // user the viewer has blocked or been blocked by, or by an account that is
+  // not publicly viewable. The viewer's own Stories are always kept.
+  private async filterAccessibleStories(stories: IStory[], viewerId: string): Promise<IStory[]> {
+    if (stories.length === 0) {
+      return [];
+    }
+
+    const [blockedIds, blockerIds] = await Promise.all([
+      this.userBlockRepository.findBlockedIds(viewerId),
+      this.userBlockRepository.findBlockerIds(viewerId),
+    ]);
+    const excluded = new Set([...blockedIds, ...blockerIds]);
+
+    return stories.filter((story) => {
+      const authorId = this.resolveStoryAuthorId(story);
+      if (authorId === viewerId) {
+        return true;
+      }
+      return !excluded.has(authorId) && this.isPopulatedAuthorPubliclyViewable(story);
+    });
+  }
+
+  private resolveStoryAuthorId(story: IStory): string {
+    const maybeUser = story.userId as unknown as PopulatedStoryUser;
+    if (maybeUser && typeof maybeUser === "object" && "_id" in maybeUser) {
+      return maybeUser._id.toString();
+    }
+    return String(story.userId);
+  }
+
+  // Uses the populated author fields when present (list + findActiveById both
+  // populate isActive/role/deletedAt). Returns true when the author is not
+  // populated so a list never silently drops everything; the per-id path
+  // (resolveAuthorPubliclyViewable) does an authoritative lookup instead.
+  private isPopulatedAuthorPubliclyViewable(story: IStory): boolean {
+    const maybeUser = story.userId as unknown as PopulatedStoryUser;
+    if (
+      !maybeUser
+      || typeof maybeUser !== "object"
+      || !("_id" in maybeUser)
+      || typeof maybeUser.isActive !== "boolean"
+    ) {
+      return true;
+    }
+    return maybeUser.isActive === true && maybeUser.role === "user" && !maybeUser.deletedAt;
+  }
+
+  private async resolveAuthorPubliclyViewable(story: IStory, authorId: string): Promise<boolean> {
+    const maybeUser = story.userId as unknown as PopulatedStoryUser;
+    if (
+      maybeUser
+      && typeof maybeUser === "object"
+      && "_id" in maybeUser
+      && typeof maybeUser.isActive === "boolean"
+    ) {
+      return maybeUser.isActive === true && maybeUser.role === "user" && !maybeUser.deletedAt;
+    }
+
+    // Author not populated on this record — do an authoritative lookup. A
+    // missing user document is treated as "cannot determine" (allowed), the
+    // same conservative choice the Moment path makes.
+    const author = await this.userRepository.findById(authorId);
+    return author === null ? true : isUserPubliclyViewable(author);
   }
 
   private async toResponse(story: IStory, viewer: AuthUser): Promise<StoryResponse> {

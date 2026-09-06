@@ -675,6 +675,23 @@ test("Test 3 — live non-public event repost stays excluded from Feed", async (
   assert.deepEqual(shares, []);
 });
 
+test("Test 3b — live locked event repost stays visible in Feed (matches the widened shareMoment privacy rule)", async () => {
+  const eventId = new Types.ObjectId();
+  const announcementMoment = makeMoment({ mode: "event", eventId, isEventAnnouncement: true });
+  const event = makeEvent(eventId, "locked", { status: "live" });
+  const share = makeEventShare(announcementMoment._id);
+
+  const service = createMomentService({
+    momentRepository: { findByIds: async () => [announcementMoment] },
+    momentShareRepository: { findRecent: async () => [share] },
+    eventRepository: { findById: async () => event },
+  });
+
+  const shares = await service.listFeedShares(viewer as never, 50, "discover");
+
+  assert.deepEqual(shares.map((entry) => entry.id), [share._id.toString()]);
+});
+
 test("Test 4 — draft public event repost stays excluded from Feed", async () => {
   const eventId = new Types.ObjectId();
   const announcementMoment = makeMoment({ mode: "event", eventId, isEventAnnouncement: true });

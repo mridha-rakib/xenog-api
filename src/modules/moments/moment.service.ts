@@ -467,7 +467,7 @@ export class MomentService {
       if (
         !event ||
         (event.status !== "published" && event.status !== "live") ||
-        event.privacy !== "public"
+        event.privacy === "private"
       ) {
         throw new AppError("Only public events can be reposted", httpStatus.BAD_REQUEST);
       }
@@ -610,7 +610,7 @@ export class MomentService {
       return Boolean(
         event &&
         (event.status === "published" || event.status === "live") &&
-        event.privacy === "public",
+        event.privacy !== "private",
       );
     }));
     const visible = candidates.filter((_entry, index) => visibility[index]);

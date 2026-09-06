@@ -181,3 +181,50 @@ test("Test 6 — a public+live event whose announcement moment is not itself pub
     /Only public posts can be shared/,
   );
 });
+
+// Covers the "Locked event repost rejected" fix in MomentService.shareMoment.
+// The event-announcement guard's privacy clause was widened from
+// `event.privacy !== "public"` to `event.privacy === "private"`, so Locked
+// events are repostable while Private stays blocked. Status
+// (published/live only) and the announcement-audience rule are unchanged.
+
+test("Test 7 — published locked event: repost now succeeds", async () => {
+  const hostId = newUserId();
+  const actorId = newUserId();
+  const { interactionMomentId } = await seedEventWithAnnouncement(hostId, {
+    status: "published",
+    privacy: "locked",
+  });
+  const actor = makeUser(actorId, "Alex") as never;
+
+  const share = await service.shareMoment(interactionMomentId, actor);
+  assert.ok(share);
+});
+
+test("Test 8 — live locked event: repost now succeeds", async () => {
+  const hostId = newUserId();
+  const actorId = newUserId();
+  const { interactionMomentId } = await seedEventWithAnnouncement(hostId, {
+    status: "live",
+    privacy: "locked",
+  });
+  const actor = makeUser(actorId, "Alex") as never;
+
+  const share = await service.shareMoment(interactionMomentId, actor);
+  assert.ok(share);
+});
+
+test("Test 9 — draft locked event: repost is still rejected on the status rule", async () => {
+  const hostId = newUserId();
+  const actorId = newUserId();
+  const { interactionMomentId } = await seedEventWithAnnouncement(hostId, {
+    status: "draft",
+    privacy: "locked",
+  });
+  const actor = makeUser(actorId, "Alex") as never;
+
+  await assert.rejects(
+    () => service.shareMoment(interactionMomentId, actor),
+    /Only public events can be reposted/,
+  );
+});

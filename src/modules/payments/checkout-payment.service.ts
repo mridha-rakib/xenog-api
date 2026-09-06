@@ -8,6 +8,7 @@ import { RedisClient } from "../../config/redis.js";
 import { logger } from "../../core/logger/logger.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { EventRepository } from "../events/event.repository.js";
+import { invalidateProfileEventsCacheForEventIds } from "../events/profile-events-cache.js";
 import type { EventReward, EventTicket, IEvent } from "../events/event.interface.js";
 import { EventInteractionSummaryService, type EventInteractionSummary } from "../events/event-interaction-summary.js";
 import { RewardClaimRepository } from "../events/reward-claim.repository.js";
@@ -1526,6 +1527,11 @@ export class CheckoutPaymentService {
         );
       }
 
+      // Reservation just changed authoritative ticket inventory — drop the
+      // host's cached profile-events blob so it can't serve a stale
+      // availableCount. Fire-and-forget: never blocks or fails checkout.
+      void invalidateProfileEventsCacheForEventIds([payload.eventId]);
+
       // Create the order; compensate on any failure
       try {
         const checkout = amounts.totalAmount === 0
@@ -1559,6 +1565,7 @@ export class CheckoutPaymentService {
             logger.error({ releaseError, eventId: payload.eventId, ticketId: payload.ticketId }, "Failed to release ticket capacity after order creation failure");
           },
         );
+        void invalidateProfileEventsCacheForEventIds([payload.eventId]);
         if (ticketLineItem?.rewardId) {
           await this.rewardClaimRepository.releaseCheckoutRewardRedemptionAndRestoreCapacity({
             userId: user.id,
@@ -1975,6 +1982,12 @@ export class CheckoutPaymentService {
         });
       }
     }
+
+    // Inventory was just restored — drop the affected hosts' cached
+    // profile-events blobs. Fire-and-forget: never throws.
+    void invalidateProfileEventsCacheForEventIds(
+      ticketItems.map((item) => item.eventId!),
+    );
   }
 
   private async calculateCheckoutAmounts(

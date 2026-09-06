@@ -248,9 +248,16 @@ export interface EventTicket {
   price: number;
   capacity: number;
   availableCount: number | null;
+  /**
+   * Response-only, server-derived: `Boolean(salesEndAt && salesEndAt <= serverNow)`.
+   * Mirrors the exact rule CheckoutPaymentService.resolveLineItems enforces so
+   * every surface can gate on server time instead of the device clock. Never
+   * persisted and never read on write paths.
+   */
+  salesEnded?: boolean;
 }
 
-export type EventTicketInput = Omit<EventTicket, "id" | "availableCount"> & {
+export type EventTicketInput = Omit<EventTicket, "id" | "availableCount" | "salesEnded"> & {
   id?: string;
 };
 

@@ -6,6 +6,7 @@ import { logger } from "../../core/logger/logger.js";
 import { AppError } from "../../core/errors/app-error.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { EventRepository } from "../events/event.repository.js";
+import { invalidateProfileEventsCacheForEventIds } from "../events/profile-events-cache.js";
 import { RewardClaimRepository } from "../events/reward-claim.repository.js";
 import type { IEvent } from "../events/event.interface.js";
 import type { ICheckoutOrder } from "./checkout-payment.interface.js";
@@ -842,6 +843,13 @@ export class EventCancellationRefundService {
         });
       }
     }
+
+    // Restored inventory — drop affected hosts' cached profile-events blobs.
+    void invalidateProfileEventsCacheForEventIds(
+      order.lineItems
+        .filter((lineItem) => lineItem.itemType === "ticket" && lineItem.eventId)
+        .map((lineItem) => lineItem.eventId!),
+    );
   }
 
   private async markSucceeded(

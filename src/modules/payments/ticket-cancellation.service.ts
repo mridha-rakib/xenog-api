@@ -8,6 +8,7 @@ import { AppError } from "../../core/errors/app-error.js";
 import { createPaginationMeta, getPaginationOptions } from "../../core/utils/pagination.js";
 import type { AuthUser } from "../auth/auth.interface.js";
 import { EventRepository } from "../events/event.repository.js";
+import { invalidateProfileEventsCacheForEventIds } from "../events/profile-events-cache.js";
 import type { IEvent } from "../events/event.interface.js";
 import { RewardClaimRepository } from "../events/reward-claim.repository.js";
 import { NotificationService } from "../notifications/notification.service.js";
@@ -842,6 +843,10 @@ export class TicketCancellationService {
         }) ?? current;
         throw error;
       }
+
+      // Inventory was just restored for this pass — drop the host's cached
+      // profile-events blob. Fire-and-forget: never throws.
+      void invalidateProfileEventsCacheForEventIds([current.eventId.toString()]);
     }
 
     await this.releaseRewardForFullyCancelledPurchase(current, allocation);

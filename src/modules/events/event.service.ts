@@ -24,6 +24,7 @@ import { extractHashtags, normalizeHashtag } from "../moments/moment-hashtag.js"
 import type { IUser } from "../user/user.interface.js";
 import { ProductRepository } from "../products/product.repository.js";
 import { EventRepository, getDistanceKm } from "./event.repository.js";
+import { getProfileEventsCacheKey, invalidateProfileEventsCache } from "./profile-events-cache.js";
 import { MAX_EVENT_FILTER_RADIUS_KM } from "./event.validation.js";
 import { RewardClaimRepository } from "./reward-claim.repository.js";
 import type { IRewardClaim } from "./reward-claim.model.js";
@@ -197,7 +198,6 @@ const decodeMapCursor = (cursor?: string): EventMapPaginationCursor | undefined 
 };
 const NOW_MODE_LOOKAHEAD_MS = 3 * 60 * 60 * 1000;
 const STARTING_SOON_MS = 60 * 60 * 1000;
-const PROFILE_EVENTS_CACHE_VERSION = "v1";
 const PROFILE_EVENTS_CACHE_TTL_SECONDS = 30;
 const ADMIN_EVENT_DETAIL_STATUSES = new Set<EventStatus>(["published", "live", "completed", "cancelled"]);
 
@@ -1478,7 +1478,7 @@ export class EventService {
       };
     }
 
-    const cacheKey = this.getProfileEventsCacheKey(userId, includePrivateEvents);
+    const cacheKey = getProfileEventsCacheKey(userId, includePrivateEvents);
     const cachedEvents = await this.getCachedProfileEvents(cacheKey);
 
     if (cachedEvents) {
@@ -1611,8 +1611,11 @@ export class EventService {
     const pageEvents = events.slice(0, pageLimit);
     const nextCursor = events.length > pageLimit ? encodeMapCursor(pageEvents[pageEvents.length - 1]!) : null;
     const hostById = await this.getHostById(pageEvents);
-    const responseEvents = pageEvents.map((event) =>
-      this.toResponse(event, hostById.get(event.userId.toString()) ?? null),
+    const responseEvents = await this.withPublicGoingSummaries(
+      pageEvents.map((event) =>
+        this.toResponse(event, hostById.get(event.userId.toString()) ?? null),
+      ),
+      user.id,
     );
     const [eventsWithCrowdStatus, checkedInCountByEventId] = await Promise.all([
       this.withCrowdStatuses(pageEvents, responseEvents),
@@ -3650,15 +3653,6 @@ export class EventService {
     };
   }
 
-  private getProfileEventsCacheKey(userId: string, includePrivateEvents: boolean): string {
-    return [
-      "events",
-      "profile",
-      PROFILE_EVENTS_CACHE_VERSION,
-      userId.toLowerCase(),
-      includePrivateEvents ? "owner" : "public",
-    ].join(":");
-  }
 
   private async getCachedProfileEvents(
     cacheKey: string,
@@ -3727,31 +3721,14 @@ export class EventService {
     return Math.ceil(ttlMs / 1000);
   }
 
-  private async invalidateProfileEventsCache(userId: string): Promise<void> {
-    try {
-      const redis = RedisClient.getClient();
-
-      if (redis.status !== "ready") {
-        return;
-      }
-
-      await redis.del(
-        this.getProfileEventsCacheKey(userId, true),
-        this.getProfileEventsCacheKey(userId, false),
-      );
-    } catch (error) {
-      logger.warn({ error, userId }, "Profile events cache invalidation failed");
-    }
-  }
-
   private async invalidateProfileEventsCacheForEvents(events: IEvent[]): Promise<void> {
     const userIds = [...new Set(events.map((event) => event.userId.toString()))];
 
-    await Promise.all(userIds.map((userId) => this.invalidateProfileEventsCache(userId)));
+    await Promise.all(userIds.map((userId) => invalidateProfileEventsCache(userId)));
   }
 
   private async toProfileMutatingResponse(event: IEvent): Promise<EventResponse> {
-    await this.invalidateProfileEventsCache(event.userId.toString());
+    await invalidateProfileEventsCache(event.userId.toString());
 
     return this.toResponse(event);
   }
@@ -3848,7 +3825,7 @@ export class EventService {
       scheduledAt: event.scheduledAt ?? null,
       endAt: event.endAt ?? null,
       location: event.location ?? null,
-      tickets: event.tickets,
+      tickets: this.toTicketResponses(event.tickets),
       rewards: this.normalizeExistingRewards(event.rewards),
       ...(options.includeEventMedia
         ? { eventMedia: (event.eventMedia ?? []).map((mediaItem) => this.toEventMediaResponse(event._id.toString(), mediaItem)) }
@@ -3871,6 +3848,33 @@ export class EventService {
       createdAt: event.createdAt,
       updatedAt: event.updatedAt,
     };
+  }
+
+  /**
+   * Response-only ticket mapping. Adds the server-derived `salesEnded` flag
+   * (same rule as CheckoutPaymentService.resolveLineItems: a non-null
+   * `salesEndAt` at or before server now) so every event surface can gate on
+   * server time instead of the device clock. Does not touch `salesEndAt`,
+   * `availableCount`, capacity, or any other ticket field.
+   */
+  private toTicketResponses(tickets: EventTicket[]): EventTicket[] {
+    const serverNowMs = this.getServerNow().getTime();
+
+    return (tickets ?? []).map((ticket) => {
+      const salesEndAtMs = ticket.salesEndAt ? new Date(ticket.salesEndAt).getTime() : null;
+
+      return {
+        id: ticket.id,
+        name: ticket.name,
+        description: ticket.description ?? null,
+        salesEndAt: ticket.salesEndAt ?? null,
+        type: ticket.type,
+        price: ticket.price,
+        capacity: ticket.capacity,
+        availableCount: ticket.availableCount ?? null,
+        salesEnded: salesEndAtMs !== null && Number.isFinite(salesEndAtMs) && salesEndAtMs <= serverNowMs,
+      };
+    });
   }
 
   private toEventMediaResponse(eventId: string, mediaItem: EventMediaItem): EventMediaResponse {

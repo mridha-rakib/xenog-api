@@ -321,6 +321,26 @@ test("price filters use available ticket prices and strict boundaries", async ()
   });
 });
 
+test("feed candidate query admits only published/live — cancelled, completed and draft are excluded before ranking", async () => {
+  const repository = new EventRepository();
+
+  for (const build of [
+    () => repository.findPublicFeedEvents([], {}),
+    () => repository.findPrivateFeedEventsForUser(new Types.ObjectId().toString(), [], {}),
+  ]) {
+    await withMockedEventFind([], async (captured) => {
+      await build();
+      const status = (captured.query as { status?: { $in?: string[] }; $and?: { status?: { $in?: string[] } }[] });
+      const statusIn = status.status?.$in ?? status.$and?.find((c) => c.status)?.status?.$in ?? [];
+      assert.deepEqual([...statusIn].sort(), ["live", "published"]);
+      const queryText = JSON.stringify(captured.query);
+      assert.doesNotMatch(queryText, /cancelled/);
+      assert.doesNotMatch(queryText, /completed/);
+      assert.doesNotMatch(queryText, /draft/);
+    });
+  }
+});
+
 test("combined filters are added on top of existing visibility query", async () => {
   const repository = new EventRepository();
 

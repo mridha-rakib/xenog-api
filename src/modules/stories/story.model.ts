@@ -92,8 +92,9 @@ const storySchema = new Schema<IStory>(
         maxlength: 24,
       },
       fontWeight: {
+        // "800" = new "Heavy"; "bold" retained for already-stored overlays.
         type: String,
-        enum: ["normal", "600", "700", "bold"],
+        enum: ["normal", "600", "700", "800", "bold"],
       },
       textAlign: {
         type: String,
@@ -103,6 +104,32 @@ const storySchema = new Schema<IStory>(
         type: Number,
         min: -180,
         max: 180,
+      },
+      // User's shadow intent only (boolean). Absent === shadow on, so
+      // already-stored overlays keep their current shadowed appearance.
+      shadow: {
+        type: Boolean,
+      },
+    },
+    // Minimal persisted style for the text-only Story body. Absent on every
+    // Story created before this feature — the client then falls back to the
+    // pre-existing 800 / white / center / shadow-on rendering.
+    textStyle: {
+      fontWeight: {
+        type: String,
+        enum: ["normal", "600", "700", "800"],
+      },
+      color: {
+        type: String,
+        trim: true,
+        maxlength: 24,
+      },
+      textAlign: {
+        type: String,
+        enum: ["left", "center", "right"],
+      },
+      shadow: {
+        type: Boolean,
       },
     },
     // Optional — absent/null on every Story created before this feature and

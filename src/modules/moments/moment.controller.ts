@@ -79,14 +79,30 @@ export class MomentController {
 
   public listHashtagMoments = async (req: Request, res: Response): Promise<void> => {
     const { hashtag } = req.params as { hashtag: string };
-    const { limit } = req.query as { limit?: number };
-    const moments = await this.momentService.listHashtagMoments(hashtag, req.authUser as AuthUser, limit, {
-      clientIp: req.ip,
-    });
+    const { limit, expand, paginate, cursor } = req.query as {
+      limit?: number;
+      expand?: string;
+      paginate?: string;
+      cursor?: string;
+    };
+    const isPaginated = paginate === "1";
+    const { moments, nextCursor } = await this.momentService.listHashtagMoments(
+      hashtag,
+      req.authUser as AuthUser,
+      limit,
+      { clientIp: req.ip },
+      {
+        expand: expand === "1",
+        paginate: isPaginated,
+        cursor: typeof cursor === "string" ? cursor : null,
+      },
+    );
 
     ApiResponse.success(res, {
       message: "Hashtag moments retrieved",
-      data: { moments },
+      // `nextCursor` is only added for the opt-in paginated (detail-screen)
+      // caller — the Search probe's array-only response is unchanged.
+      data: { moments, ...(isPaginated ? { nextCursor } : {}) },
     });
   };
 

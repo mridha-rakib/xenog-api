@@ -43,6 +43,17 @@ import { UserRepository } from "./user.repository.js";
 import { NotificationRepository } from "../notifications/notification.repository.js";
 import { realtimeGateway } from "../realtime/realtime.gateway.js";
 import { EventHostReviewRepository } from "../events/event-host-review.repository.js";
+import { MomentRepository } from "../moments/moment.repository.js";
+import { normalizePeopleSearchQuery, rankPeopleSearchCandidates } from "./people-search-ranking.js";
+
+// Bounded internal candidate budget for a single People search request. Exact
+// username is guaranteed separately; strong lexical bands are retrieved before
+// the weak-substring backfill tops the set up to this target.
+const PEOPLE_SEARCH_PREFIX_LIMIT = 120;
+const PEOPLE_SEARCH_NAME_LIMIT = 120;
+const PEOPLE_SEARCH_CANDIDATE_TARGET = 300;
+const PEOPLE_SEARCH_DEFAULT_LIMIT = 50;
+const PEOPLE_SEARCH_MAX_LIMIT = 50;
 
 interface ListUsersQuery {
   page?: number;
@@ -76,6 +87,7 @@ export class UserService {
     private readonly eventRepository = new EventRepository(),
     private readonly eventHostReviewRepository = new EventHostReviewRepository(),
     private readonly eventWindowRepository = new EventWindowRepository(),
+    private readonly momentRepository = new MomentRepository(),
   ) {}
 
   public async create(payload: CreateUserDto): Promise<IUser> {
@@ -220,6 +232,110 @@ export class UserService {
     const users = await this.userRepository.findSuggestedUsers(excludedIds, limit);
 
     return Promise.all(users.map((suggestedUser) => this.toSuggestedUserResponse(suggestedUser, false)));
+  }
+
+  /**
+   * Authenticated People/User search.
+   *
+   * Distinct from `listSuggestedUsers` (recommendations): a typed query drives
+   * retrieval, already-followed users remain searchable, and results are ranked
+   * by lexical quality tier (exact username > username prefix > exact name >
+   * strong name > weak substring) BEFORE the final limit. Secondary signals
+   * (follow relationship, shared connections, lexical relevance, recent public
+   * activity) only reorder candidates within the same tier — they can never lift
+   * a weak-substring match above an exact username.
+   *
+   * Hard eligibility (self / blocked / blocker / inactive / unverified / deleted /
+   * non-user) is applied at retrieval, so an ineligible exact username stays
+   * absent regardless of match strength.
+   */
+  public async searchPeople(
+    viewer: AuthUser,
+    rawQuery: string,
+    limit: number = PEOPLE_SEARCH_DEFAULT_LIMIT,
+  ): Promise<SuggestedUserResponse[]> {
+    const normalizedQuery = normalizePeopleSearchQuery(rawQuery ?? "");
+
+    if (!normalizedQuery) {
+      return [];
+    }
+
+    const cappedLimit = Math.min(
+      Math.max(Number.isFinite(limit) ? Math.trunc(limit) : PEOPLE_SEARCH_DEFAULT_LIMIT, 1),
+      PEOPLE_SEARCH_MAX_LIMIT,
+    );
+
+    const [blockedIds, blockerIds] = await Promise.all([
+      this.userBlockRepository.findBlockedIds(viewer.id),
+      this.userBlockRepository.findBlockerIds(viewer.id),
+    ]);
+    const excludedIds = [...new Set([viewer.id, ...blockedIds, ...blockerIds])];
+
+    const { exact, candidates } = await this.userRepository.findPeopleSearchCandidates({
+      normalizedQuery,
+      excludedIds,
+      prefixLimit: PEOPLE_SEARCH_PREFIX_LIMIT,
+      nameLimit: PEOPLE_SEARCH_NAME_LIMIT,
+      totalTarget: PEOPLE_SEARCH_CANDIDATE_TARGET,
+    });
+
+    const usersById = new Map<string, IUser>();
+    if (exact) {
+      usersById.set(exact._id.toString(), exact);
+    }
+    for (const candidate of candidates) {
+      usersById.set(candidate._id.toString(), candidate);
+    }
+
+    if (usersById.size === 0) {
+      return [];
+    }
+
+    const candidateIds = [...usersById.keys()];
+
+    const [viewerFollowingIds, viewerFollowerIds, viewerConnectionIds] = await Promise.all([
+      this.userFollowRepository.findFollowingIds(viewer.id),
+      this.userFollowRepository.findFollowerIdsForUser(viewer.id),
+      this.userFollowRepository.findMutualFriendIds(viewer.id),
+    ]);
+    const followingSet = new Set(viewerFollowingIds);
+    const followerSet = new Set(viewerFollowerIds);
+
+    const [sharedConnectionCounts, latestMomentAt, latestEventAt] = await Promise.all([
+      this.userFollowRepository.findSharedConnectionCounts(viewerConnectionIds, candidateIds),
+      this.momentRepository.findLatestPublicMomentAtByUserIds(candidateIds),
+      this.eventRepository.findLatestPublicActivityAtByUserIds(candidateIds),
+    ]);
+
+    const now = new Date();
+    const ranked = rankPeopleSearchCandidates(
+      candidateIds.map((id) => {
+        const user = usersById.get(id) as IUser;
+        const momentAt = latestMomentAt.get(id) ?? null;
+        const eventAt = latestEventAt.get(id) ?? null;
+        const activityAt =
+          momentAt && eventAt ? (momentAt.getTime() >= eventAt.getTime() ? momentAt : eventAt) : (momentAt ?? eventAt);
+
+        return {
+          id,
+          username: (user.username ?? "").toLowerCase(),
+          name: user.name ?? "",
+          viewerFollowsCandidate: followingSet.has(id),
+          candidateFollowsViewer: followerSet.has(id),
+          sharedConnectionCount: sharedConnectionCounts.get(id) ?? 0,
+          activityAt,
+        };
+      }),
+      { normalizedQuery, now },
+    );
+
+    const top = ranked.slice(0, cappedLimit);
+
+    return Promise.all(
+      top.map((result) =>
+        this.toSuggestedUserResponse(usersById.get(result.id) as IUser, followingSet.has(result.id)),
+      ),
+    );
   }
 
   public async listFriends(user: AuthUser, query: { search?: string; limit?: number }): Promise<FriendUserResponse[]> {

@@ -352,6 +352,45 @@ export class CheckoutPaymentRepository {
     return [...eventIds];
   }
 
+  /**
+   * Distinct Event ids the user holds a paid ticket for, most-recent purchase
+   * first, capped at `limit`. Read-only; used to build Smart Feed behavioral
+   * relevance context from recent attendance (bounded, never a lifetime scan).
+   */
+  public async findRecentPaidTicketEventIdsByUser(userId: string, limit: number): Promise<string[]> {
+    if (!Number.isFinite(limit) || limit <= 0) {
+      return [];
+    }
+
+    const cap = Math.floor(limit);
+    const orders = await CheckoutOrderModel.find({
+      userId,
+      kind: "ticket",
+      paymentStatus: "paid",
+    })
+      .select("lineItems paidAt createdAt")
+      .sort({ paidAt: -1, createdAt: -1, _id: -1 })
+      .limit(cap * 4)
+      .lean();
+
+    const eventIds: string[] = [];
+    const seen = new Set<string>();
+
+    for (const order of orders) {
+      for (const item of order.lineItems ?? []) {
+        if (item.eventId && !seen.has(item.eventId)) {
+          seen.add(item.eventId);
+          eventIds.push(item.eventId);
+          if (eventIds.length >= cap) {
+            return eventIds;
+          }
+        }
+      }
+    }
+
+    return eventIds;
+  }
+
   public async getEventTicketSales(eventId: string): Promise<Record<string, number>> {
     const orders = await CheckoutOrderModel.find({
       kind: "ticket",

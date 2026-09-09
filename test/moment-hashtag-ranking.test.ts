@@ -123,7 +123,7 @@ const createService = () => {
 
 test("hashtag-matching posts remain eligible regardless of author relationship (match-first)", async () => {
   const service = createService();
-  const results = await service.listHashtagMoments("bd", user);
+  const { moments: results } = await service.listHashtagMoments("bd", user);
   const authorIds = results.map((r) => r.author?.id).sort();
 
   assert.deepEqual(
@@ -134,7 +134,7 @@ test("hashtag-matching posts remain eligible regardless of author relationship (
 
 test("hashtag-matching posts are ranked by existing Smart Feed relationship signal: self > mutual > followed > unrelated", async () => {
   const service = createService();
-  const results = await service.listHashtagMoments("bd", user);
+  const { moments: results } = await service.listHashtagMoments("bd", user);
 
   assert.deepEqual(
     results.map((r) => r.author?.id),
@@ -147,7 +147,7 @@ test("hashtag-matching posts are ranked by existing Smart Feed relationship sign
 
 test("hashtag search does not widen eligibility beyond the exact match set returned by findPublicByHashtag", async () => {
   const service = createService();
-  const results = await service.listHashtagMoments("bd", user);
+  const { moments: results } = await service.listHashtagMoments("bd", user);
 
   assert.equal(results.length, 4);
 });

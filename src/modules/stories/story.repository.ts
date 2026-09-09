@@ -22,6 +22,7 @@ export class StoryRepository {
       textContent: payload.textContent ?? null,
       textBackground: payload.textBackground ?? null,
       textOverlay: payload.textOverlay ?? null,
+      textStyle: payload.textStyle ?? null,
       imageTransform: payload.imageTransform ?? null,
       audience: "connections",
       expiresAt: payload.expiresAt,

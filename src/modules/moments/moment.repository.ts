@@ -1,3 +1,4 @@
+import { Types, type FilterQuery } from "mongoose";
 import { MomentModel } from "./moment.model.js";
 import type { CreateMomentDto, IMoment, MomentFeedQuery, MomentLocationSnapshot } from "./moment.interface.js";
 
@@ -129,6 +130,18 @@ export class MomentRepository {
     return MomentModel.findOne({ eventId, isEventAnnouncement: true });
   }
 
+  /**
+   * Batch lookup of EXISTING Event announcement Moments for the given Event
+   * ids. Read-only — never creates one (Smart Feed ranking must not upsert).
+   */
+  public async findEventAnnouncementsByEventIds(eventIds: string[]): Promise<IMoment[]> {
+    if (eventIds.length === 0) {
+      return [];
+    }
+
+    return MomentModel.find({ eventId: { $in: eventIds }, isEventAnnouncement: true });
+  }
+
   public async deleteEventAnnouncement(eventId: string): Promise<void> {
     await MomentModel.deleteOne({ eventId, isEventAnnouncement: true });
   }
@@ -257,9 +270,95 @@ export class MomentRepository {
     return eventIds.map((eventId) => eventId.toString());
   }
 
-  public async findPublicByHashtag(hashtag: string, limit = 100): Promise<IMoment[]> {
-    return MomentModel.find({ audience: "public", hashtags: hashtag, isEventAnnouncement: { $ne: true } })
+  public async findPublicByHashtag(
+    hashtag: string,
+    limit = 100,
+    excludeUserIds: string[] = [],
+    cursor?: { createdAt: Date; id: string },
+  ): Promise<IMoment[]> {
+    // Deterministic order: newest first, `_id` as the stable tiebreak so a page
+    // boundary can never skip or repeat rows that share a `createdAt`.
+    const cursorFilter: FilterQuery<IMoment> = cursor
+      ? {
+          $or: [
+            { createdAt: { $lt: cursor.createdAt } },
+            { createdAt: cursor.createdAt, _id: { $lt: new Types.ObjectId(cursor.id) } },
+          ],
+        }
+      : {};
+
+    return MomentModel.find({
+      audience: "public",
+      hashtags: hashtag,
+      isEventAnnouncement: { $ne: true },
+      ...(excludeUserIds.length > 0 ? { userId: { $nin: excludeUserIds } } : {}),
+      ...cursorFilter,
+    })
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(limit);
+  }
+
+  /**
+   * Additive hashtag-search expansion: public moments whose hashtags array has
+   * an element that is an anchored prefix of the query, OR that exactly equals
+   * one of the deterministic morphology variants. Exact-tag rows come from
+   * `findPublicByHashtag` (unchanged); this only backfills the prefix / variant
+   * group and excludes ids already collected. Regex input is escaped + anchored;
+   * the hashtag corpus is never enumerated.
+   */
+  public async findPublicByHashtagExpansion(params: {
+    escapedPrefix: string;
+    variantTags: string[];
+    excludeMomentIds?: string[];
+    excludeUserIds?: string[];
+    limit?: number;
+  }): Promise<IMoment[]> {
+    const limit = params.limit ?? 10;
+    const excludeMomentIds = params.excludeMomentIds ?? [];
+    const excludeUserIds = params.excludeUserIds ?? [];
+
+    const matchers: Record<string, unknown>[] = [];
+    if (params.escapedPrefix) {
+      matchers.push({ hashtags: { $regex: `^${params.escapedPrefix}`, $options: "i" } });
+    }
+    const cleanVariants = [...new Set(params.variantTags.filter(Boolean))];
+    if (cleanVariants.length > 0) {
+      matchers.push({ hashtags: { $in: cleanVariants } });
+    }
+    if (matchers.length === 0) {
+      return [];
+    }
+
+    return MomentModel.find({
+      audience: "public",
+      isEventAnnouncement: { $ne: true },
+      ...(excludeMomentIds.length > 0 ? { _id: { $nin: excludeMomentIds } } : {}),
+      ...(excludeUserIds.length > 0 ? { userId: { $nin: excludeUserIds } } : {}),
+      $or: matchers,
+    })
       .sort({ createdAt: -1 })
       .limit(limit);
+  }
+
+  /**
+   * Read-only batched lookup: latest PUBLIC, feed-eligible Moment `createdAt` per
+   * author. Used only as a People-search activity proxy — no writes, no synthetic
+   * Event-announcement Moments, no private/draft content.
+   */
+  public async findLatestPublicMomentAtByUserIds(userIds: string[]): Promise<Map<string, Date>> {
+    if (userIds.length === 0) {
+      return new Map();
+    }
+
+    const objectIds = userIds
+      .filter((id) => Types.ObjectId.isValid(id))
+      .map((id) => new Types.ObjectId(id));
+
+    const rows = await MomentModel.aggregate<{ _id: Types.ObjectId; latestAt: Date }>([
+      { $match: { userId: { $in: objectIds }, isEventAnnouncement: { $ne: true }, audience: "public" } },
+      { $group: { _id: "$userId", latestAt: { $max: "$createdAt" } } },
+    ]);
+
+    return new Map(rows.map((row) => [row._id.toString(), row.latestAt]));
   }
 }

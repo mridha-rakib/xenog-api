@@ -80,6 +80,18 @@ export class UserController {
     });
   };
 
+  public search = async (req: Request, res: Response): Promise<void> => {
+    const { q, limit } = req.query as { q?: string; limit?: number };
+    const users = await this.userService.searchPeople(req.authUser as AuthUser, q ?? "", limit);
+
+    ApiResponse.success(res, {
+      message: "People search results retrieved",
+      data: {
+        users,
+      },
+    });
+  };
+
   public listFriends = async (req: Request, res: Response): Promise<void> => {
     const query = req.query as { search?: string; limit?: number };
     const friends = await this.userService.listFriends(req.authUser as AuthUser, query);

@@ -113,6 +113,7 @@ const createEventService = (privateEventsForUser: Record<string, unknown[]> = {}
     findMapEvents: async () => [publicEvent],
     findPrivateMapEventsForUser: async (userId: string) => privateEventsForUser[userId] ?? [],
     findById: async (eventId: string) => eventId === privateEventId.toString() ? privateEvent : null,
+    findByIds: async () => [],
   };
   const userRepository = {
     findMany: async () => [host],
@@ -132,6 +133,7 @@ const createEventService = (privateEventsForUser: Record<string, unknown[]> = {}
       _id: new Types.ObjectId(),
       eventId: payload.eventId,
     }),
+    findEventAnnouncementsByEventIds: async () => [],
   };
   const countRepository = {
     countByMomentIds: async () => new Map(),
@@ -166,13 +168,13 @@ const createEventService = (privateEventsForUser: Record<string, unknown[]> = {}
     noopRepository as never,
     noopRepository as never,
     noopRepository as never,
-    noopRepository as never,
+    { findRecentPaidTicketEventIdsByUser: async () => [] } as never, // checkoutPaymentRepository
     checkoutPaymentService as never,
     noopRepository as never,
     noopRepository as never,
     noopRepository as never,
     userBlockRepository as never,
-    noopRepository as never,
+    { findRecentSavedEventIds: async () => [] } as never, // eventSaveRepository
     noopRepository as never,
     momentRepository as never,
     momentReactionRepository as never,

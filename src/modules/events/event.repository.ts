@@ -96,6 +96,66 @@ export const getDistanceKm = (
 const isFiniteCoordinate = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
 
+// ── Hashtag detail screen keyset pagination ────────────────────────────────
+// Tuples carry epoch-ms (or -1 for a null/missing date) plus the row's _id hex.
+// A missing/null date sorts LAST in a DESC sort and FIRST in an ASC sort, which
+// is exactly how Mongo orders it — the builders below mirror that so a page
+// boundary never skips or repeats a row.
+export type HashtagEventRecencyKeyset = [publishedAtMs: number, createdAtMs: number, idHex: string];
+export type HashtagEventNearbyKeyset = [scheduledAtMs: number, publishedAtMs: number, idHex: string];
+
+const dateOrNull = (ms: number): Date | null => (ms >= 0 ? new Date(ms) : null);
+
+// Strictly after `k` in `publishedAt DESC, createdAt DESC, _id DESC`.
+const afterRecencyKeyset = (k: HashtagEventRecencyKeyset): FilterQuery<IEvent> => {
+  const [pubMs, createdMs, idHex] = k;
+  const pub = dateOrNull(pubMs);
+  const created = dateOrNull(createdMs);
+  const oid = new Types.ObjectId(idHex);
+
+  const pubBefore: FilterQuery<IEvent> = pub
+    ? { $or: [{ publishedAt: { $lt: pub } }, { publishedAt: null }] }
+    : { publishedAt: null };
+  const pubEq: FilterQuery<IEvent> = pub ? { publishedAt: pub } : { publishedAt: null };
+  const createdBefore: FilterQuery<IEvent> = created
+    ? { $or: [{ createdAt: { $lt: created } }, { createdAt: null }] }
+    : { createdAt: null };
+  const createdEq: FilterQuery<IEvent> = created ? { createdAt: created } : { createdAt: null };
+
+  return {
+    $or: [
+      pubBefore,
+      { $and: [pubEq, createdBefore] },
+      { $and: [pubEq, createdEq, { _id: { $lt: oid } }] },
+    ],
+  };
+};
+
+// Strictly after `k` in `scheduledAt ASC, publishedAt DESC, _id DESC`.
+const afterNearbyKeyset = (k: HashtagEventNearbyKeyset): FilterQuery<IEvent> => {
+  const [schedMs, pubMs, idHex] = k;
+  const sched = dateOrNull(schedMs);
+  const pub = dateOrNull(pubMs);
+  const oid = new Types.ObjectId(idHex);
+
+  const schedAfter: FilterQuery<IEvent> = sched
+    ? { scheduledAt: { $gt: sched } }
+    : { scheduledAt: { $ne: null } };
+  const schedEq: FilterQuery<IEvent> = sched ? { scheduledAt: sched } : { scheduledAt: null };
+  const pubBefore: FilterQuery<IEvent> = pub
+    ? { $or: [{ publishedAt: { $lt: pub } }, { publishedAt: null }] }
+    : { publishedAt: null };
+  const pubEq: FilterQuery<IEvent> = pub ? { publishedAt: pub } : { publishedAt: null };
+
+  return {
+    $or: [
+      schedAfter,
+      { $and: [schedEq, pubBefore] },
+      { $and: [schedEq, pubEq, { _id: { $lt: oid } }] },
+    ],
+  };
+};
+
 const getLocationFilter = (options: EventFilterOptions): LocationFilter | null =>
   isFiniteCoordinate(options.latitude) &&
   isFiniteCoordinate(options.longitude) &&
@@ -458,6 +518,35 @@ export class EventRepository {
     return new Map(rows.map((row) => [row._id.toString(), row]));
   }
 
+  /**
+   * Read-only batched lookup: latest PUBLIC published-content timestamp per host,
+   * used only as a People-search activity proxy. Uses the content publication
+   * time (`publishedAt ?? createdAt`) — never the future `scheduledAt` — and
+   * excludes drafts / private / cancelled events.
+   */
+  public async findLatestPublicActivityAtByUserIds(userIds: string[]): Promise<Map<string, Date>> {
+    if (userIds.length === 0) {
+      return new Map();
+    }
+
+    const objectIds = userIds
+      .filter((id) => Types.ObjectId.isValid(id))
+      .map((id) => new Types.ObjectId(id));
+
+    const rows = await EventModel.aggregate<{ _id: Types.ObjectId; latestAt: Date }>([
+      {
+        $match: {
+          userId: { $in: objectIds },
+          status: { $in: ["published", "live", "completed"] },
+          privacy: { $in: ["public", "locked"] },
+        },
+      },
+      { $group: { _id: "$userId", latestAt: { $max: { $ifNull: ["$publishedAt", "$createdAt"] } } } },
+    ]);
+
+    return new Map(rows.map((row) => [row._id.toString(), row.latestAt]));
+  }
+
   public async create(payload: CreateEventRecord): Promise<IEvent> {
     return EventModel.create({
       userId: payload.userId,
@@ -581,6 +670,11 @@ export class EventRepository {
     excludeUserIds: string[] = [],
     limit = 200,
     requesterUserId?: string,
+    // Keyset continuation for the hashtag detail screen's recency stream. Encodes
+    // the last emitted row's [publishedAt, createdAt, _id] so the next page starts
+    // strictly after it in `publishedAt DESC, createdAt DESC, _id DESC` order.
+    // Existing callers pass nothing => query is byte-identical to before.
+    after?: HashtagEventRecencyKeyset,
   ): Promise<IEvent[]> {
     // A requester may also see their own private event; everyone else only sees
     // public/locked events. Ownership never overrides the status eligibility filter.
@@ -603,9 +697,207 @@ export class EventRepository {
       filter.userId = { $nin: excludeUserIds };
     }
 
+    const query = after ? { $and: [filter, afterRecencyKeyset(after)] } : filter;
+
+    return EventModel.find(query)
+      .sort({ publishedAt: -1, createdAt: -1, _id: -1 })
+      .limit(limit);
+  }
+
+  /**
+   * Hashtag detail screen — the nearby-first stream, page by page with no total
+   * ceiling. Eligible exact-tag events whose stored coordinates fall inside a
+   * bounding box around the viewer, in `scheduledAt ASC, publishedAt DESC,
+   * _id DESC` order (the exact comparator listHashtagEvents uses for its nearby
+   * group). The box is a superset of the caller's radius circle; the service
+   * refines to the exact `getDistanceKm` circle. `after` continues from the last
+   * emitted row of the previous page.
+   */
+  public async findHashtagEventsNearbyPage(params: {
+    hashtag: string;
+    excludeUserIds?: string[];
+    requesterUserId?: string;
+    box: { minLat: number; maxLat: number; minLng: number; maxLng: number };
+    after?: HashtagEventNearbyKeyset;
+    limit: number;
+  }): Promise<IEvent[]> {
+    const visibility: FilterQuery<IEvent> = params.requesterUserId
+      ? {
+          $or: [
+            { privacy: { $in: ["public", "locked"] } },
+            { userId: params.requesterUserId, privacy: "private" },
+          ],
+        }
+      : { privacy: { $in: ["public", "locked"] } };
+
+    const filter: FilterQuery<IEvent> = {
+      status: { $in: ["published", "live"] },
+      hashtags: params.hashtag,
+      ...visibility,
+      "location.latitude": { $gte: params.box.minLat, $lte: params.box.maxLat },
+      "location.longitude": { $gte: params.box.minLng, $lte: params.box.maxLng },
+    };
+
+    if (params.excludeUserIds && params.excludeUserIds.length > 0) {
+      filter.userId = { $nin: params.excludeUserIds };
+    }
+
+    const query = params.after ? { $and: [filter, afterNearbyKeyset(params.after)] } : filter;
+
+    return EventModel.find(query)
+      .sort({ scheduledAt: 1, publishedAt: -1, _id: -1 })
+      .limit(params.limit);
+  }
+
+  /**
+   * Additive hashtag-search expansion candidates: events whose hashtags array
+   * has an element that is an anchored prefix of the query, OR that exactly
+   * equals one of the deterministic morphology variants. Exact-tag rows are
+   * fetched by `findPublicByHashtag` (unchanged) — this only backfills the
+   * prefix / variant group and excludes ids already collected. All regex input
+   * is escaped and anchored; the whole hashtag corpus is never enumerated.
+   */
+  public async findPublicByHashtagExpansion(params: {
+    escapedPrefix: string;
+    variantTags: string[];
+    excludeUserIds?: string[];
+    excludeEventIds?: string[];
+    requesterUserId?: string;
+    limit?: number;
+  }): Promise<IEvent[]> {
+    const { escapedPrefix, variantTags, requesterUserId } = params;
+    const limit = params.limit ?? 10;
+    const excludeUserIds = params.excludeUserIds ?? [];
+    const excludeEventIds = params.excludeEventIds ?? [];
+
+    const matchers: FilterQuery<IEvent>[] = [];
+    if (escapedPrefix) {
+      matchers.push({ hashtags: { $regex: `^${escapedPrefix}`, $options: "i" } });
+    }
+    const cleanVariants = [...new Set(variantTags.filter(Boolean))];
+    if (cleanVariants.length > 0) {
+      matchers.push({ hashtags: { $in: cleanVariants } });
+    }
+    if (matchers.length === 0) {
+      return [];
+    }
+
+    const visibility: FilterQuery<IEvent> = requesterUserId
+      ? {
+          $or: [
+            { privacy: { $in: ["public", "locked"] } },
+            { userId: requesterUserId, privacy: "private" },
+          ],
+        }
+      : { privacy: { $in: ["public", "locked"] } };
+
+    const filter: FilterQuery<IEvent> = {
+      status: { $in: ["published", "live"] },
+      ...visibility,
+      $and: [{ $or: matchers }],
+    };
+    if (excludeUserIds.length > 0) {
+      filter.userId = { $nin: excludeUserIds };
+    }
+    if (excludeEventIds.length > 0) {
+      filter._id = { $nin: excludeEventIds };
+    }
+
     return EventModel.find(filter)
       .sort({ publishedAt: -1, createdAt: -1, _id: -1 })
       .limit(limit);
+  }
+
+  /**
+   * Bounded, staged candidate retrieval for free-text Event search.
+   *
+   * Visibility mirrors `findPublicByHashtag` exactly (published/live, public or
+   * locked, plus the requester's own private events, minus blocked hosts). Each
+   * stage is an escaped/anchored `$regex` capped with `.limit()`; strong stages
+   * fill the set first and the broad substring stage only tops it up to
+   * `totalTarget` with ids not already collected — so weak/fuzzy backfill can
+   * never evict an exact/prefix candidate.
+   */
+  public async findEventSearchCandidates(params: {
+    normalizedQuery: string;
+    escapedQuery: string;
+    escapedVariants: string[];
+    categoryTerms: string[];
+    excludeUserIds?: string[];
+    requesterUserId?: string;
+    perStageLimit?: number;
+    totalTarget?: number;
+  }): Promise<IEvent[]> {
+    const {
+      normalizedQuery,
+      escapedQuery,
+      escapedVariants,
+      categoryTerms,
+      requesterUserId,
+    } = params;
+    if (!normalizedQuery || !escapedQuery) {
+      return [];
+    }
+
+    const perStageLimit = params.perStageLimit ?? 120;
+    const totalTarget = params.totalTarget ?? 300;
+    const excludeUserIds = params.excludeUserIds ?? [];
+
+    const visibility: FilterQuery<IEvent> = requesterUserId
+      ? {
+          $or: [
+            { privacy: { $in: ["public", "locked"] } },
+            { userId: requesterUserId, privacy: "private" },
+          ],
+        }
+      : { privacy: { $in: ["public", "locked"] } };
+
+    const base: FilterQuery<IEvent> = {
+      status: { $in: ["published", "live"] },
+      ...visibility,
+    };
+    if (excludeUserIds.length > 0) {
+      base.userId = { $nin: excludeUserIds };
+    }
+
+    const collected = new Map<string, IEvent>();
+    const runStage = async (matcher: FilterQuery<IEvent>, limit: number) => {
+      if (collected.size >= totalTarget || limit <= 0) return;
+      const rows = await EventModel.find({ ...base, ...matcher })
+        .sort({ scheduledAt: 1, publishedAt: -1, _id: -1 })
+        .limit(limit);
+      for (const row of rows) {
+        collected.set(row._id.toString(), row);
+      }
+    };
+
+    // Strong stages — exact title, title prefix/token-prefix, category, variants.
+    await runStage({ name: { $regex: `^${escapedQuery}$`, $options: "i" } }, perStageLimit);
+    await runStage({ name: { $regex: `(^|\\s)${escapedQuery}`, $options: "i" } }, perStageLimit);
+    if (categoryTerms.length > 0) {
+      await runStage({ categories: { $in: categoryTerms } }, perStageLimit);
+    }
+    for (const variant of [...new Set(escapedVariants.filter(Boolean))]) {
+      await runStage({ name: { $regex: `(^|\\s)${variant}`, $options: "i" } }, Math.ceil(perStageLimit / 2));
+    }
+
+    // Broad stage — internal substring; only tops the set up to the target and
+    // only for ids a stronger stage did not already collect.
+    const remaining = totalTarget - collected.size;
+    if (remaining > 0) {
+      const rows = await EventModel.find({
+        ...base,
+        _id: { $nin: [...collected.keys()] },
+        name: { $regex: escapedQuery, $options: "i" },
+      })
+        .sort({ scheduledAt: 1, publishedAt: -1, _id: -1 })
+        .limit(remaining);
+      for (const row of rows) {
+        collected.set(row._id.toString(), row);
+      }
+    }
+
+    return [...collected.values()];
   }
 
   public async findPublicFeedEvents(

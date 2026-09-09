@@ -45,6 +45,12 @@ router.get(
   catchAsync(controller.listSuggestions),
 );
 router.get(
+  "/search",
+  authenticate,
+  validate(userValidation.search),
+  catchAsync(controller.search),
+);
+router.get(
   "/friends",
   authenticate,
   validate(userValidation.friends),

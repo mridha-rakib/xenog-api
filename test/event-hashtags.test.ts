@@ -285,6 +285,7 @@ test("listHashtagEvents returns nearby matches before remaining matches, orderin
     },
     userBlockRepository: {
       findBlockedIds: async () => ["blocked-user-id"],
+      findBlockerIds: async () => [],
     },
   });
 
@@ -324,6 +325,7 @@ test("listHashtagEvents falls back to recency ordering when no location is avail
     },
     userBlockRepository: {
       findBlockedIds: async () => [],
+      findBlockerIds: async () => [],
     },
   });
 
@@ -513,6 +515,7 @@ test("listHashtagEvents forwards the authenticated requester's id to the reposit
     },
     userBlockRepository: {
       findBlockedIds: async () => [],
+      findBlockerIds: async () => [],
     },
   });
 
@@ -552,6 +555,7 @@ test("listHashtagEvents keeps the existing nearby-first ordering once the owner'
     },
     userBlockRepository: {
       findBlockedIds: async () => [],
+      findBlockerIds: async () => [],
     },
   });
 

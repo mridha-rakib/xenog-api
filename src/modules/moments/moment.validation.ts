@@ -154,6 +154,13 @@ export const momentValidation = {
     }),
     query: z.object({
       limit: z.coerce.number().int().min(1).max(100).default(100),
+      // Search screen only: also return a small, capped prefix/morphology-variant
+      // tag group. Absent (hashtag detail screen) => unchanged exact-tag behaviour.
+      expand: z.literal("1").optional(),
+      // Hashtag detail screen pagination (exact-tag only). `paginate=1` opts the
+      // response into cursor mode (adds `nextCursor`); `cursor` continues a page.
+      paginate: z.literal("1").optional(),
+      cursor: z.string().min(1).max(500).optional(),
     }).strict(),
   }),
   momentIdParam: z.object({

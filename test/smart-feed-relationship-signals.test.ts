@@ -297,6 +297,16 @@ const createEventService = async (options: {
   events: Record<string, unknown>[];
   followingIds?: string[];
   mutualFriendIds?: string[];
+  now?: Date | string;
+  savedEventIds?: string[];
+  attendedEventIds?: string[];
+  historyEvents?: Record<string, unknown>[];
+  announcements?: Record<string, unknown>[];
+  reactionCounts?: Map<string, number>;
+  commentCounts?: Map<string, number>;
+  shareCounts?: Map<string, number>;
+  goingSummaries?: Map<string, { going: number; avatars: unknown[] }>;
+  geoIpLocation?: Record<string, unknown> | null;
 }) => {
   const { EventService } = await eventServiceModulePromise;
   const hostIds = [...new Set(options.events.map((e) => (e.userId as Types.ObjectId).toString()))];
@@ -308,37 +318,41 @@ const createEventService = async (options: {
     {
       findPublicFeedEvents: async () => options.events,
       findPrivateFeedEventsForUser: async () => [],
+      findByIds: async () => options.historyEvents ?? [],
     } as never,
     { findMany: async () => [...hostById.values()], findById: async (id: string) => hostById.get(id) ?? null } as never,
     { findFollowingIds: async () => options.followingIds ?? [], findMutualFriendIds: async () => options.mutualFriendIds ?? [] } as never,
     noop as never,
     noop as never,
     noop as never,
-    noop as never,
+    { findRecentPaidTicketEventIdsByUser: async () => options.attendedEventIds ?? [] } as never,
     {
-      getPublicEventGoingSummaries: async () => new Map(),
+      getPublicEventGoingSummaries: async () => options.goingSummaries ?? new Map(),
       getMutualAttendeeIdsByEventIds: async () => new Map<string, Set<string>>(),
     } as never,
     noop as never,
     noop as never,
     noop as never,
     { findBlockedIds: async () => [], findBlockerIds: async () => [] } as never,
+    { findRecentSavedEventIds: async () => options.savedEventIds ?? [] } as never,
     noop as never,
+    {
+      ensureEventAnnouncement: async (payload: { eventId: string }) => ({ _id: new Types.ObjectId(), eventId: payload.eventId }),
+      findEventAnnouncementsByEventIds: async () => options.announcements ?? [],
+    } as never,
+    { findLikedUserIdsByMomentIds: async () => new Map<string, string[]>(), countByMomentIds: async () => options.reactionCounts ?? new Map(), findLikedMomentIds: async () => new Set() } as never,
+    { countByMomentIds: async () => options.commentCounts ?? new Map() } as never,
     noop as never,
-    { ensureEventAnnouncement: async (payload: { eventId: string }) => ({ _id: new Types.ObjectId(), eventId: payload.eventId }) } as never,
-    { findLikedUserIdsByMomentIds: async () => new Map<string, string[]>(), countByMomentIds: async () => new Map(), findLikedMomentIds: async () => new Set() } as never,
-    { countByMomentIds: async () => new Map() } as never,
-    noop as never,
-    { findReposterUserIdsByMomentIds: async () => new Map<string, string[]>(), countByMomentIds: async () => new Map() } as never,
+    { findReposterUserIdsByMomentIds: async () => new Map<string, string[]>(), countByMomentIds: async () => options.shareCounts ?? new Map() } as never,
     { findSavedMomentIds: async () => new Set<string>() } as never,
     noop as never,
     noop as never,
     noop as never,
     { getCrowdStatusByEventId: async () => new Map(), getCheckedInCountsByEventId: async () => new Map() } as never,
-    undefined,
+    () => new Date(options.now ?? now),
     undefined,
     { findReportedTargetIds: async () => new Set<string>(), hasReported: async () => false } as never,
-    { lookup: async () => null } as never,
+    { lookup: async () => options.geoIpLocation ?? null } as never,
   );
 };
 

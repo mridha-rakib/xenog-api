@@ -393,21 +393,56 @@ export class EventController {
 
   public listHashtagEvents = async (req: Request, res: Response): Promise<void> => {
     const { hashtag } = req.params as { hashtag: string };
-    const { limit, latitude, longitude, radiusKm } = req.query as {
+    const { limit, latitude, longitude, radiusKm, expand, paginate, cursor } = req.query as {
       limit?: number;
       latitude?: number;
       longitude?: number;
       radiusKm?: number;
+      expand?: string;
+      paginate?: string;
+      cursor?: string;
     };
+
+    // Opt-in paginated mode for the hashtag detail screen (exact-tag only,
+    // adds `nextCursor`). The Search probe's array-only response is unchanged.
+    if (paginate === "1") {
+      const page = await this.eventService.listHashtagEventsPage(hashtag, req.authUser as AuthUser, {
+        limit,
+        latitude,
+        longitude,
+        radiusKm,
+        cursor: typeof cursor === "string" ? cursor : null,
+      });
+
+      ApiResponse.success(res, {
+        message: "Hashtag events retrieved",
+        data: { events: page.events, nextCursor: page.nextCursor },
+      });
+      return;
+    }
+
     const events = await this.eventService.listHashtagEvents(hashtag, req.authUser as AuthUser, {
       limit,
       latitude,
       longitude,
       radiusKm,
+      expand: expand === "1",
     });
 
     ApiResponse.success(res, {
       message: "Hashtag events retrieved",
+      data: {
+        events,
+      },
+    });
+  };
+
+  public listEventSearch = async (req: Request, res: Response): Promise<void> => {
+    const { q, limit } = req.query as { q?: string; limit?: number };
+    const events = await this.eventService.listEventSearch(q ?? "", req.authUser as AuthUser, { limit });
+
+    ApiResponse.success(res, {
+      message: "Search events retrieved",
       data: {
         events,
       },

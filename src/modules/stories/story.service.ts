@@ -68,6 +68,9 @@ export class StoryService {
       textContent: payload.textContent?.trim() || null,
       textBackground: payload.textBackground ?? null,
       textOverlay: payload.textOverlay?.text.trim() ? payload.textOverlay : null,
+      // The text-only body style belongs to text Stories only — never let it
+      // attach to an image/video Story.
+      textStyle: mediaType === "text" ? payload.textStyle ?? null : null,
       imageTransform: payload.imageTransform ?? null,
       expiresAt,
     });
@@ -249,6 +252,7 @@ export class StoryService {
       textContent: story.textContent ?? null,
       textBackground: story.textBackground ?? null,
       textOverlay: story.textOverlay ?? null,
+      textStyle: story.textStyle ?? null,
       imageTransform: story.imageTransform ?? null,
       audience: story.audience,
       ...interaction,

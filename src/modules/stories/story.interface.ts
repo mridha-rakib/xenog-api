@@ -21,6 +21,7 @@ export interface IStory {
   textContent?: string | null;
   textBackground?: StoryTextBackground | null;
   textOverlay?: StoryTextOverlay | null;
+  textStyle?: StoryTextStyle | null;
   imageTransform?: StoryImageTransform | null;
   audience: StoryAudienceType;
   expiresAt: Date;
@@ -68,6 +69,7 @@ export interface CreateStoryDto {
   textContent?: string | null;
   textBackground?: StoryTextBackground | null;
   textOverlay?: StoryTextOverlay | null;
+  textStyle?: StoryTextStyle | null;
   imageTransform?: StoryImageTransform | null;
 }
 
@@ -82,9 +84,23 @@ export interface StoryTextOverlay {
   y: number;
   scale: number;
   color: string;
-  fontWeight?: "normal" | "600" | "700" | "bold";
+  // "800" is the new "Heavy" value; "bold" is kept only so already-stored
+  // overlays and legacy clients keep validating/rendering unchanged.
+  fontWeight?: "normal" | "600" | "700" | "800" | "bold";
   textAlign?: "left" | "center" | "right";
   rotation?: number;
+  /** User's shadow intent. Absent/null on legacy overlays === shadow on. */
+  shadow?: boolean;
+}
+
+// Minimal persisted style for the text-only Story body. Deliberately NOT
+// StoryTextOverlay — the text-only body is a full-bleed centered block, not
+// a positioned/draggable sticker, so it has no x/y/scale/rotation.
+export interface StoryTextStyle {
+  fontWeight?: "normal" | "600" | "700" | "800";
+  color?: string;
+  textAlign?: "left" | "center" | "right";
+  shadow?: boolean;
 }
 
 // Normalized Story image placement — x/y are the image's visual center as a
@@ -119,6 +135,7 @@ export interface StoryResponse {
   textContent?: string | null;
   textBackground?: StoryTextBackground | null;
   textOverlay?: StoryTextOverlay | null;
+  textStyle?: StoryTextStyle | null;
   imageTransform?: StoryImageTransform | null;
   audience: StoryAudienceType;
   viewsCount: number;

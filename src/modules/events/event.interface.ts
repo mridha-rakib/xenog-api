@@ -383,11 +383,32 @@ export interface EventSocialContextResponse {
   totalMutualReactions: number;
 }
 
+export type EventProximitySource = "exact" | "geoip" | "none";
+
 export interface EventSmartFeedResponse {
+  /**
+   * Backward-compatible key. For Events this now carries the Event proximity
+   * score (continuous distance decay / GeoIP admin-area fallback) — there is
+   * no separate legacy "nearby" definition for Events.
+   */
   nearbyScore: number;
   freshnessScore: number;
+  /**
+   * Retained for backward/debug compatibility. For Events this reflects the
+   * host-relevance term, not the generic Post social score.
+   */
   socialScore: number;
   finalScore: number;
+  // Additive Event-only ranking breakdown (all optional; never rendered as
+  // badges/labels — informational only).
+  statusScore?: number;
+  proximityScore?: number;
+  titleScore?: number;
+  categoryScore?: number;
+  hostScore?: number;
+  venueScore?: number;
+  popularityScore?: number;
+  proximitySource?: EventProximitySource;
 }
 
 export interface JoinRequestResponse {
@@ -604,6 +625,15 @@ export interface EventFeedQuery {
   latitude?: number;
   longitude?: number;
   radiusKm?: number;
+  /**
+   * Ranking-only viewer coordinates. Additive and passive: they influence the
+   * Smart Feed proximity score but NEVER activate the Nearby filter, radius
+   * filtering, or the `activeOnly` candidate window (those remain driven by
+   * `latitude`/`longitude`/`radiusKm` only). Both or neither; finite;
+   * lat ∈ [-90,90]; lng ∈ [-180,180].
+   */
+  rankingLatitude?: number;
+  rankingLongitude?: number;
   limit?: number;
   ageRestriction?: EventAgeRestriction;
   priceFilter?: EventPriceFilter;

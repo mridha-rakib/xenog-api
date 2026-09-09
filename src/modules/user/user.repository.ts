@@ -1,6 +1,16 @@
 import type { FilterQuery, UpdateQuery } from "mongoose";
 import { UserModel } from "./user.model.js";
 import type { CreateUserDto, IUser, UpdateUserDto } from "./user.interface.js";
+import { escapeRegExp } from "./people-search-ranking.js";
+
+export interface PeopleSearchCandidateQuery {
+  normalizedQuery: string;
+  /** Ids removed before ranking (viewer + blocked + blockers). Never includes "already-followed". */
+  excludedIds: string[];
+  prefixLimit: number;
+  nameLimit: number;
+  totalTarget: number;
+}
 
 type UserCreateRecord = Omit<CreateUserDto, "password"> & {
   passwordHash?: string;
@@ -216,6 +226,84 @@ export class UserRepository {
 
   public async count(filter: FilterQuery<IUser>): Promise<number> {
     return UserModel.countDocuments(filter);
+  }
+
+  /**
+   * Bounded, lexical-band candidate retrieval for authenticated People search.
+   *
+   * Eligibility (role/isActive/emailVerified/deletedAt + excludedIds) is applied
+   * inside every band so ineligible accounts never reach ranking. "Already
+   * followed" is intentionally NOT excluded here (that belongs to
+   * recommendations, not search).
+   *
+   * The exact-username row is fetched directly and returned separately so it can
+   * never be lost to a weak-substring candidate cap. Strong bands (username
+   * prefix, display-name boundary match) are collected before the weak
+   * substring backfill tops the set up to `totalTarget`.
+   */
+  public async findPeopleSearchCandidates(
+    params: PeopleSearchCandidateQuery,
+  ): Promise<{ exact: IUser | null; candidates: IUser[] }> {
+    const { normalizedQuery, excludedIds, prefixLimit, nameLimit, totalTarget } = params;
+
+    if (!normalizedQuery) {
+      return { exact: null, candidates: [] };
+    }
+
+    const escaped = escapeRegExp(normalizedQuery);
+    const eligibility: FilterQuery<IUser> = {
+      _id: { $nin: excludedIds },
+      role: "user",
+      isActive: true,
+      emailVerified: true,
+      deletedAt: null,
+    };
+
+    // T0 — direct exact-username lookup (usernames are stored lowercase + unique).
+    const exact = await UserModel.findOne({ ...eligibility, username: normalizedQuery });
+
+    // T1 — username prefix. Case-sensitive anchored regex: stored usernames are
+    // already lowercase and the query is normalized lowercase, so this stays
+    // index-eligible (no `$options: "i"`).
+    // T2/T3 — display-name boundary match (full-name prefix or token prefix);
+    // the pure ranker assigns the precise tier.
+    const [prefixMatches, nameMatches] = await Promise.all([
+      UserModel.find({ ...eligibility, username: { $regex: `^${escaped}` } }).limit(prefixLimit),
+      UserModel.find({ ...eligibility, name: { $regex: `\\b${escaped}`, $options: "i" } }).limit(nameLimit),
+    ]);
+
+    const collected = new Map<string, IUser>();
+    if (exact) {
+      collected.set(exact._id.toString(), exact);
+    }
+    for (const user of prefixMatches) {
+      collected.set(user._id.toString(), user);
+    }
+    for (const user of nameMatches) {
+      collected.set(user._id.toString(), user);
+    }
+
+    // T4 — weak substring backfill, only up to the remaining candidate budget and
+    // only for rows not already collected by a stronger band.
+    const remaining = totalTarget - collected.size;
+    if (remaining > 0) {
+      const weakMatches = await UserModel.find({
+        ...eligibility,
+        _id: { $nin: [...excludedIds, ...collected.keys()] },
+        $or: [
+          { username: { $regex: escaped, $options: "i" } },
+          { name: { $regex: escaped, $options: "i" } },
+        ],
+      }).limit(remaining);
+      for (const user of weakMatches) {
+        collected.set(user._id.toString(), user);
+      }
+    }
+
+    const exactId = exact?._id.toString();
+    const candidates = [...collected.values()].filter((user) => user._id.toString() !== exactId);
+
+    return { exact, candidates };
   }
 
   public async updateById(id: string, payload: UpdateUserDto): Promise<IUser | null> {

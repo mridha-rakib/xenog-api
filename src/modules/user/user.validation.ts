@@ -80,6 +80,12 @@ export const userValidation = {
       limit: z.coerce.number().int().min(1).max(50).optional(),
     }),
   }),
+  search: z.object({
+    query: z.object({
+      q: z.string().min(1).max(120),
+      limit: z.coerce.number().int().min(1).max(50).optional(),
+    }),
+  }),
   friends: z.object({
     query: z.object({
       search: z.string().trim().max(120).optional(),

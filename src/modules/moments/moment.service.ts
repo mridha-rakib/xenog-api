@@ -1,4 +1,5 @@
 import type { AuthUser } from "../auth/auth.interface.js";
+import { Types } from "mongoose";
 import httpStatus from "http-status";
 import { AppError } from "../../core/errors/app-error.js";
 import { logger } from "../../core/logger/logger.js";
@@ -33,6 +34,7 @@ import type {
   UpdateMomentShareDto,
 } from "./moment.interface.js";
 import { extractHashtags, normalizeHashtag } from "./moment-hashtag.js";
+import { createMorphologyVariants, escapeSearchRegExp } from "../../core/utils/search-text.js";
 import { MomentCommentRepository } from "./moment-comment.repository.js";
 import { MomentCommentReactionRepository } from "./moment-comment-reaction.repository.js";
 import { MomentReactionRepository } from "./moment-reaction.repository.js";
@@ -61,6 +63,34 @@ import {
 import { GeoIpService } from "../geoip/geoip.service.js";
 
 const MOMENT_ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
+// Additive hashtag-search: max prefix/morphology-variant post rows appended
+// after the exact-tag group so variant matches can never flood the section.
+const HASHTAG_MOMENT_EXPANSION_LIMIT = 10;
+// Hashtag detail screen pagination (exact-tag only). Cursor-based on the stable
+// `createdAt DESC, _id DESC` order so pages never skip / repeat / reorder rows.
+const HASHTAG_MOMENT_PAGE_SIZE = 30;
+const HASHTAG_MOMENT_MAX_PAGE_SIZE = 50;
+
+const encodeHashtagMomentCursor = (moment: IMoment): string =>
+  Buffer.from(`${moment.createdAt.toISOString()}|${moment._id.toString()}`, "utf8").toString("base64url");
+
+const decodeHashtagMomentCursor = (
+  raw?: string | null,
+): { createdAt: Date; id: string } | undefined => {
+  if (!raw) {
+    return undefined;
+  }
+  try {
+    const [iso, id] = Buffer.from(raw, "base64url").toString("utf8").split("|");
+    const createdAt = new Date(iso ?? "");
+    if (!id || Number.isNaN(createdAt.getTime()) || !Types.ObjectId.isValid(id)) {
+      return undefined;
+    }
+    return { createdAt, id };
+  } catch {
+    return undefined;
+  }
+};
 
 const nowMs = (): number => Number(process.hrtime.bigint() / 1000000n);
 
@@ -403,27 +433,114 @@ export class MomentService {
     user: AuthUser,
     limit = 100,
     context: MomentRequestContext = {},
-  ): Promise<MomentResponse[]> {
+    options: { expand?: boolean; paginate?: boolean; cursor?: string | null } = {},
+  ): Promise<{ moments: MomentResponse[]; nextCursor: string | null }> {
     const hashtag = normalizeHashtag(hashtagValue);
     const isSmartFeedEnabled = env.ENABLE_SMART_FEED === true;
-    const moments = hashtag ? await this.momentRepository.findPublicByHashtag(hashtag, limit) : [];
-    const uniqueUserIds = [...new Set(moments.map((m) => m.userId.toString()))];
-    const [authors, viewerFollowingIds, interactionContext, excludeUserIds, blockerUserIds, friendIds, followingIds] =
+
+    // Search safety: exclude Moments whose author is blocked in EITHER direction
+    // (viewer blocked author OR author blocked viewer). Applied at query time via
+    // `$nin` so a blocked author never occupies a result/ranking slot. These ids
+    // are also reused for the Smart Feed relationship filters below (previously
+    // fetched separately and only when Smart Feed was enabled).
+    const [viewerBlockedIds, viewerBlockerIds] = await Promise.all([
+      this.userBlockRepository.findBlockedIds(user.id),
+      this.userBlockRepository.findBlockerIds(user.id),
+    ]);
+    const blockedAuthorIds = [...new Set([...viewerBlockedIds, ...viewerBlockerIds])];
+
+    // ── Hashtag detail screen: cursor-paginated, EXACT-tag only ──────────
+    // Deliberately no prefix/morphology expansion (that stays a Search-probe
+    // affordance) and no cross-page Smart Feed re-sort — the page order is the
+    // stable `createdAt DESC, _id DESC` order the cursor is built from, so
+    // continuation never skips, repeats, or reorders already-shown rows.
+    if (options.paginate) {
+      const pageSize = Math.min(
+        Math.max(Math.trunc(limit) || HASHTAG_MOMENT_PAGE_SIZE, 1),
+        HASHTAG_MOMENT_MAX_PAGE_SIZE,
+      );
+      const cursor = decodeHashtagMomentCursor(options.cursor);
+      const rows = hashtag
+        ? await this.momentRepository.findPublicByHashtag(hashtag, pageSize + 1, blockedAuthorIds, cursor)
+        : [];
+      const hasMore = rows.length > pageSize;
+      const pageRows = rows.slice(0, pageSize);
+      const boundaryRow = pageRows[pageRows.length - 1];
+
+      const pageAuthorIds = [...new Set(pageRows.map((moment) => moment.userId.toString()))];
+      const [pageAuthors, pageFollowingIds, pageInteractionContext] = await Promise.all([
+        this.userRepository.findByIds(pageAuthorIds),
+        this.getViewerFollowingIdSet(user),
+        this.buildInteractionContext(pageRows, user),
+      ]);
+      const pageAuthorById = new Map(pageAuthors.map((author) => [author._id.toString(), author]));
+      // Search safety: drop inactive-author rows for display, but derive the
+      // next cursor from the DB-ordered boundary row so continuation stays
+      // correct even when a filtered row was the last of the fetched page.
+      const eligibleRows = pageRows.filter(
+        (moment) => pageAuthorById.get(moment.userId.toString())?.isActive !== false,
+      );
+
+      const moments = await Promise.all(
+        eligibleRows.map((moment) => this.toResponse(
+          moment,
+          pageAuthorById.get(moment.userId.toString()) ?? null,
+          user,
+          pageFollowingIds,
+          pageInteractionContext,
+          undefined,
+        )),
+      );
+
+      return {
+        moments,
+        nextCursor: hasMore && boundaryRow ? encodeHashtagMomentCursor(boundaryRow) : null,
+      };
+    }
+
+    const exactMoments = hashtag
+      ? await this.momentRepository.findPublicByHashtag(hashtag, limit, blockedAuthorIds)
+      : [];
+    // Additive: a small, capped anchored-prefix + morphology-variant tag group
+    // fetched AFTER the exact-tag rows. Only the Search screen passes `expand`;
+    // the hashtag detail screen does not, so its behaviour is unchanged.
+    const exactIds = new Set(exactMoments.map((moment) => moment._id.toString()));
+    const expansionMoments =
+      options.expand && hashtag && exactMoments.length < limit
+        ? (
+            await this.momentRepository.findPublicByHashtagExpansion({
+              escapedPrefix: escapeSearchRegExp(hashtag),
+              variantTags: createMorphologyVariants(hashtag).filter((variant) => variant !== hashtag),
+              excludeMomentIds: [...exactIds],
+              excludeUserIds: blockedAuthorIds,
+              limit: HASHTAG_MOMENT_EXPANSION_LIMIT,
+            })
+          ).filter((moment) => !exactIds.has(moment._id.toString()))
+        : [];
+    const candidateMoments = [...exactMoments, ...expansionMoments];
+    const uniqueUserIds = [...new Set(candidateMoments.map((m) => m.userId.toString()))];
+    const [authors, viewerFollowingIds, interactionContext, friendIds, followingIds] =
       await Promise.all([
         this.userRepository.findByIds(uniqueUserIds),
         this.getViewerFollowingIdSet(user),
-        this.buildInteractionContext(moments, user),
-        isSmartFeedEnabled ? this.userBlockRepository.findBlockedIds(user.id) : Promise.resolve([]),
-        isSmartFeedEnabled ? this.userBlockRepository.findBlockerIds(user.id) : Promise.resolve([]),
+        this.buildInteractionContext(candidateMoments, user),
         isSmartFeedEnabled ? this.userFollowRepository.findMutualFriendIds(user.id) : Promise.resolve([]),
         isSmartFeedEnabled ? this.userFollowRepository.findFollowingIds(user.id) : Promise.resolve([]),
       ]);
     const authorById = new Map(authors.map((a) => [a._id.toString(), a]));
+    // Search safety: drop Moments whose resolved author is explicitly inactive
+    // (banned / suspended / deactivated => isActive === false). A missing author
+    // document keeps its existing tolerated handling. Runs BEFORE ranking/response
+    // construction so an inactive author never occupies a final slot or renders
+    // as a null row.
+    const moments = candidateMoments.filter(
+      (moment) => authorById.get(moment.userId.toString())?.isActive !== false,
+    );
     const smartFeedFriendIds = isSmartFeedEnabled
-      ? friendIds.filter((id) => !excludeUserIds.includes(id) && !blockerUserIds.includes(id))
+      ? friendIds.filter((id) => !viewerBlockedIds.includes(id) && !viewerBlockerIds.includes(id))
       : [];
     const smartFeedFollowedIds = isSmartFeedEnabled
-      ? followingIds.filter((id) => !excludeUserIds.includes(id) && !blockerUserIds.includes(id))
+      ? followingIds.filter((id) => !viewerBlockedIds.includes(id) && !viewerBlockerIds.includes(id))
       : [];
     const smartFeedContext = isSmartFeedEnabled
       ? await this.buildMomentSmartFeedContext(moments, user.id, smartFeedFriendIds, smartFeedFollowedIds, {}, context)
@@ -440,7 +557,22 @@ export class MomentService {
       )),
     );
 
-    return isSmartFeedEnabled ? responses.sort(compareSmartFeedScoreDesc) : responses;
+    if (!isSmartFeedEnabled) {
+      // Source order is already exact-group-first (createdAt desc within each group).
+      return { moments: responses, nextCursor: null };
+    }
+
+    // Smart Feed reorders WITHIN each group; the exact-tag group always stays
+    // ahead of the variant/prefix group.
+    const ordered = responses.sort((left, right) => {
+      const leftGroup = exactIds.has(left.id) ? 0 : 1;
+      const rightGroup = exactIds.has(right.id) ? 0 : 1;
+      if (leftGroup !== rightGroup) {
+        return leftGroup - rightGroup;
+      }
+      return compareSmartFeedScoreDesc(left, right);
+    });
+    return { moments: ordered, nextCursor: null };
   }
 
   public async shareMoment(

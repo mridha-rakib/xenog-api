@@ -23,7 +23,12 @@ import { MomentSaveRepository } from "../moments/moment-save.repository.js";
 import { extractHashtags, normalizeHashtag } from "../moments/moment-hashtag.js";
 import type { IUser } from "../user/user.interface.js";
 import { ProductRepository } from "../products/product.repository.js";
-import { EventRepository, getDistanceKm } from "./event.repository.js";
+import {
+  EventRepository,
+  getDistanceKm,
+  type HashtagEventNearbyKeyset,
+  type HashtagEventRecencyKeyset,
+} from "./event.repository.js";
 import { getProfileEventsCacheKey, invalidateProfileEventsCache } from "./profile-events-cache.js";
 import { MAX_EVENT_FILTER_RADIUS_KM } from "./event.validation.js";
 import { RewardClaimRepository } from "./reward-claim.repository.js";
@@ -43,16 +48,46 @@ import { ReportRepository } from "../reports/report.repository.js";
 import {
   buildReactionSocialContext,
   calculateFreshnessScore,
-  calculateSmartFeedNearbyScore,
-  calculateSmartFeedScore,
-  calculateSocialScore,
-  compareSmartFeedScoreDesc,
   isValidSmartFeedCoordinate,
-  type SmartFeedAuthorRelationship,
-  type SmartFeedScore,
   type SmartFeedSocialContext,
   type SmartFeedSocialUser,
 } from "../feed/smart-feed-ranking.js";
+import {
+  buildEventCategoryInterestProfile,
+  buildEventTextInterestProfile,
+  buildEventVenueInterestProfile,
+  calculateEventCategoryScore,
+  calculateEventHostScore,
+  calculateEventPopularityScore,
+  calculateEventSmartFeedScore,
+  calculateEventStatusScore,
+  calculateEventTitleScore,
+  calculateEventVenueScore,
+  compareEventSmartFeedDesc,
+  resolveEventProximity,
+  type EventCategoryInterestProfile,
+  type EventProximitySource,
+  type EventSmartFeedScore,
+  type EventTextInterestProfile,
+  type EventVenueInterestProfile,
+  type RegionalLocation,
+} from "../feed/event-smart-feed-ranking.js";
+import {
+  ACTIVE_EVENT_WINDOW_MS,
+  NOW_MODE_LOOKAHEAD_MS,
+  getNowStatus,
+  isActiveSmartFeedEvent,
+} from "./event-temporal-status.js";
+import {
+  capTypoAndLimitEventSearch,
+  rankEventSearchCandidates,
+  type EventSearchRankInput,
+} from "./event-search-ranking.js";
+import {
+  createMorphologyVariants,
+  escapeSearchRegExp,
+  normalizeSearchText,
+} from "../../core/utils/search-text.js";
 import { GeoIpService } from "../geoip/geoip.service.js";
 import {
   EVENT_MEDIA_LIMITS_BYTES,
@@ -109,7 +144,6 @@ import type {
   UpdateEventTicketDto,
 } from "./event.interface.js";
 
-const ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
 const EVENT_MEDIA_STORAGE_PREFIX = "events/gallery/";
 const TICKET_CREATION_CUTOFF_MS = 30 * 60 * 1000;
 const TICKET_CREATION_CUTOFF_MESSAGE = "New tickets can’t be created within 30 minutes of the event end time.";
@@ -123,7 +157,7 @@ const REWARD_END_TIME_AFTER_TICKET_SALES_END_MESSAGE =
 const eventCategorySet = new Set<string>(eventCategories);
 
 type EventSmartFeedContext = {
-  scoreByEventId: Map<string, SmartFeedScore>;
+  scoreByEventId: Map<string, EventSmartFeedScore>;
   socialContextByEventId: Map<string, SmartFeedSocialContext>;
 };
 
@@ -196,40 +230,67 @@ const decodeMapCursor = (cursor?: string): EventMapPaginationCursor | undefined 
     throw new AppError("Invalid map cursor.", httpStatus.BAD_REQUEST);
   }
 };
-const NOW_MODE_LOOKAHEAD_MS = 3 * 60 * 60 * 1000;
-const STARTING_SOON_MS = 60 * 60 * 1000;
 const PROFILE_EVENTS_CACHE_TTL_SECONDS = 30;
 const ADMIN_EVENT_DETAIL_STATUSES = new Set<EventStatus>(["published", "live", "completed", "cancelled"]);
 
+// Max distinct positive Event-affinity records loaded per Smart Feed request
+// when building the viewer's behavioral relevance context (§10). Bounded so a
+// heavy account never triggers a lifetime-history read.
+const EVENT_SMART_FEED_HISTORY_LIMIT = 50;
+// Additive hashtag-search: max prefix/morphology-variant rows appended after the
+// exact-tag group so variant matches can never flood the Hashtag section.
+const HASHTAG_SEARCH_EXPANSION_LIMIT = 10;
+// Hashtag detail screen event pagination (exact-tag only). Keyset (seek)
+// pagination over the SAME two-phase order listHashtagEvents uses — nearby-first
+// by soonest schedule, then everything else by publish/create recency — with a
+// stable `_id` tiebreak. There is NO total ceiling: every eligible exact-tag
+// event is eventually reachable by following `nextCursor`.
+const HASHTAG_EVENT_PAGE_SIZE = 20;
+// Per DB round-trip we over-fetch so inactive-host / out-of-circle rows that get
+// skipped don't cost a whole extra query.
+const HASHTAG_EVENT_FETCH_MULTIPLIER = 3;
+// Safety valve on DB round-trips within a SINGLE page request (not a ceiling): if
+// almost every candidate is being skipped, return a short page plus a live
+// cursor and let the client continue.
+const HASHTAG_EVENT_MAX_FETCHES_PER_PAGE = 25;
+
+type HashtagEventPageCursor =
+  | { p: "n"; k: HashtagEventNearbyKeyset }
+  | { p: "r"; k: HashtagEventRecencyKeyset };
+
+const isKeysetTuple = (value: unknown): value is [number, number, string] =>
+  Array.isArray(value) &&
+  value.length === 3 &&
+  typeof value[0] === "number" &&
+  typeof value[1] === "number" &&
+  typeof value[2] === "string" &&
+  /^[a-f0-9]{24}$/i.test(value[2]);
+
+const encodeHashtagEventCursor = (cursor: HashtagEventPageCursor): string =>
+  Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+
+const decodeHashtagEventCursor = (raw?: string | null): HashtagEventPageCursor | undefined => {
+  if (!raw) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as {
+      p?: unknown;
+      k?: unknown;
+    };
+    if ((parsed.p === "n" || parsed.p === "r") && isKeysetTuple(parsed.k)) {
+      return { p: parsed.p, k: parsed.k } as HashtagEventPageCursor;
+    }
+  } catch {
+    // fall through
+  }
+  return undefined;
+};
+
+const eventDateMs = (value?: Date | null): number => (value ? value.getTime() : -1);
+
 const normalizeEventHashtags = (values: string[] | undefined): string[] =>
   [...new Set((values ?? []).map(normalizeHashtag).filter(Boolean))].slice(0, 20);
-
-const getNowStatus = (
-  scheduledAt: Date | null | undefined,
-  endAt?: Date | null,
-): NowEventStatus | null => {
-  if (!scheduledAt) {
-    return null;
-  }
-
-  const now = Date.now();
-  const scheduled = scheduledAt.getTime();
-  const ended = endAt?.getTime() ?? null;
-
-  if (scheduled <= now && (ended ? ended >= now : now - scheduled <= ACTIVE_EVENT_WINDOW_MS)) {
-    return "live_now";
-  }
-
-  if (scheduled > now && scheduled - now <= STARTING_SOON_MS) {
-    return "starting_soon";
-  }
-
-  if (scheduled > now && scheduled - now <= NOW_MODE_LOOKAHEAD_MS) {
-    return "last_call";
-  }
-
-  return null;
-};
 
 export class EventService {
   public constructor(
@@ -1135,8 +1196,62 @@ export class EventService {
         ? this.eventRepository.findPrivateFeedEventsForUser(user.id, excludeUserIds, feedOptions)
         : Promise.resolve([]),
     ]);
-    const events = this.mergeFeedEvents(publicEvents, privateEvents, hasNearbyFilter, query.limit);
+    // Smart Feed ranks the FULL eligible candidate set and only then applies
+    // the response limit (§22), so the strongest candidate is never dropped
+    // for merely being outside the newest-N-published slice. When the flag is
+    // off, behaviour is unchanged: merge then slice, no ranking.
+    const mergedEvents = this.mergeFeedEvents(
+      publicEvents,
+      privateEvents,
+      hasNearbyFilter,
+      isSmartFeedEnabled ? undefined : query.limit,
+    );
+
+    const smartFeedFriendIds = isSmartFeedEnabled
+      ? friendIds.filter((id) => !excludeUserIds.includes(id) && !blockerUserIds.includes(id))
+      : [];
+    const smartFeedFollowedIds = isSmartFeedEnabled
+      ? followingIds.filter((id) => !excludeUserIds.includes(id) && !blockerUserIds.includes(id))
+      : [];
+
+    const smartFeedNow = this.getServerNow().getTime();
+
+    // SMART FEED eligibility only (§7): a clearly-ended Event (`endAt < now`),
+    // or a no-`endAt` Event whose `scheduledAt` is older than the active
+    // window, must not linger as an "active result". Hard filter — applied
+    // before ranking and before the limit, never a low score.
+    const eligibleEvents = isSmartFeedEnabled
+      ? mergedEvents.filter((event) =>
+          isActiveSmartFeedEvent(event.scheduledAt ?? null, event.endAt ?? null, smartFeedNow),
+        )
+      : mergedEvents;
+
+    const smartFeedContext = isSmartFeedEnabled
+      ? await this.buildEventSmartFeedContext(
+          eligibleEvents,
+          user?.id,
+          smartFeedFriendIds,
+          smartFeedFollowedIds,
+          query,
+          context,
+          smartFeedNow,
+        )
+      : undefined;
+
+    const events = smartFeedContext
+      ? [...eligibleEvents]
+          .sort((left, right) =>
+            compareEventSmartFeedDesc(
+              this.toEventSmartFeedSortable(left, smartFeedContext),
+              this.toEventSmartFeedSortable(right, smartFeedContext),
+            ),
+          )
+          .slice(0, query.limit ?? undefined)
+      : eligibleEvents;
+
     const hostById = await this.getHostById(events);
+    // Response enrichment (incl. the ensureEventAnnouncement upsert) runs only
+    // for the final limited result set — never for every ranked candidate.
     const interactionMoments = await Promise.all(
       events.map((event) => this.ensureEventInteractionMoment(event)),
     );
@@ -1150,13 +1265,7 @@ export class EventService {
       user?.id,
     );
     const eventIds = events.map((event) => event._id.toString());
-    const smartFeedFriendIds = isSmartFeedEnabled
-      ? friendIds.filter((id) => !excludeUserIds.includes(id) && !blockerUserIds.includes(id))
-      : [];
-    const smartFeedFollowedIds = isSmartFeedEnabled
-      ? followingIds.filter((id) => !excludeUserIds.includes(id) && !blockerUserIds.includes(id))
-      : [];
-    const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds, publicGoingSummaries, reportedEventIds, smartFeedContext] =
+    const [likeCounts, commentCounts, shareCounts, likedMomentIds, savedMomentIds, publicGoingSummaries, reportedEventIds] =
       await Promise.all([
         this.momentReactionRepository.countByMomentIds(momentIds),
         this.momentCommentRepository.countByMomentIds(momentIds),
@@ -1171,17 +1280,6 @@ export class EventService {
         user
           ? this.reportRepository.findReportedTargetIds(user.id, "event", eventIds)
           : Promise.resolve(new Set<string>()),
-        isSmartFeedEnabled
-          ? this.buildEventSmartFeedContext(
-              events,
-              momentIds,
-              user?.id,
-              smartFeedFriendIds,
-              smartFeedFollowedIds,
-              query,
-              context,
-            )
-          : Promise.resolve(undefined),
       ]);
 
     const responseEvents = events.map((event, index) => {
@@ -1204,16 +1302,43 @@ export class EventService {
           : {}),
         ...(smartFeedContext?.scoreByEventId.get(event._id.toString())
           ? {
-              smartFeed: smartFeedContext.scoreByEventId.get(event._id.toString()),
-              smartFeedScore: smartFeedContext.scoreByEventId.get(event._id.toString())?.finalScore,
+              smartFeed: this.toEventSmartFeedResponse(
+                smartFeedContext.scoreByEventId.get(event._id.toString())!,
+              ),
+              smartFeedScore: smartFeedContext.scoreByEventId.get(event._id.toString())!.finalScore,
             }
           : {}),
       };
     });
 
-    const eventsWithCrowdStatuses = await this.withCrowdStatuses(events, responseEvents);
+    // `events` is already ranked (deterministic sort applied pre-limit). The
+    // enrichment map above preserves that order, so no re-sort is needed.
+    return this.withCrowdStatuses(events, responseEvents);
+  }
 
-    return isSmartFeedEnabled ? eventsWithCrowdStatuses.sort(compareSmartFeedScoreDesc) : eventsWithCrowdStatuses;
+  /**
+   * Maps the internal Event score into the additive-compatible `smartFeed`
+   * response object. Existing fields keep their names: `nearbyScore` now
+   * carries the Event proximity score (§21), `freshnessScore`/`finalScore`
+   * are unchanged in meaning, `socialScore` is retained for backward/debug
+   * compatibility and now reflects the Event host-relevance term (§19). Every
+   * other field is a new additive key (§20).
+   */
+  private toEventSmartFeedResponse(score: EventSmartFeedScore) {
+    return {
+      nearbyScore: score.proximityScore,
+      freshnessScore: score.freshnessScore,
+      socialScore: score.hostScore,
+      finalScore: score.finalScore,
+      statusScore: score.statusScore,
+      proximityScore: score.proximityScore,
+      titleScore: score.titleScore,
+      categoryScore: score.categoryScore,
+      hostScore: score.hostScore,
+      venueScore: score.venueScore,
+      popularityScore: score.popularityScore,
+      proximitySource: score.proximitySource,
+    };
   }
 
   // Two-tier ordering deliberately mirrors the existing feed/map "nearby" convention
@@ -1224,7 +1349,19 @@ export class EventService {
   public async listHashtagEvents(
     hashtagValue: string,
     user: AuthUser,
-    options: { limit?: number; latitude?: number; longitude?: number; radiusKm?: number } = {},
+    options: {
+      limit?: number;
+      latitude?: number;
+      longitude?: number;
+      radiusKm?: number;
+      /**
+       * Additive: also return a small, capped group of anchored-prefix and
+       * deterministic-morphology-variant tag matches AFTER the exact-tag rows.
+       * Only the Search screen passes this; the hashtag detail screen does not,
+       * so its behaviour is byte-identical to before.
+       */
+      expand?: boolean;
+    } = {},
   ): Promise<EventResponse[]> {
     const hashtag = normalizeHashtag(hashtagValue);
 
@@ -1233,9 +1370,57 @@ export class EventService {
     }
 
     const limit = options.limit ?? 50;
-    const excludeUserIds = await this.userBlockRepository.findBlockedIds(user.id);
+    // Search safety: exclude events hosted by users blocked in EITHER direction
+    // (viewer blocked host OR host blocked viewer). Privacy / ordering rules are
+    // otherwise unchanged.
+    const [viewerBlockedIds, viewerBlockerIds] = await Promise.all([
+      this.userBlockRepository.findBlockedIds(user.id),
+      this.userBlockRepository.findBlockerIds(user.id),
+    ]);
+    const excludeUserIds = [...new Set([...viewerBlockedIds, ...viewerBlockerIds])];
     const candidates = await this.eventRepository.findPublicByHashtag(hashtag, excludeUserIds, 200, user.id);
 
+    const exactOrdered = this.orderHashtagEventCandidates(candidates, options);
+
+    let combined = exactOrdered;
+    if (options.expand) {
+      const variantTags = createMorphologyVariants(hashtag).filter((variant) => variant !== hashtag);
+      const collectedIds = new Set(exactOrdered.map((event) => event._id.toString()));
+      const expansion = await this.eventRepository.findPublicByHashtagExpansion({
+        escapedPrefix: escapeSearchRegExp(hashtag),
+        variantTags,
+        excludeUserIds,
+        excludeEventIds: [...collectedIds],
+        requesterUserId: user.id,
+        limit: HASHTAG_SEARCH_EXPANSION_LIMIT,
+      });
+      const dedupedExpansion = expansion.filter((event) => !collectedIds.has(event._id.toString()));
+      combined = [...exactOrdered, ...dedupedExpansion];
+    }
+
+    const hostById = await this.getHostById(combined);
+    // Search safety: exclude events whose resolved host is explicitly inactive
+    // (banned / suspended / deactivated => isActive === false). A missing host
+    // document keeps its existing tolerated handling. Runs before the final limit.
+    const eligibleEvents = combined.filter(
+      (event) => hostById.get(event.userId.toString())?.isActive !== false,
+    );
+    const orderedEvents = eligibleEvents.slice(0, limit);
+
+    return orderedEvents.map((event) =>
+      this.toResponse(event, hostById.get(event.userId.toString()) ?? null),
+    );
+  }
+
+  // Deterministic exact-tag event order for the Hashtag detail surface:
+  // nearby-first (by soonest schedule) when the caller supplied coordinates,
+  // then everything else by publish/create recency, `_id` as the final stable
+  // tiebreak. Extracted verbatim from listHashtagEvents so the paginated variant
+  // pages the exact same order.
+  private orderHashtagEventCandidates(
+    candidates: IEvent[],
+    options: { latitude?: number; longitude?: number; radiusKm?: number },
+  ): IEvent[] {
     const hasNearbyFilter = typeof options.latitude === "number" && typeof options.longitude === "number";
     const radiusKm = options.radiusKm ?? MAX_EVENT_FILTER_RADIUS_KM;
 
@@ -1272,12 +1457,316 @@ export class EventService {
         right._id.toString().localeCompare(left._id.toString()),
     );
 
-    const orderedEvents = [...nearbyEvents, ...remainingEvents].slice(0, limit);
-    const hostById = await this.getHostById(orderedEvents);
+    return [...nearbyEvents, ...remainingEvents];
+  }
 
-    return orderedEvents.map((event) =>
-      this.toResponse(event, hostById.get(event.userId.toString()) ?? null),
+  /**
+   * Hashtag detail screen: keyset (seek) pagination, EXACT-tag only (no prefix/
+   * morphology expansion — that stays a Search-probe affordance).
+   *
+   * Same two-phase order as `listHashtagEvents`: a NEARBY phase (events inside
+   * the viewer's radius, by soonest schedule) followed by a RECENCY phase
+   * (everything else, newest first), `_id` as the stable tiebreak. Each phase is
+   * a forward Mongo seek, so there is NO total ceiling — following `nextCursor`
+   * eventually reaches every eligible exact-tag event exactly once. The two
+   * phases are mutually exclusive (an event is emitted by NEARBY iff it is
+   * inside the exact `getDistanceKm` circle; RECENCY skips circle events), so no
+   * id set has to be carried in the cursor. Fresh Mongo read per page;
+   * client-side id-dedupe still guards against rows shifting between pages.
+   */
+  public async listHashtagEventsPage(
+    hashtagValue: string,
+    user: AuthUser,
+    options: {
+      limit?: number;
+      cursor?: string | null;
+      latitude?: number;
+      longitude?: number;
+      radiusKm?: number;
+    } = {},
+  ): Promise<{ events: EventResponse[]; nextCursor: string | null }> {
+    const hashtag = normalizeHashtag(hashtagValue);
+    if (!hashtag) {
+      return { events: [], nextCursor: null };
+    }
+
+    const pageSize = Math.min(
+      Math.max(Math.trunc(options.limit ?? HASHTAG_EVENT_PAGE_SIZE) || HASHTAG_EVENT_PAGE_SIZE, 1),
+      HASHTAG_EVENT_PAGE_SIZE,
     );
+    const cursor = decodeHashtagEventCursor(options.cursor);
+
+    const hasNearby = typeof options.latitude === "number" && typeof options.longitude === "number";
+    const radiusKm = options.radiusKm ?? MAX_EVENT_FILTER_RADIUS_KM;
+    const center = hasNearby
+      ? { latitude: options.latitude as number, longitude: options.longitude as number }
+      : null;
+    const box = center
+      ? (() => {
+          const latDelta = radiusKm / 111.32;
+          const lngDelta =
+            radiusKm / (111.32 * Math.max(Math.cos((center.latitude * Math.PI) / 180), 0.01));
+          return {
+            minLat: center.latitude - latDelta,
+            maxLat: center.latitude + latDelta,
+            minLng: center.longitude - lngDelta,
+            maxLng: center.longitude + lngDelta,
+          };
+        })()
+      : null;
+
+    const [viewerBlockedIds, viewerBlockerIds] = await Promise.all([
+      this.userBlockRepository.findBlockedIds(user.id),
+      this.userBlockRepository.findBlockerIds(user.id),
+    ]);
+    const excludeUserIds = [...new Set([...viewerBlockedIds, ...viewerBlockerIds])];
+
+    const withinCircle = (event: IEvent): boolean => {
+      if (!center) {
+        return false;
+      }
+      const latitude = event.location?.latitude;
+      const longitude = event.location?.longitude;
+      if (
+        typeof latitude !== "number" ||
+        typeof longitude !== "number" ||
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude)
+      ) {
+        return false;
+      }
+      return getDistanceKm(center, { latitude, longitude }) <= radiusKm;
+    };
+
+    const hostById = new Map<string, IUser>();
+    const loadHosts = async (rows: IEvent[]): Promise<void> => {
+      const missing = [...new Set(rows.map((row) => row.userId.toString()))].filter(
+        (id) => !hostById.has(id),
+      );
+      if (missing.length === 0) {
+        return;
+      }
+      const hosts = await this.userRepository.findMany({ _id: { $in: missing } }, 0, missing.length);
+      for (const host of hosts) {
+        hostById.set(host._id.toString(), host);
+      }
+    };
+    const hostIsInactive = (event: IEvent): boolean =>
+      hostById.get(event.userId.toString())?.isActive === false;
+
+    const collected: IEvent[] = [];
+    const fetchLimit = pageSize * HASHTAG_EVENT_FETCH_MULTIPLIER + 1;
+    let fetches = 0;
+
+    // A NEARBY cursor with no box on this request (viewer dropped location
+    // mid-pagination — out of contract) safely restarts the RECENCY stream
+    // rather than looping; the client's id-dedupe absorbs any overlap.
+    let phase: "n" | "r" = cursor?.p === "n" && box ? "n" : cursor?.p === "r" ? "r" : box ? "n" : "r";
+    let nearbyKey: HashtagEventNearbyKeyset | undefined = phase === "n" && cursor?.p === "n" ? cursor.k : undefined;
+    let recencyKey: HashtagEventRecencyKeyset | undefined = phase === "r" && cursor?.p === "r" ? cursor.k : undefined;
+    // Becomes true only when the box is provably exhausted — otherwise a NEARBY
+    // phase that stops early (fetch bound) must resume in NEARBY, never fall
+    // through to RECENCY and skip the rest of the box.
+    let nearbyDone = phase === "r";
+
+    // ── NEARBY phase ──────────────────────────────────────────────────────
+    while (phase === "n" && box && fetches < HASHTAG_EVENT_MAX_FETCHES_PER_PAGE) {
+      fetches += 1;
+      const batch = await this.eventRepository.findHashtagEventsNearbyPage({
+        hashtag,
+        excludeUserIds,
+        requesterUserId: user.id,
+        box,
+        after: nearbyKey,
+        limit: fetchLimit,
+      });
+      if (batch.length === 0) {
+        nearbyDone = true;
+        phase = "r";
+        break;
+      }
+      await loadHosts(batch);
+      for (const event of batch) {
+        nearbyKey = [
+          eventDateMs(event.scheduledAt),
+          eventDateMs(event.publishedAt),
+          event._id.toString(),
+        ];
+        if (hostIsInactive(event) || !withinCircle(event)) {
+          continue; // box-but-not-circle rows belong to the RECENCY phase
+        }
+        collected.push(event);
+        if (collected.length === pageSize) {
+          return this.buildHashtagEventPage(collected, hostById, { p: "n", k: nearbyKey });
+        }
+      }
+      if (batch.length < fetchLimit) {
+        nearbyDone = true; // box exhausted
+        phase = "r";
+        break;
+      }
+    }
+
+    // NEARBY stopped early on the per-request fetch bound (box NOT exhausted):
+    // resume in NEARBY next call so no box row is skipped. Not a ceiling.
+    if (!nearbyDone) {
+      return this.buildHashtagEventPage(
+        collected,
+        hostById,
+        nearbyKey ? { p: "n", k: nearbyKey } : null,
+      );
+    }
+
+    // ── RECENCY phase ─────────────────────────────────────────────────────
+    phase = "r";
+    while (fetches < HASHTAG_EVENT_MAX_FETCHES_PER_PAGE) {
+      fetches += 1;
+      const batch = await this.eventRepository.findPublicByHashtag(
+        hashtag,
+        excludeUserIds,
+        fetchLimit,
+        user.id,
+        recencyKey,
+      );
+      if (batch.length === 0) {
+        return this.buildHashtagEventPage(collected, hostById, null);
+      }
+      await loadHosts(batch);
+      for (const event of batch) {
+        recencyKey = [
+          eventDateMs(event.publishedAt),
+          eventDateMs(event.createdAt),
+          event._id.toString(),
+        ];
+        if (hostIsInactive(event) || withinCircle(event)) {
+          continue; // circle events were emitted by the NEARBY phase
+        }
+        collected.push(event);
+        if (collected.length === pageSize) {
+          return this.buildHashtagEventPage(collected, hostById, { p: "r", k: recencyKey });
+        }
+      }
+      if (batch.length < fetchLimit) {
+        return this.buildHashtagEventPage(collected, hostById, null);
+      }
+    }
+
+    // Hit the per-request fetch bound before filling the page — hand back a live
+    // cursor so the client simply continues. This is NOT a ceiling.
+    const resume: HashtagEventPageCursor | null = recencyKey
+      ? { p: "r", k: recencyKey }
+      : nearbyKey
+        ? { p: "n", k: nearbyKey }
+        : null;
+    return this.buildHashtagEventPage(collected, hostById, resume);
+  }
+
+  private buildHashtagEventPage(
+    rows: IEvent[],
+    hostById: Map<string, IUser>,
+    cursor: HashtagEventPageCursor | null,
+  ): { events: EventResponse[]; nextCursor: string | null } {
+    return {
+      events: rows.map((event) =>
+        this.toResponse(event, hostById.get(event.userId.toString()) ?? null),
+      ),
+      nextCursor: cursor ? encodeHashtagEventCursor(cursor) : null,
+    };
+  }
+
+  /**
+   * Free-text Event search (Search screen "Events" tab, non-`#` queries).
+   *
+   * Server-side retrieval + a pure lexical-tier ranker
+   * (`event-search-ranking.ts`): exact title > title prefix > category >
+   * deterministic morphology variant > bounded typo (Damerau–Levenshtein on
+   * title/category tokens only, query length >= 4, backfill-capped) > weak
+   * internal substring > legacy low-priority host/venue/address substring.
+   * Ranking runs BEFORE the final limit, so a relevant Event is found even when
+   * it would fall outside the old `/events/map` first-50 snapshot. Independent
+   * of the Event Smart Feed scorer.
+   */
+  public async listEventSearch(
+    rawQuery: string,
+    user: AuthUser,
+    options: { limit?: number } = {},
+  ): Promise<EventResponse[]> {
+    const normalizedQuery = normalizeSearchText(rawQuery);
+    if (!normalizedQuery) {
+      return [];
+    }
+
+    const limit = Math.min(Math.max(Math.trunc(options.limit ?? 50) || 50, 1), 50);
+    const variants = createMorphologyVariants(normalizedQuery).filter((variant) => variant !== normalizedQuery);
+    const categoryTerms = eventCategories.filter(
+      (category) =>
+        normalizeSearchText(category).includes(normalizedQuery) ||
+        variants.some((variant) => normalizeSearchText(category).includes(variant)),
+    );
+
+    // Search safety: exclude events hosted by users blocked in EITHER direction
+    // (viewer blocked host OR host blocked viewer). Text ranking is unchanged.
+    const [viewerBlockedIds, viewerBlockerIds] = await Promise.all([
+      this.userBlockRepository.findBlockedIds(user.id),
+      this.userBlockRepository.findBlockerIds(user.id),
+    ]);
+    const excludeUserIds = [...new Set([...viewerBlockedIds, ...viewerBlockerIds])];
+    const retrieved = await this.eventRepository.findEventSearchCandidates({
+      normalizedQuery,
+      escapedQuery: escapeSearchRegExp(normalizedQuery),
+      escapedVariants: variants.map((variant) => escapeSearchRegExp(variant)),
+      categoryTerms,
+      excludeUserIds,
+      requesterUserId: user.id,
+    });
+
+    if (retrieved.length === 0) {
+      return [];
+    }
+
+    const hostById = await this.getHostById(retrieved);
+    // Search safety: drop candidates whose resolved host is explicitly inactive
+    // (isActive === false) BEFORE ranking, so they never occupy a ranked slot. A
+    // missing host document keeps its existing tolerated handling.
+    const candidates = retrieved.filter(
+      (event) => hostById.get(event.userId.toString())?.isActive !== false,
+    );
+
+    if (candidates.length === 0) {
+      return [];
+    }
+
+    const eventById = new Map(candidates.map((event) => [event._id.toString(), event]));
+
+    const rankInputs: EventSearchRankInput[] = candidates.map((event) => {
+      const host = hostById.get(event.userId.toString()) ?? null;
+      const legacyText = [
+        host?.name,
+        host?.username,
+        event.location?.venue,
+        event.location?.address,
+        event.location?.searchLabel,
+      ]
+        .filter(Boolean)
+        .join(" ");
+
+      return {
+        id: event._id.toString(),
+        title: event.name ?? "",
+        categories: event.categories?.length ? event.categories : event.category ? [event.category] : [],
+        legacyText,
+        scheduledAt: event.scheduledAt ?? null,
+        publishedAt: event.publishedAt ?? null,
+      };
+    });
+
+    const ranked = rankEventSearchCandidates(rankInputs, { normalizedQuery, now: new Date() });
+    const finalRows = capTypoAndLimitEventSearch(ranked, limit);
+
+    return finalRows.map((row) => {
+      const event = eventById.get(row.id)!;
+      return this.toResponse(event, hostById.get(event.userId.toString()) ?? null);
+    });
   }
 
   public async toggleSaveEvent(
@@ -3426,51 +3915,162 @@ export class EventService {
     });
   }
 
+  private toEventSmartFeedSortable(
+    event: IEvent,
+    smartFeedContext: EventSmartFeedContext,
+  ): {
+    smartFeedScore?: number;
+    statusScore?: number;
+    scheduledAt?: Date | null;
+    createdAt?: Date | null;
+    id?: string;
+  } {
+    const score = smartFeedContext.scoreByEventId.get(event._id.toString());
+    return {
+      smartFeedScore: score?.finalScore,
+      statusScore: score?.statusScore,
+      scheduledAt: event.scheduledAt ?? null,
+      createdAt: event.createdAt ?? null,
+      id: event._id.toString(),
+    };
+  }
+
+  /**
+   * Bounded, batched read of the viewer's most recent positive Event-affinity
+   * records (saves + paid attendance), used to derive hybrid behavioral
+   * relevance (title / category / venue / prior-host affinity). Capped at
+   * EVENT_SMART_FEED_HISTORY_LIMIT distinct Events — never a lifetime read —
+   * and issued as at most three batched queries regardless of candidate count.
+   */
+  private async loadEventBehavioralContext(viewerId: string | undefined): Promise<{
+    titleProfile: EventTextInterestProfile;
+    categoryProfile: EventCategoryInterestProfile;
+    venueProfile: EventVenueInterestProfile;
+    affinityHostIds: Set<string>;
+  }> {
+    const empty = {
+      titleProfile: buildEventTextInterestProfile([]),
+      categoryProfile: buildEventCategoryInterestProfile([]),
+      venueProfile: buildEventVenueInterestProfile([]),
+      affinityHostIds: new Set<string>(),
+    };
+
+    if (!viewerId) {
+      return empty;
+    }
+
+    const [savedEventIds, attendedEventIds] = await Promise.all([
+      this.eventSaveRepository.findRecentSavedEventIds(viewerId, EVENT_SMART_FEED_HISTORY_LIMIT),
+      this.checkoutPaymentRepository.findRecentPaidTicketEventIdsByUser(
+        viewerId,
+        EVENT_SMART_FEED_HISTORY_LIMIT,
+      ),
+    ]);
+
+    const historyIds = [...new Set([...savedEventIds, ...attendedEventIds])].slice(
+      0,
+      EVENT_SMART_FEED_HISTORY_LIMIT,
+    );
+
+    if (historyIds.length === 0) {
+      return empty;
+    }
+
+    const historyEvents = await this.eventRepository.findByIds(historyIds);
+
+    return {
+      titleProfile: buildEventTextInterestProfile(historyEvents.map((event) => event.name ?? null)),
+      categoryProfile: buildEventCategoryInterestProfile(
+        historyEvents.map((event) =>
+          event.categories?.length ? event.categories : event.category ? [event.category] : [],
+        ),
+      ),
+      venueProfile: buildEventVenueInterestProfile(
+        historyEvents.map((event) => (event.location ?? null) as RegionalLocation | null),
+      ),
+      affinityHostIds: new Set(historyEvents.map((event) => event.userId.toString())),
+    };
+  }
+
   private async buildEventSmartFeedContext(
     events: IEvent[],
-    interactionMomentIds: string[],
     viewerId: string | undefined,
     mutualFriendIds: string[],
     followedAuthorIds: string[],
     query: EventFeedQuery,
     context: EventRequestContext,
+    now: number,
   ): Promise<EventSmartFeedContext> {
-    const interactionMomentIdByEventId = new Map<string, string>();
+    const scoreByEventId = new Map<string, EventSmartFeedScore>();
+    const socialContextByEventId = new Map<string, SmartFeedSocialContext>();
 
-    interactionMomentIds.forEach((momentId, index) => {
-      const event = events[index];
+    if (events.length === 0) {
+      return { scoreByEventId, socialContextByEventId };
+    }
 
-      if (event) {
-        interactionMomentIdByEventId.set(event._id.toString(), momentId);
-      }
-    });
-
+    const eventIds = events.map((event) => event._id.toString());
     const mutualFriendSet = new Set(mutualFriendIds);
-    // "followed-only" = one-way follows that aren't already mutual friends,
-    // mirroring MomentService.buildMomentSmartFeedContext's partitioning so
-    // a reactor/reposter/host is never counted toward both signals at once.
-    const followedOnlyIds = followedAuthorIds.filter((id) => !mutualFriendSet.has(id));
-    const followedOnlySet = new Set(followedOnlyIds);
-    const relationshipUserIds = [...new Set([...mutualFriendIds, ...followedOnlyIds])];
+    const followedOnlySet = new Set(followedAuthorIds.filter((id) => !mutualFriendSet.has(id)));
 
-    const [reactedUserIdsByMomentId, reposterUserIdsByMomentId, attendeeIdsByEventId] = await Promise.all([
-      this.momentReactionRepository.findLikedUserIdsByMomentIds(interactionMomentIds, relationshipUserIds),
-      // Event reposts are recorded as MomentShare rows against the event's
-      // interaction Moment (same id space as reactions/comments) — see
-      // MomentService.shareMoment's isEventAnnouncement branch.
-      this.momentShareRepository.findReposterUserIdsByMomentIds(interactionMomentIds, relationshipUserIds),
-      // Attendance stays mutual-friend-only, unchanged — not part of the
-      // approved one-way-follow extension for this task.
-      this.checkoutPaymentService.getMutualAttendeeIdsByEventIds(
-        events.map((event) => ({ id: event._id.toString(), status: event.status })),
-        mutualFriendIds,
+    // Ranking-only viewer coordinates (§2). The explicit Nearby filter's
+    // coordinates (§3) are reused for ranking too — never a second physical
+    // location. Neither path activates candidate/radius filtering here.
+    const viewerExact = isValidSmartFeedCoordinate(query.rankingLatitude, query.rankingLongitude)
+      ? { latitude: Number(query.rankingLatitude), longitude: Number(query.rankingLongitude) }
+      : isValidSmartFeedCoordinate(query.latitude, query.longitude)
+        ? { latitude: Number(query.latitude), longitude: Number(query.longitude) }
+        : null;
+    const viewerRegional = viewerExact ? null : await this.geoIpService.lookup(context.clientIp);
+
+    // Popularity + mutual-friend "liked by" preview: batch-read EXISTING
+    // announcement Moments only. No ensureEventAnnouncement here — ranking is
+    // read-only (§24), and a candidate with no interaction data simply scores
+    // 0 for the popularity component (§23).
+    const announcements = await this.momentRepository.findEventAnnouncementsByEventIds(eventIds);
+    const announcementMomentIdByEventId = new Map<string, string>();
+    const eventIdByAnnouncementMomentId = new Map<string, string>();
+    for (const announcement of announcements) {
+      const announcementEventId = announcement.eventId?.toString();
+      if (!announcementEventId) {
+        continue;
+      }
+      const momentId = announcement._id.toString();
+      announcementMomentIdByEventId.set(announcementEventId, momentId);
+      eventIdByAnnouncementMomentId.set(momentId, announcementEventId);
+    }
+    const announcementMomentIds = [...eventIdByAnnouncementMomentId.keys()];
+
+    const [
+      reactionCountByMomentId,
+      commentCountByMomentId,
+      shareCountByMomentId,
+      goingSummaryByEventId,
+      mutualReactedUserIdsByMomentId,
+      behavioralContext,
+    ] = await Promise.all([
+      this.momentReactionRepository.countByMomentIds(announcementMomentIds),
+      this.momentCommentRepository.countByMomentIds(announcementMomentIds),
+      this.momentShareRepository.countByMomentIds(announcementMomentIds),
+      this.checkoutPaymentService.getPublicEventGoingSummaries(
+        events.map((event) => ({
+          id: event._id.toString(),
+          status: event.status,
+          hostUserId: event.userId.toString(),
+        })),
+        viewerId,
       ),
+      mutualFriendIds.length > 0
+        ? this.momentReactionRepository.findLikedUserIdsByMomentIds(announcementMomentIds, mutualFriendIds)
+        : Promise.resolve(new Map<string, string[]>()),
+      this.loadEventBehavioralContext(viewerId),
     ]);
 
     // Preview avatars stay scoped to mutual friends only, exactly as before.
-    const mutualReactedUserIds = [...new Set(
-      [...reactedUserIdsByMomentId.values()].flat().filter((id) => mutualFriendSet.has(id)),
-    )];
+    const mutualReactedUserIds = [
+      ...new Set(
+        [...mutualReactedUserIdsByMomentId.values()].flat().filter((id) => mutualFriendSet.has(id)),
+      ),
+    ];
     const reactedUsers = mutualReactedUserIds.length > 0
       ? await this.userRepository.findActiveUsersByIds(mutualReactedUserIds, undefined, mutualReactedUserIds.length)
       : [];
@@ -3481,60 +4081,78 @@ export class EventService {
         avatarKey: item.avatarKey ?? null,
       }]),
     );
-    const viewerLocation = isValidSmartFeedCoordinate(query.latitude, query.longitude)
-      ? { latitude: query.latitude, longitude: query.longitude }
-      : null;
-    const viewerRegionalLocation = viewerLocation
-      ? null
-      : await this.geoIpService.lookup(context.clientIp);
-    const scoreByEventId = new Map<string, SmartFeedScore>();
-    const socialContextByEventId = new Map<string, SmartFeedSocialContext>();
-    const now = new Date();
+
+    const explicitCategory = query.category ?? null;
 
     for (const event of events) {
       const eventId = event._id.toString();
-      const interactionMomentId = interactionMomentIdByEventId.get(eventId);
-      const reactedUserIdsForEvent = interactionMomentId
-        ? reactedUserIdsByMomentId.get(interactionMomentId) ?? []
-        : [];
-      const mutualReactedForEvent = reactedUserIdsForEvent.filter((id) => mutualFriendSet.has(id));
-      const followedReactedForEvent = reactedUserIdsForEvent.filter((id) => followedOnlySet.has(id));
-      const socialContext = buildReactionSocialContext(mutualReactedForEvent, userById);
+      const hostId = event.userId.toString();
+      const announcementMomentId = announcementMomentIdByEventId.get(eventId);
 
+      const mutualReactedForEvent = announcementMomentId
+        ? (mutualReactedUserIdsByMomentId.get(announcementMomentId) ?? []).filter((id) =>
+            mutualFriendSet.has(id),
+          )
+        : [];
+      const socialContext = buildReactionSocialContext(mutualReactedForEvent, userById);
       if (socialContext) {
         socialContextByEventId.set(eventId, socialContext);
       }
 
-      const reposterIdsForEvent = interactionMomentId
-        ? reposterUserIdsByMomentId.get(interactionMomentId) ?? []
-        : [];
-      const mutualRepostCount = reposterIdsForEvent.filter((id) => mutualFriendSet.has(id)).length;
-      const followedRepostCount = reposterIdsForEvent.filter((id) => followedOnlySet.has(id)).length;
+      const proximity = resolveEventProximity({
+        exactDistanceKm:
+          viewerExact &&
+          isValidSmartFeedCoordinate(event.location?.latitude, event.location?.longitude)
+            ? getDistanceKm(viewerExact, {
+                latitude: Number(event.location?.latitude),
+                longitude: Number(event.location?.longitude),
+              })
+            : null,
+        viewerRegional: viewerRegional as RegionalLocation | null,
+        eventRegional: (event.location ?? null) as RegionalLocation | null,
+      });
 
-      const hostId = event.userId.toString();
-      const authorRelationship: SmartFeedAuthorRelationship = mutualFriendSet.has(hostId)
-        ? "mutual"
-        : followedOnlySet.has(hostId)
-          ? "followed"
-          : "none";
+      const isSelf = Boolean(viewerId) && hostId === viewerId;
+      const hostScore = calculateEventHostScore({
+        isSelf,
+        isMutualFriend: mutualFriendSet.has(hostId),
+        isFollowed: followedOnlySet.has(hostId),
+        hasPriorAffinity: behavioralContext.affinityHostIds.has(hostId),
+      });
 
-      const score = calculateSmartFeedScore({
-        isAuthorSelf: Boolean(viewerId) && hostId === viewerId,
-        nearbyScore: calculateSmartFeedNearbyScore({
-          viewerExactLocation: viewerLocation,
-          viewerRegionalLocation,
-          itemLocation: event.location,
-          distanceKm: getDistanceKm,
+      const goingSummary = goingSummaryByEventId.get(eventId);
+      const popularityScore = calculateEventPopularityScore({
+        going: goingSummary?.going ?? 0,
+        reactions: announcementMomentId ? reactionCountByMomentId.get(announcementMomentId) ?? 0 : 0,
+        comments: announcementMomentId ? commentCountByMomentId.get(announcementMomentId) ?? 0 : 0,
+        shares: announcementMomentId ? shareCountByMomentId.get(announcementMomentId) ?? 0 : 0,
+      });
+
+      const score = calculateEventSmartFeedScore({
+        statusScore: calculateEventStatusScore({
+          scheduledAt: event.scheduledAt ?? null,
+          endAt: event.endAt ?? null,
+          now,
         }),
-        freshnessScore: calculateFreshnessScore(event.publishedAt ?? event.createdAt, now),
-        socialScore: calculateSocialScore({
-          authorRelationship,
-          mutualReactionUserCount: new Set(mutualReactedForEvent).size,
-          followedReactionUserCount: new Set(followedReactedForEvent).size,
-          mutualAttendeeUserCount: attendeeIdsByEventId.get(eventId)?.size ?? 0,
-          mutualRepostUserCount: mutualRepostCount,
-          followedRepostUserCount: followedRepostCount,
+        proximityScore: proximity.proximityScore,
+        proximitySource: proximity.proximitySource,
+        titleScore: calculateEventTitleScore(event.name, behavioralContext.titleProfile),
+        categoryScore: calculateEventCategoryScore({
+          candidateCategories: event.categories?.length
+            ? event.categories
+            : event.category
+              ? [event.category]
+              : [],
+          explicitCategory,
+          profile: behavioralContext.categoryProfile,
         }),
+        hostScore,
+        venueScore: calculateEventVenueScore(
+          (event.location ?? null) as RegionalLocation | null,
+          behavioralContext.venueProfile,
+        ),
+        popularityScore,
+        freshnessScore: calculateFreshnessScore(event.publishedAt ?? event.createdAt, new Date(now)),
       });
 
       scoreByEventId.set(eventId, score);

@@ -96,9 +96,23 @@ export const storyValidation = {
             y: z.number().min(CANVAS_POSITION_MIN).max(CANVAS_POSITION_MAX).default(0.5),
             scale: z.number().min(0.5).max(2).default(1),
             color: z.string().trim().regex(/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i, "Overlay color must be a hex color").default("#FFFFFF"),
-            fontWeight: z.enum(["normal", "600", "700", "bold"]).default("700"),
+            // "800" = "Heavy" (measurably heavier than Bold "700"); "bold" is
+            // still accepted so already-stored overlays and legacy clients pass.
+            fontWeight: z.enum(["normal", "600", "700", "800", "bold"]).default("700"),
             textAlign: z.enum(["left", "center", "right"]).default("center"),
             rotation: rotationSchema,
+            shadow: z.boolean().default(true),
+          })
+          .optional()
+          .nullable(),
+        // Text-only Story body style. Optional at the outer level — only
+        // text Stories send it; image Stories keep using textOverlay.
+        textStyle: z
+          .object({
+            fontWeight: z.enum(["normal", "600", "700", "800"]).default("800"),
+            color: z.string().trim().regex(/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i, "Story text color must be a hex color").default("#FFFFFF"),
+            textAlign: z.enum(["left", "center", "right"]).default("center"),
+            shadow: z.boolean().default(true),
           })
           .optional()
           .nullable(),

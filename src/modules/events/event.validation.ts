@@ -571,6 +571,11 @@ const feedQuery = z
     latitude: queryNumber(z.number().min(-90).max(90)),
     longitude: queryNumber(z.number().min(-180).max(180)),
     radiusKm: queryNumber(z.number().finite().min(1).max(MAX_EVENT_FILTER_RADIUS_KM)),
+    // Ranking-only viewer coordinates (§2). Additive/passive: they feed the
+    // Smart Feed proximity score but never activate the Nearby filter, radius
+    // filtering, or the active-only candidate window.
+    rankingLatitude: queryNumber(z.number().finite().min(-90).max(90)),
+    rankingLongitude: queryNumber(z.number().finite().min(-180).max(180)),
     limit: queryNumber(z.number().int().min(1).max(200)),
     ageRestriction: z.enum(eventAgeRestrictions).optional(),
     priceFilter: z.enum(eventPriceFilters).optional(),
@@ -583,7 +588,14 @@ const feedQuery = z
   .refine((query) => (query.latitude === undefined) === (query.longitude === undefined), {
     message: "Latitude and longitude must be provided together",
     path: ["longitude"],
-  });
+  })
+  .refine(
+    (query) => (query.rankingLatitude === undefined) === (query.rankingLongitude === undefined),
+    {
+      message: "rankingLatitude and rankingLongitude must be provided together",
+      path: ["rankingLongitude"],
+    },
+  );
 
 const hashtagEventsQuery = z
   .object({
@@ -591,6 +603,13 @@ const hashtagEventsQuery = z
     latitude: queryNumber(z.number().min(-90).max(90)),
     longitude: queryNumber(z.number().min(-180).max(180)),
     radiusKm: queryNumber(z.number().finite().min(1).max(MAX_EVENT_FILTER_RADIUS_KM)),
+    // Search screen only: also return a small, capped prefix/morphology-variant
+    // tag group. Absent (hashtag detail screen) => unchanged exact-tag behaviour.
+    expand: z.literal("1").optional(),
+    // Hashtag detail screen pagination (exact-tag only). `paginate=1` opts the
+    // response into cursor mode (adds `nextCursor`); `cursor` continues a page.
+    paginate: z.literal("1").optional(),
+    cursor: z.string().min(1).max(500).optional(),
   })
   .strict()
   .refine((query) => (query.latitude === undefined) === (query.longitude === undefined), {
@@ -751,6 +770,14 @@ export const eventValidation = {
   }),
   mapEvents: z.object({
     query: mapQuery,
+  }),
+  searchEvents: z.object({
+    query: z
+      .object({
+        q: z.string().trim().min(1).max(80),
+        limit: queryNumber(z.number().int().min(1).max(50)),
+      })
+      .strict(),
   }),
   hashtagEvents: z.object({
     params: z.object({

@@ -61,8 +61,8 @@ const baseEvent = {
 
 const createService = (goingByEventId: Record<string, number> = {}) => {
   const eventRepository = {
-    findMapEvents: async () => [baseEvent],
-    findPrivateMapEventsForUser: async () => [],
+    findMapEvents: async () => ({ events: [baseEvent], hasMore: false }),
+    findPrivateMapEventsForUser: async () => ({ events: [], hasMore: false }),
     findPublicFeedEvents: async () => [baseEvent],
     findPrivateFeedEventsForUser: async () => [],
     findById: async () => baseEvent,

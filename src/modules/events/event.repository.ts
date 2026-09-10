@@ -65,7 +65,6 @@ type MapEventQueryOptions = EventMapQuery & {
 type EventFilterOptions = PublicFeedEventOptions | (MapEventQueryOptions & { activeSince?: Date });
 
 const EXACT_RADIUS_EPSILON_KM = 0.000001;
-const MINUTES_PER_DAY = 24 * 60;
 const TIME_PERIOD_RANGES: Record<Exclude<EventTimePeriod, "any">, { start: number; end: number }> = {
   morning: { start: 5 * 60, end: 12 * 60 },
   noon: { start: 12 * 60, end: 17 * 60 },
@@ -299,43 +298,113 @@ const parseDateKey = (value: string): { year: number; month: number; day: number
   return { year, month, day };
 };
 
-const localDateTimeToUtc = (
-  dateKey: string,
-  hour: number,
-  minute: number,
-  timezoneOffsetMinutes: number,
-  dayOffset = 0,
-): Date | null => {
-  const parsed = parseDateKey(dateKey);
-  if (!parsed) {
-    return null;
-  }
+// ── Batch 3B — Event-local selected-date / time-period filtering ───────────
+//
+// `selectedDate` and `timePeriod` are evaluated in EACH EVENT'S OWN IANA
+// timezone (`Event.timezone`, persisted by Batch 3A). Legacy Events with a
+// null/missing `timezone` fall back to the requester's fixed UTC-offset string,
+// exactly as before 3B. One `$ifNull` expression is shared by both predicates.
+//
+// `TIME_PERIOD_RANGES` is unchanged and authoritative. All predicates live in
+// the base Mongo query (before any `.limit()` / pagination / Smart Feed
+// ranking) — there is no application-side / post-limit temporal refinement.
 
-  return new Date(Date.UTC(parsed.year, parsed.month - 1, parsed.day + dayOffset, hour, minute) + timezoneOffsetMinutes * 60_000);
+/**
+ * Per-document timezone: the Event's own IANA zone when known, else the
+ * requester's fixed UTC-offset string (e.g. "+06:00") as the legacy fallback.
+ * Mongo's date operators accept an expression that resolves to a string here.
+ */
+const eventLocalTimezoneExpression = (timezoneOffsetMinutes: number): Record<string, unknown> => ({
+  $ifNull: ["$timezone", offsetMinutesToTimezone(timezoneOffsetMinutes)],
+});
+
+/** Local minute-of-day (0–1439) of `scheduledAt` in the per-document timezone. */
+const eventLocalMinuteOfDayExpression = (
+  timezoneExpression: Record<string, unknown>,
+): Record<string, unknown> => ({
+  $add: [
+    { $multiply: [{ $hour: { date: "$scheduledAt", timezone: timezoneExpression } }, 60] },
+    { $minute: { date: "$scheduledAt", timezone: timezoneExpression } },
+  ],
+});
+
+/**
+ * Time-of-day bucket predicate against the unchanged `TIME_PERIOD_RANGES`.
+ * `late_night` wraps midnight -> `$or`; every other bucket is half-open
+ * `[start, end)` -> `$and`.
+ */
+const timePeriodBucketExpression = (
+  timePeriod: Exclude<EventTimePeriod, "any">,
+  timezoneExpression: Record<string, unknown>,
+): Record<string, unknown> => {
+  const range = TIME_PERIOD_RANGES[timePeriod];
+  const minuteOfDay = eventLocalMinuteOfDayExpression(timezoneExpression);
+  const conditions = [
+    { $gte: [minuteOfDay, range.start] },
+    { $lt: [minuteOfDay, range.end] },
+  ];
+  return timePeriod === "late_night" ? { $or: conditions } : { $and: conditions };
 };
+
+/**
+ * Exact per-document local calendar-date equality (year/month/day) in the
+ * per-document timezone. `$year`/`$month`/`$dayOfMonth` are DST-correct for the
+ * specific instant.
+ */
+const eventLocalDateMatchExpression = (
+  parsed: { year: number; month: number; day: number },
+  timezoneExpression: Record<string, unknown>,
+): Record<string, unknown> => ({
+  $and: [
+    { $eq: [{ $year: { date: "$scheduledAt", timezone: timezoneExpression } }, parsed.year] },
+    { $eq: [{ $month: { date: "$scheduledAt", timezone: timezoneExpression } }, parsed.month] },
+    { $eq: [{ $dayOfMonth: { date: "$scheduledAt", timezone: timezoneExpression } }, parsed.day] },
+  ],
+});
+
+// A deliberately loose, index-usable UTC envelope around the selected local
+// date. Wide enough that no real-world timezone (|offset| < 15h) can push a
+// locally-matching Event outside it — purely a candidate narrower so the exact
+// `$expr` predicate is not evaluated collection-wide. The `$expr` is the truth.
+const SELECTED_DATE_PREFILTER_DAYS_BEFORE = 1;
+const SELECTED_DATE_PREFILTER_DAYS_AFTER = 2;
 
 const addDateAndTimeFilter = (filters: FilterQuery<IEvent>[], options: EventFilterOptions): void => {
   const date = options.date;
   const timePeriod = options.timePeriod && options.timePeriod !== "any" ? options.timePeriod : undefined;
   const timezoneOffsetMinutes = getTimezoneOffsetMinutes(options);
+  const timezoneExpression = eventLocalTimezoneExpression(timezoneOffsetMinutes);
 
   if (date) {
-    const range = timePeriod ? TIME_PERIOD_RANGES[timePeriod] : null;
-    const startMinutes = range?.start ?? 0;
-    const endMinutes = range?.end ?? MINUTES_PER_DAY;
-    const crossesMidnight = Boolean(range && endMinutes <= startMinutes);
-    const start = localDateTimeToUtc(date, Math.floor(startMinutes / 60), startMinutes % 60, timezoneOffsetMinutes);
-    const end = localDateTimeToUtc(
-      date,
-      Math.floor(endMinutes / 60),
-      endMinutes % 60,
-      timezoneOffsetMinutes,
-      crossesMidnight || !range ? 1 : 0,
-    );
-
-    if (start && end) {
-      filters.push({ scheduledAt: { $gte: start, $lt: end } });
+    const parsed = parseDateKey(date);
+    if (!parsed) {
+      return;
     }
+
+    // Loose indexed prefilter on `scheduledAt` — never authoritative.
+    filters.push({
+      scheduledAt: {
+        $gte: new Date(
+          Date.UTC(parsed.year, parsed.month - 1, parsed.day - SELECTED_DATE_PREFILTER_DAYS_BEFORE),
+        ),
+        $lt: new Date(
+          Date.UTC(parsed.year, parsed.month - 1, parsed.day + SELECTED_DATE_PREFILTER_DAYS_AFTER),
+        ),
+      },
+    });
+
+    // Exact per-document local-date match, AND-ed with the time bucket when both
+    // filters are active (§12/§13 — the calendar date stays authoritative; a
+    // `late_night` bucket does not roll the selected date onto the next day).
+    const expressions: Record<string, unknown>[] = [
+      eventLocalDateMatchExpression(parsed, timezoneExpression),
+    ];
+    if (timePeriod) {
+      expressions.push(timePeriodBucketExpression(timePeriod, timezoneExpression));
+    }
+    filters.push({
+      $expr: expressions.length === 1 ? expressions[0] : { $and: expressions },
+    } as FilterQuery<IEvent>);
 
     return;
   }
@@ -344,29 +413,8 @@ const addDateAndTimeFilter = (filters: FilterQuery<IEvent>[], options: EventFilt
     return;
   }
 
-  const range = TIME_PERIOD_RANGES[timePeriod];
-  const timezone = offsetMinutesToTimezone(timezoneOffsetMinutes);
-  const minuteOfDayExpression = {
-    $add: [
-      { $multiply: [{ $hour: { date: "$scheduledAt", timezone } }, 60] },
-      { $minute: { date: "$scheduledAt", timezone } },
-    ],
-  };
-
   filters.push({
-    $expr: timePeriod === "late_night"
-      ? {
-          $or: [
-            { $gte: [minuteOfDayExpression, range.start] },
-            { $lt: [minuteOfDayExpression, range.end] },
-          ],
-        }
-      : {
-          $and: [
-            { $gte: [minuteOfDayExpression, range.start] },
-            { $lt: [minuteOfDayExpression, range.end] },
-          ],
-        },
+    $expr: timePeriodBucketExpression(timePeriod, timezoneExpression),
   } as FilterQuery<IEvent>);
 };
 
@@ -439,13 +487,33 @@ const addPriceCandidateFilter = (filters: FilterQuery<IEvent>[], priceFilter?: E
   });
 };
 
+// APPROVED age semantics — inclusive accessibility, not exact enum equality:
+//   all_ages → all_ages only
+//   18_plus  → all_ages + 18_plus
+//   21_plus  → all_ages + 18_plus + 21_plus
+// Stored Event values are unchanged; only FILTER matching maps to a $in set.
+const AGE_FILTER_INCLUSION: Record<EventAgeRestriction, EventAgeRestriction[]> = {
+  all_ages: ["all_ages"],
+  "18_plus": ["all_ages", "18_plus"],
+  "21_plus": ["all_ages", "18_plus", "21_plus"],
+};
+
 const addSharedEventFilters = (filters: FilterQuery<IEvent>[], options: EventFilterOptions): void => {
   if (options.ageRestriction) {
-    filters.push({ ageRestriction: options.ageRestriction });
+    const accepted = AGE_FILTER_INCLUSION[options.ageRestriction] ?? [options.ageRestriction];
+    filters.push(
+      accepted.length === 1
+        ? { ageRestriction: accepted[0] }
+        : { ageRestriction: { $in: accepted } },
+    );
   }
 
   if (options.hashtags?.length) {
-    filters.push({ hashtags: { $all: options.hashtags } });
+    // APPROVED: multiple filter hashtags combine with ANY / OR ($in), not $all.
+    // Single-tag behaviour is identical. Normalization / canonical field
+    // (event.hashtags) / dedupe are unchanged; standalone hashtag destination
+    // and search queries do not use this builder and are untouched.
+    filters.push({ hashtags: { $in: options.hashtags } });
   }
 
   addPriceCandidateFilter(filters, options.priceFilter);
@@ -488,6 +556,120 @@ const filterAndLimitEvents = (
   });
 
   return options.limit ? exactEvents.slice(0, options.limit) : exactEvents;
+};
+
+// Deterministic Map order — scheduledAt ASC, then publishedAt DESC, then _id DESC
+// as the stable tiebreaker. Shared by both Map repository paths so viewport and
+// nearby results order identically and page boundaries never skip/repeat.
+const MAP_EVENT_SORT: Record<string, SortOrder> = {
+  scheduledAt: 1,
+  publishedAt: -1,
+  _id: -1,
+};
+
+// Per-request scan valve for the viewport price-refine walk below. Reaching it
+// means a single viewport contains more than ~5k events that match every other
+// filter but fail the authoritative min-available-price rule — pathological, not
+// real. When it trips the page still reports `hasMore: true` and returns a live
+// continuation cursor, so later pages keep scanning past it. This is NOT a hard
+// result ceiling and NOT the old hashtag 200-row candidate cap.
+const MAP_VIEWPORT_MAX_FETCHES = 40;
+const MAP_VIEWPORT_BATCH_MIN = 128;
+
+export type MapEventPage = { events: IEvent[]; hasMore: boolean };
+
+const mapCursorFromEvent = (event: IEvent): EventMapPaginationCursor | null => {
+  if (
+    !(event.scheduledAt instanceof Date) ||
+    Number.isNaN(event.scheduledAt.getTime()) ||
+    !(event.publishedAt instanceof Date) ||
+    Number.isNaN(event.publishedAt.getTime())
+  ) {
+    return null;
+  }
+
+  return {
+    scheduledAt: event.scheduledAt,
+    publishedAt: event.publishedAt,
+    id: event._id.toString(),
+  };
+};
+
+/**
+ * Viewport-mode Map paging.
+ *
+ * `addPriceCandidateFilter` is only a LOOSE per-ticket DB prefilter; the binding
+ * rule is `matchesPriceFilter` (minimum AVAILABLE ticket price). A single
+ * `.limit(pageSize + 1)` therefore let loose false positives (e.g. an Event with
+ * a $5 and a $200 ticket passing a `$100+` prefilter) consume the page slots and
+ * hid genuinely matching Events that sorted after the DB limit — and, because
+ * the page then under-filled, pagination emitted no cursor and never reached
+ * them.
+ *
+ * This walks the SAME deterministic keyset order (`MAP_EVENT_SORT`) in bounded
+ * batches, applying the authoritative refine as it goes, until the page is
+ * filled, the eligible stream is exhausted, or the scan valve trips (still
+ * resumable). The client-facing cursor contract is unchanged — continuation is
+ * driven by the same `{ scheduledAt, publishedAt, _id }` keyset.
+ */
+const seekMapViewportEvents = async (
+  baseQuery: FilterQuery<IEvent>,
+  startCursor: EventMapPaginationCursor | undefined,
+  options: EventFilterOptions,
+  pageSize: number,
+): Promise<MapEventPage> => {
+  const target = Math.max(Math.trunc(pageSize) || 1, 1);
+  const batchSize = Math.max(target + 1, MAP_VIEWPORT_BATCH_MIN);
+  const collected: IEvent[] = [];
+  let cursor = startCursor;
+  let fetches = 0;
+  let exhausted = false;
+
+  while (collected.length < target && fetches < MAP_VIEWPORT_MAX_FETCHES) {
+    fetches += 1;
+
+    const batchFilters: FilterQuery<IEvent>[] = [baseQuery];
+    addMapCursorFilter(batchFilters, cursor);
+    const batchQuery: FilterQuery<IEvent> =
+      batchFilters.length > 1 ? { $and: batchFilters } : batchFilters[0]!;
+
+    const batch = await EventModel.find(batchQuery).sort(MAP_EVENT_SORT).limit(batchSize);
+
+    let filledPage = false;
+    for (const event of batch) {
+      if (matchesPriceFilter(event, options.priceFilter)) {
+        collected.push(event);
+        if (collected.length >= target) {
+          filledPage = true;
+          break;
+        }
+      }
+    }
+
+    // Page is full. We deliberately stopped scanning the rest of this batch, so
+    // the stream may well continue — `hasMore` stays true (exhausted untouched).
+    if (filledPage) {
+      break;
+    }
+
+    // The whole batch was consumed and it came back short: the eligible stream
+    // is genuinely drained.
+    if (batch.length < batchSize) {
+      exhausted = true;
+      break;
+    }
+
+    const nextCursor = mapCursorFromEvent(batch[batch.length - 1]!);
+    if (!nextCursor) {
+      // Map (published/live) Events always carry the dates this keyset needs;
+      // this is a defensive stop, treated as end-of-stream.
+      exhausted = true;
+      break;
+    }
+    cursor = nextCursor;
+  }
+
+  return { events: collected.slice(0, target), hasMore: !exhausted };
 };
 
 export class EventRepository {
@@ -562,6 +744,7 @@ export class EventRepository {
       categories: payload.categories ?? (payload.category ? [payload.category] : []),
       scheduledAt: payload.scheduledAt ?? null,
       endAt: payload.endAt ?? null,
+      timezone: payload.timezone ?? null,
       location: payload.location ?? null,
       tickets: payload.tickets ?? [],
       rewards: payload.rewards ?? [],
@@ -1219,7 +1402,7 @@ export class EventRepository {
     return { scheduledAt: -1, publishedAt: -1, _id: -1 };
   }
 
-  public async findMapEvents(query: MapEventQueryOptions): Promise<IEvent[]> {
+  public async findMapEvents(query: MapEventQueryOptions): Promise<MapEventPage> {
     const filters: FilterQuery<IEvent>[] = [{
       status: { $in: ["published", "live"] },
       privacy: { $in: ["public", "locked"] },
@@ -1235,19 +1418,14 @@ export class EventRepository {
     addSharedEventFilters(filters, query);
     const locationFilter = getLocationFilter(query);
     addMapSpatialFilter(filters, query, locationFilter);
-    addMapCursorFilter(filters, query.paginationCursor);
 
-    const eventQuery: FilterQuery<IEvent> = filters.length > 1 ? { $and: filters } : filters[0]!;
-    const request = EventModel.find(eventQuery).sort({ scheduledAt: 1, publishedAt: -1, _id: -1 });
-    const events = await (locationFilter ? request : request.limit((query.limit ?? 100) + 1));
-
-    return filterAndLimitEvents(events, query, locationFilter);
+    return this.runMapEventQuery(filters, query, locationFilter);
   }
 
   public async findPrivateMapEventsForUser(
     userId: string,
     query: MapEventQueryOptions,
-  ): Promise<IEvent[]> {
+  ): Promise<MapEventPage> {
     const filters: FilterQuery<IEvent>[] = [{
       status: { $in: ["published", "live"] },
       privacy: "private",
@@ -1266,13 +1444,35 @@ export class EventRepository {
     addSharedEventFilters(filters, query);
     const locationFilter = getLocationFilter(query);
     addMapSpatialFilter(filters, query, locationFilter);
-    addMapCursorFilter(filters, query.paginationCursor);
 
-    const eventQuery: FilterQuery<IEvent> = filters.length > 1 ? { $and: filters } : filters[0]!;
-    const request = EventModel.find(eventQuery).sort({ scheduledAt: 1, publishedAt: -1, _id: -1 });
-    const events = await (locationFilter ? request : request.limit((query.limit ?? 100) + 1));
+    return this.runMapEventQuery(filters, query, locationFilter);
+  }
 
-    return filterAndLimitEvents(events, query, locationFilter);
+  // Shared tail for both Map streams (public/locked and requester-visible
+  // private) so the authoritative price refine sits before the effective page
+  // limit consistently across both. Nearby/radius mode is already correct — a
+  // full ordered fetch refined by `filterAndLimitEvents` before its limit — and
+  // is left exactly as it was.
+  private async runMapEventQuery(
+    filters: FilterQuery<IEvent>[],
+    query: MapEventQueryOptions,
+    locationFilter: LocationFilter | null,
+  ): Promise<MapEventPage> {
+    if (locationFilter) {
+      const nearbyFilters = [...filters];
+      addMapCursorFilter(nearbyFilters, query.paginationCursor);
+      const eventQuery: FilterQuery<IEvent> =
+        nearbyFilters.length > 1 ? { $and: nearbyFilters } : nearbyFilters[0]!;
+      const events = await EventModel.find(eventQuery).sort(MAP_EVENT_SORT);
+
+      // `hasMore` stays false here: `filterAndLimitEvents` returns up to
+      // `query.limit` (= pageLimit + 1) already-refined events, and the service
+      // still detects a further page from `merged.length > pageLimit`.
+      return { events: filterAndLimitEvents(events, query, locationFilter), hasMore: false };
+    }
+
+    const baseQuery: FilterQuery<IEvent> = filters.length > 1 ? { $and: filters } : filters[0]!;
+    return seekMapViewportEvents(baseQuery, query.paginationCursor, query, query.limit ?? 100);
   }
 
   public async findAdminMapEvents(now: Date, activeSince: Date): Promise<IEvent[]> {
@@ -1904,6 +2104,7 @@ export class EventRepository {
     }
     if (payload.scheduledAt !== undefined) update.scheduledAt = payload.scheduledAt;
     if (payload.endAt !== undefined) update.endAt = payload.endAt;
+    if (payload.timezone !== undefined) update.timezone = payload.timezone;
     if (payload.location !== undefined) update.location = payload.location;
     if (payload.tickets !== undefined) update.tickets = payload.tickets;
     if (payload.rewards !== undefined) update.rewards = payload.rewards;

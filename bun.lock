@@ -8,6 +8,7 @@
         "@aws-sdk/client-s3": "^3.726.1",
         "@aws-sdk/s3-request-presigner": "^3.726.1",
         "@maxmind/geoip2-node": "^6.3.4",
+        "@photostructure/tz-lookup": "11.6.1",
         "bcryptjs": "^3.0.3",
         "compression": "^1.7.5",
         "cors": "^2.8.5",
@@ -257,6 +258,8 @@
     "@nodable/entities": ["@nodable/entities@2.1.0", "", {}, "sha512-nyT7T3nbMyBI/lvr6L5TyWbFJAI9FTgVRakNoBqCD+PmID8DzFrrNdLLtHMwMszOtqZa8PAOV24ZqDnQrhQINA=="],
 
     "@opentelemetry/api": ["@opentelemetry/api@1.9.1", "", {}, "sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q=="],
+
+    "@photostructure/tz-lookup": ["@photostructure/tz-lookup@11.6.1", "", {}, "sha512-azPdhOkwEyNFed8hSR7/U5Xe9eMO3YfbGYUnW3R9wlseimxSw6IkFaYAInDTb1KlbuwTOMzpa5oPcpAOXUM29A=="],
 
     "@pinojs/redact": ["@pinojs/redact@0.4.0", "", {}, "sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg=="],
 

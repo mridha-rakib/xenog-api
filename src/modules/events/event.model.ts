@@ -488,6 +488,13 @@ const eventSchema = new Schema<IEvent>(
       default: null,
       index: true,
     },
+    // Additive (Batch 3A). IANA venue timezone, e.g. "America/New_York".
+    // `null` on legacy Events and where coordinates cannot resolve a zone.
+    // No index — Event-local date/time query semantics land in Batch 3B.
+    timezone: {
+      type: String,
+      default: null,
+    },
     location: {
       type: eventLocationSchema,
       default: null,

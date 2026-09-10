@@ -436,6 +436,13 @@ export interface IEvent {
   categories?: EventCategory[];
   scheduledAt?: Date | null;
   endAt?: Date | null;
+  /**
+   * Additive (Batch 3A). IANA timezone of the Event's venue, e.g.
+   * "America/New_York". `null`/absent on legacy Events and on Events whose
+   * venue timezone could not be resolved from coordinates. `scheduledAt` /
+   * `endAt` remain absolute UTC instants regardless.
+   */
+  timezone?: string | null;
   location?: EventLocation | null;
   tickets: EventTicket[];
   rewards: EventReward[];
@@ -469,6 +476,21 @@ export interface SaveEventDraftDto {
   categories?: EventCategory[];
   scheduledAt?: Date | null;
   endAt?: Date | null;
+  /**
+   * Additive (Batch 3A). Controlled client-supplied fallback IANA timezone.
+   * Server-resolved coordinates win; this is only honoured when no authoritative
+   * zone can be resolved and it passes IANA validation.
+   */
+  timezone?: string | null;
+  /**
+   * Additive (Batch 3A) transport-only venue-local wall-clock input. When a
+   * venue timezone can be resolved, the server interprets these IN THAT ZONE to
+   * derive `scheduledAt` / `endAt`. Never persisted. `YYYY-MM-DD` + `HH:mm`.
+   */
+  scheduledLocalDate?: string | null;
+  scheduledLocalTime?: string | null;
+  endLocalDate?: string | null;
+  endLocalTime?: string | null;
   location?: EventLocation | null;
   tickets?: EventTicketInput[];
   rewards?: EventRewardInput[];
@@ -526,6 +548,8 @@ export interface EventResponse {
   categories: EventCategory[];
   scheduledAt?: Date | null;
   endAt?: Date | null;
+  /** Additive (Batch 3A). IANA venue timezone; `null` when unknown. */
+  timezone?: string | null;
   location?: EventLocation | null;
   tickets: EventTicket[];
   rewards: EventReward[];

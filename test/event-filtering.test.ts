@@ -165,7 +165,7 @@ test("feed and map validation share the approved event location radius range", (
   }
 });
 
-test("date and late-night filters build an inclusive-start exclusive-end UTC range", async () => {
+test("Batch 3B: date + time-period build a loose UTC prefilter + a per-document $expr (not one requester range)", async () => {
   const repository = new EventRepository();
 
   await withMockedEventFind([], async (captured) => {
@@ -178,8 +178,22 @@ test("date and late-night filters build an inclusive-start exclusive-end UTC ran
     });
 
     const queryText = JSON.stringify(captured.query);
-    assert.match(queryText, /2026-07-14T15:00:00.000Z/);
-    assert.match(queryText, /2026-07-14T23:00:00.000Z/);
+    // Loose, timezone-agnostic UTC envelope: selected day −1 .. +2 days.
+    assert.match(queryText, /2026-07-13T00:00:00\.000Z/);
+    assert.match(queryText, /2026-07-16T00:00:00\.000Z/);
+    // Per-document timezone: Event.timezone, else the requester "+06:00" fallback.
+    assert.match(queryText, /"\$ifNull":\["\$timezone","\+06:00"\]/);
+    // Exact per-document local calendar-date equality (year/month/day = 2026/7/14).
+    assert.match(queryText, /"\$year":\{"date":"\$scheduledAt"/);
+    assert.match(queryText, /"\$dayOfMonth":\{"date":"\$scheduledAt"/);
+    assert.ok((captured.query as { $and: unknown[] }).$and.length >= 3, "loose prefilter + $expr are separate $and entries");
+    // late_night wraps midnight -> $or of the unchanged 21:00 (1260) / 05:00 (300) bounds.
+    assert.match(queryText, /"\$or":\[\{"\$gte":\[\{"\$add"/);
+    assert.match(queryText, /,1260\]\}/);
+    assert.match(queryText, /,300\]\}/);
+    // The old single [15:00Z, 23:00Z) requester range is gone.
+    assert.doesNotMatch(queryText, /2026-07-14T15:00:00\.000Z/);
+    assert.doesNotMatch(queryText, /2026-07-14T23:00:00\.000Z/);
   });
 });
 
@@ -193,7 +207,7 @@ test("map filtering applies exact radius after bounding-box candidate query", as
   });
 
   await withMockedEventFind([inside, outside], async () => {
-    const events = await repository.findMapEvents({
+    const { events } = await repository.findMapEvents({
       activeSince: new Date("2026-07-01T00:00:00.000Z"),
       latitude: 40,
       longitude: -73,
@@ -275,7 +289,7 @@ test("map location-only filtering keeps upcoming and live events without optiona
   });
 
   await withMockedEventFind([upcomingPaid, liveFree], async (captured) => {
-    const events = await repository.findMapEvents({
+    const { events } = await repository.findMapEvents({
       activeSince: new Date("2026-07-01T00:00:00.000Z"),
       latitude: 40,
       longitude: -73,
@@ -299,6 +313,77 @@ test("map location-only filtering keeps upcoming and live events without optiona
     assert.doesNotMatch(queryText, /ageRestriction/);
     assert.doesNotMatch(queryText, /hashtags/);
     assert.doesNotMatch(queryText, /\$expr/);
+  });
+});
+
+// ── Batch 2B: "200+" broad search = no circular distance cutoff ─────────────
+// The client expresses broad mode by OMITTING latitude/longitude/radiusKm
+// entirely (Feed) or routing through the viewport branch (Map). These lock the
+// backend behaviour that makes that safe: with no lat/lng/radiusKm there is no
+// bounding box / haversine / 50km fallback anywhere on the Event path.
+
+test("broad feed (no latitude/longitude/radiusKm) applies NO circular distance predicate — far Events stay eligible", async () => {
+  const repository = new EventRepository();
+  const near = makeEvent({ _id: new Types.ObjectId(), location: { latitude: 40, longitude: -73.01 } });
+  const far150 = makeEvent({ _id: new Types.ObjectId(), location: { latitude: 42.17, longitude: -73 } });
+  const far250 = makeEvent({ _id: new Types.ObjectId(), location: { latitude: 43.62, longitude: -73 } });
+  const far600 = makeEvent({ _id: new Types.ObjectId(), location: { latitude: 48.68, longitude: -73 } });
+
+  await withMockedEventFind([near, far150, far250, far600], async (captured) => {
+    const events = await repository.findPublicFeedEvents([], {}); // broad = no geo options at all
+
+    assert.deepEqual(
+      new Set(events.map((e) => e._id.toString())),
+      new Set([near, far150, far250, far600].map((e) => e._id.toString())),
+    );
+    const queryText = JSON.stringify(captured.query);
+    assert.doesNotMatch(queryText, /location\.latitude/);
+    assert.doesNotMatch(queryText, /\$centerSphere|\$near|\$geoWithin/);
+  });
+});
+
+test("broad feed keeps every non-geo filter — broad only drops the distance predicate", async () => {
+  const repository = new EventRepository();
+
+  await withMockedEventFind([], async (captured) => {
+    await repository.findPublicFeedEvents([], {
+      ageRestriction: "21_plus",
+      priceFilter: "free",
+      hashtags: ["music"],
+      timePeriod: "evening",
+      timezoneOffsetMinutes: -300,
+      // no latitude / longitude / radiusKm
+    });
+
+    const queryText = JSON.stringify(captured.query);
+    assert.match(queryText, /"21_plus"/);
+    assert.match(queryText, /"music"/);
+    assert.match(queryText, /\$expr/); // time-of-day predicate still applied
+    assert.match(queryText, /tickets/); // price candidate prefilter still applied
+    assert.doesNotMatch(queryText, /location\.latitude/); // but NO distance box
+  });
+});
+
+test("broad map (viewport bounds, no lat/lng) uses the viewport branch — the radiusKm ?? 50 fallback is inert", async () => {
+  const repository = new EventRepository();
+
+  await withMockedEventFind([], async (captured) => {
+    const { events } = await repository.findMapEvents({
+      activeSince: new Date("2026-07-01T00:00:00.000Z"),
+      north: 42,
+      south: 38,
+      west: -75,
+      east: -70,
+      radiusKm: 50, // service `?? 50` fallback — must not build a circular filter without lat/lng
+      limit: 100,
+    });
+
+    assert.ok(Array.isArray(events));
+    const queryText = JSON.stringify(captured.query);
+    assert.match(queryText, /location\.latitude/); // the viewport bbox …
+    assert.match(queryText, /38/);
+    assert.match(queryText, /42/);
+    assert.doesNotMatch(queryText, /"latitude":40/); // … not a centre ± delta box
   });
 });
 
@@ -366,6 +451,81 @@ test("combined filters are added on top of existing visibility query", async () 
     assert.match(queryText, /summer/);
     assert.match(queryText, /tickets/);
   });
+});
+
+// ── Batch 2D: inclusive age semantics + multi-hashtag ANY/OR ───────────────
+// Applied at the shared Event filter builder (addSharedEventFilters), so it
+// reaches Discover + Friends + Map, public + private streams identically.
+
+const findQueryText = async (
+  run: (repo: EventRepository) => Promise<unknown>,
+): Promise<string> => {
+  let text = "";
+  await withMockedEventFind([], async (captured) => {
+    await run(new EventRepository());
+    text = JSON.stringify(captured.query);
+  });
+  return text;
+};
+
+test("§33/§34 age filter maps to an inclusive accessibility set, not exact equality", async () => {
+  const allAges = await findQueryText((r) => r.findPublicFeedEvents([], { ageRestriction: "all_ages" }));
+  assert.match(allAges, /"ageRestriction":"all_ages"/); // all_ages → bare match
+  assert.doesNotMatch(allAges, /"ageRestriction":\{"\$in"/);
+
+  const eighteen = await findQueryText((r) => r.findPublicFeedEvents([], { ageRestriction: "18_plus" }));
+  assert.match(eighteen, /"ageRestriction":\{"\$in":\["all_ages","18_plus"\]\}/);
+  assert.doesNotMatch(eighteen, /"21_plus"/); // 18+ must NOT admit 21+
+
+  const twentyOne = await findQueryText((r) => r.findPublicFeedEvents([], { ageRestriction: "21_plus" }));
+  assert.match(twentyOne, /"ageRestriction":\{"\$in":\["all_ages","18_plus","21_plus"\]\}/);
+});
+
+test("§35 inclusive age semantics are identical on every stream (private feed, map, private map)", async () => {
+  const uid = new Types.ObjectId().toString();
+  const expected = /"ageRestriction":\{"\$in":\["all_ages","18_plus"\]\}/;
+
+  assert.match(await findQueryText((r) => r.findPrivateFeedEventsForUser(uid, [], { ageRestriction: "18_plus" })), expected);
+  assert.match(
+    await findQueryText((r) => r.findMapEvents({ activeSince: new Date("2026-07-01T00:00:00.000Z"), ageRestriction: "18_plus", limit: 100 })),
+    expected,
+  );
+  assert.match(
+    await findQueryText((r) => r.findPrivateMapEventsForUser(uid, { activeSince: new Date("2026-07-01T00:00:00.000Z"), ageRestriction: "18_plus", limit: 100 })),
+    expected,
+  );
+});
+
+test("§37/§40 multiple filter hashtags combine with ANY/OR ($in), never $all", async () => {
+  const multi = await findQueryText((r) => r.findPublicFeedEvents([], { hashtags: ["music", "party"] }));
+  assert.match(multi, /"hashtags":\{"\$in":\["music","party"\]\}/);
+  assert.doesNotMatch(multi, /\$all/);
+});
+
+test("§38/§64 a single filter hashtag is unchanged ($in of one ≡ old behaviour)", async () => {
+  const single = await findQueryText((r) => r.findPublicFeedEvents([], { hashtags: ["music"] }));
+  assert.match(single, /"hashtags":\{"\$in":\["music"\]\}/);
+  assert.doesNotMatch(single, /\$all/);
+});
+
+test("§42/§43 age (inclusive) and hashtags (ANY) still AND with each other and other criteria", async () => {
+  const q = await findQueryText((r) =>
+    r.findMapEvents({
+      activeSince: new Date("2026-07-01T00:00:00.000Z"),
+      ageRestriction: "18_plus",
+      hashtags: ["music", "party"],
+      priceFilter: "free",
+      timePeriod: "evening",
+      timezoneOffsetMinutes: -300,
+      limit: 100,
+    }),
+  );
+  // Every criterion present in one $and — different categories still combine AND.
+  assert.match(q, /"ageRestriction":\{"\$in":\["all_ages","18_plus"\]\}/);
+  assert.match(q, /"hashtags":\{"\$in":\["music","party"\]\}/);
+  assert.match(q, /"\$and":/);
+  assert.match(q, /tickets/);
+  assert.match(q, /\$expr/);
 });
 
 test("feed host filtering is added on top of public and private event visibility", async () => {

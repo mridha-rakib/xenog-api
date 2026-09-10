@@ -13,6 +13,7 @@ import {
 } from "./event.interface.js";
 import { eventCancellationReasonTypes } from "../payments/event-cancellation-refund.interface.js";
 import { normalizeHashtag } from "../moments/moment-hashtag.js";
+import { EVENT_TIME_ZONE_MAX_LENGTH, isValidIanaTimeZone } from "./event-timezone.js";
 
 const objectId = z.string().trim().regex(/^[a-f\d]{24}$/i, "Invalid MongoDB ObjectId");
 const ticketId = z.string().trim().min(1, "Ticket ID is required").max(80, "Ticket ID cannot exceed 80 characters");
@@ -54,6 +55,20 @@ const hashtagList = z.preprocess(
 );
 
 const eventDateKey = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional();
+
+// Additive (Batch 3A). Transport-only venue-local wall-clock inputs + a
+// controlled client-supplied fallback timezone. Shape/validity checks only —
+// the authoritative resolution + wall-clock->instant conversion happens in the
+// service layer.
+const eventLocalDateInput = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().nullable();
+const eventLocalTimeInput = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional().nullable();
+const eventTimeZoneInput = z
+  .string()
+  .trim()
+  .max(EVENT_TIME_ZONE_MAX_LENGTH, `Timezone cannot exceed ${EVENT_TIME_ZONE_MAX_LENGTH} characters`)
+  .refine((value) => isValidIanaTimeZone(value), { message: "Invalid IANA timezone" })
+  .optional()
+  .nullable();
 const cancellationReasonBody = z
   .object({
     reasonType: z.enum(eventCancellationReasonTypes),
@@ -451,6 +466,11 @@ const draftBodyBase = z
     categories: draftEventCategoryList.optional(),
     scheduledAt: optionalDateTime("Event start date and time"),
     endAt: optionalDateTime("Event end date and time"),
+    timezone: eventTimeZoneInput,
+    scheduledLocalDate: eventLocalDateInput,
+    scheduledLocalTime: eventLocalTimeInput,
+    endLocalDate: eventLocalDateInput,
+    endLocalTime: eventLocalTimeInput,
     location: eventLocation.optional().nullable(),
     tickets: z.array(eventTicket).max(100).optional(),
     privacy: z.enum(eventPrivacyOptions).default("public").optional(),

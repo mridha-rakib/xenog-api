@@ -30,6 +30,13 @@ import {
   type HashtagEventRecencyKeyset,
 } from "./event.repository.js";
 import { getProfileEventsCacheKey, invalidateProfileEventsCache } from "./profile-events-cache.js";
+import {
+  eventLocalPartsToInstant,
+  isValidIanaTimeZone,
+  parseOptionalEventLocalDateTime,
+  reinterpretInstantInZone,
+  resolveEventTimeZoneFromCoordinates,
+} from "./event-timezone.js";
 import { MAX_EVENT_FILTER_RADIUS_KM } from "./event.validation.js";
 import { RewardClaimRepository } from "./reward-claim.repository.js";
 import type { IRewardClaim } from "./reward-claim.model.js";
@@ -2092,13 +2099,22 @@ export class EventService {
       activeSince,
       paginationCursor: decodeMapCursor(query.cursor),
     };
-    const [publicEvents, privateEvents] = await Promise.all([
+    const [publicPage, privatePage] = await Promise.all([
       this.eventRepository.findMapEvents(mapQuery),
       this.eventRepository.findPrivateMapEventsForUser(user.id, mapQuery),
     ]);
-    const events = this.mergeMapEvents(publicEvents, privateEvents, pageLimit + 1);
+    const events = this.mergeMapEvents(publicPage.events, privatePage.events, pageLimit + 1);
     const pageEvents = events.slice(0, pageLimit);
-    const nextCursor = events.length > pageLimit ? encodeMapCursor(pageEvents[pageEvents.length - 1]!) : null;
+    // A further page exists when the merged set overflowed the page (normal
+    // case) OR a stream stopped on its per-request scan valve before confirming
+    // exhaustion — in the latter case we still emit a cursor so later pages
+    // resume past the valve (viewport price-refine correctness).
+    const hasMorePages =
+      publicPage.hasMore || privatePage.hasMore || events.length > pageLimit;
+    const nextCursor =
+      hasMorePages && pageEvents.length > 0
+        ? encodeMapCursor(pageEvents[pageEvents.length - 1]!)
+        : null;
     const hostById = await this.getHostById(pageEvents);
     const responseEvents = await this.withPublicGoingSummaries(
       pageEvents.map((event) =>
@@ -2761,7 +2777,9 @@ export class EventService {
 
   private normalizeDraftPayload(
     payload: SaveEventDraftDto,
-    existingEvent?: Pick<IEvent, "hashtags" | "description"> | null,
+    existingEvent?:
+      | Pick<IEvent, "hashtags" | "description" | "scheduledAt" | "endAt" | "timezone" | "location">
+      | null,
   ): SaveEventDraftDto {
     const normalized: SaveEventDraftDto = { ...payload };
 
@@ -2840,7 +2858,139 @@ export class EventService {
       normalized.privacy = payload.privacy ?? "public";
     }
 
+    this.applyEventTimeZone(normalized, payload, existingEvent ?? null);
+
     return normalized;
+  }
+
+  /**
+   * Batch 3A — authoritative venue timezone + venue-local wall-clock write path.
+   *
+   * Mutates `normalized` in place. Invariants:
+   *  - `scheduledAt` / `endAt` remain absolute UTC `Date`s.
+   *  - `normalized.timezone` is only ever set to a zone the server actually
+   *    honoured (i.e. after an explicit parts->instant conversion, a
+   *    venue-change wall-clock reinterpretation, an unchanged same-zone venue,
+   *    or a validated client fallback). It is never a guessed label for an
+   *    unconverted device instant.
+   *  - Transport-only local wall-clock fields are stripped before persistence.
+   *  - Legacy Events (no known prior zone) are never silently shifted.
+   */
+  private applyEventTimeZone(
+    normalized: SaveEventDraftDto,
+    payload: SaveEventDraftDto,
+    existingEvent:
+      | Pick<IEvent, "scheduledAt" | "endAt" | "timezone" | "location">
+      | null,
+  ): void {
+    const startParts = parseOptionalEventLocalDateTime(
+      payload.scheduledLocalDate,
+      payload.scheduledLocalTime,
+    );
+    const endParts = parseOptionalEventLocalDateTime(payload.endLocalDate, payload.endLocalTime);
+
+    // Transport-only — never reaches the schema / repository.
+    delete normalized.scheduledLocalDate;
+    delete normalized.scheduledLocalTime;
+    delete normalized.endLocalDate;
+    delete normalized.endLocalTime;
+
+    const location = normalized.location ?? existingEvent?.location ?? null;
+    const resolvedZone = resolveEventTimeZoneFromCoordinates(
+      location?.latitude ?? undefined,
+      location?.longitude ?? undefined,
+    );
+    const existingZone =
+      existingEvent && isValidIanaTimeZone(existingEvent.timezone) ? existingEvent.timezone : null;
+    const scheduleTouched =
+      startParts !== null ||
+      endParts !== null ||
+      payload.scheduledAt !== undefined ||
+      payload.endAt !== undefined;
+
+    // (1) Authoritative: explicit venue-local wall-clock + a resolvable zone.
+    if (resolvedZone && (startParts || endParts)) {
+      try {
+        if (startParts) {
+          normalized.scheduledAt = eventLocalPartsToInstant(startParts, resolvedZone);
+        }
+        if (endParts) {
+          normalized.endAt = eventLocalPartsToInstant(endParts, resolvedZone);
+        }
+        normalized.timezone = resolvedZone;
+        this.assertConvertedScheduleOrdering(normalized);
+        return;
+      } catch (error) {
+        if (error instanceof AppError) {
+          throw error;
+        }
+        // Structural failure — fall through to the safe paths below.
+      }
+    }
+
+    // (2) Venue change on a timezone-known Event with NO explicit date/time edit:
+    //     preserve the venue-local wall-clock, recompute the absolute instant.
+    if (resolvedZone && existingZone && resolvedZone !== existingZone && !scheduleTouched) {
+      try {
+        const nextStart = reinterpretInstantInZone(
+          existingEvent?.scheduledAt,
+          existingZone,
+          resolvedZone,
+        );
+        const nextEnd = reinterpretInstantInZone(existingEvent?.endAt, existingZone, resolvedZone);
+        if (nextStart) {
+          normalized.scheduledAt = nextStart;
+        }
+        if (nextEnd) {
+          normalized.endAt = nextEnd;
+        }
+        normalized.timezone = resolvedZone;
+        this.assertConvertedScheduleOrdering(normalized);
+        return;
+      } catch (error) {
+        if (error instanceof AppError) {
+          throw error;
+        }
+        // fall through
+      }
+    }
+
+    // (3) Same-zone venue change: nothing moves; keep the known zone.
+    if (resolvedZone && existingZone && resolvedZone === existingZone) {
+      normalized.timezone = existingZone;
+      return;
+    }
+
+    // (4) Controlled client-supplied fallback: only when NO authoritative zone.
+    if (payload.timezone !== undefined) {
+      normalized.timezone =
+        !resolvedZone && isValidIanaTimeZone(payload.timezone) ? payload.timezone : existingZone;
+      return;
+    }
+
+    // (5) Legacy Event / no explicit parts / unresolved coordinates:
+    //     never invent or shift. Preserve any prior zone; otherwise leave null.
+    if (existingEvent) {
+      normalized.timezone = existingZone;
+    } else {
+      delete normalized.timezone;
+    }
+  }
+
+  private assertConvertedScheduleOrdering(normalized: SaveEventDraftDto): void {
+    const { scheduledAt, endAt } = normalized;
+    if (
+      scheduledAt instanceof Date &&
+      endAt instanceof Date &&
+      !Number.isNaN(scheduledAt.getTime()) &&
+      !Number.isNaN(endAt.getTime()) &&
+      endAt.getTime() <= scheduledAt.getTime()
+    ) {
+      throw new AppError(
+        "Event end date and time must be after the start date and time.",
+        httpStatus.BAD_REQUEST,
+      );
+    }
   }
 
   private getCategoryCandidate(event: IEvent, payload: SaveEventDraftDto): EventCategory[] {
@@ -2879,7 +3029,9 @@ export class EventService {
 
   private normalizePublishPayload(
     payload: PublishEventDto,
-    existingEvent?: Pick<IEvent, "hashtags" | "description"> | null,
+    existingEvent?:
+      | Pick<IEvent, "hashtags" | "description" | "scheduledAt" | "endAt" | "timezone" | "location">
+      | null,
   ): PublishEventDto {
     const draftPayload = this.normalizeDraftPayload(payload, existingEvent);
     const hashtags =
@@ -2894,8 +3046,16 @@ export class EventService {
       hashtags,
       category: payload.categories[0],
       categories: payload.categories,
-      scheduledAt: payload.scheduledAt,
-      endAt: payload.endAt,
+      // Batch 3A: the venue-timezone-aware schedule from `draftPayload` is
+      // authoritative — never fall back to the raw device-derived payload.
+      scheduledAt: draftPayload.scheduledAt ?? payload.scheduledAt,
+      endAt: draftPayload.endAt ?? payload.endAt,
+      timezone: draftPayload.timezone ?? null,
+      // Transport-only wall-clock inputs must not survive into the persisted DTO.
+      scheduledLocalDate: undefined,
+      scheduledLocalTime: undefined,
+      endLocalDate: undefined,
+      endLocalTime: undefined,
       location: draftPayload.location ?? {},
       tickets: payload.tickets.map((ticket) => {
         const normalized = this.normalizeTicket(ticket);
@@ -4442,6 +4602,7 @@ export class EventService {
           : [],
       scheduledAt: event.scheduledAt ?? null,
       endAt: event.endAt ?? null,
+      timezone: event.timezone ?? null,
       location: event.location ?? null,
       tickets: this.toTicketResponses(event.tickets),
       rewards: this.normalizeExistingRewards(event.rewards),

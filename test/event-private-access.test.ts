@@ -110,8 +110,11 @@ const createEventService = (privateEventsForUser: Record<string, unknown[]> = {}
   const eventRepository = {
     findPublicFeedEvents: async () => [publicEvent],
     findPrivateFeedEventsForUser: async (userId: string) => privateEventsForUser[userId] ?? [],
-    findMapEvents: async () => [publicEvent],
-    findPrivateMapEventsForUser: async (userId: string) => privateEventsForUser[userId] ?? [],
+    findMapEvents: async () => ({ events: [publicEvent], hasMore: false }),
+    findPrivateMapEventsForUser: async (userId: string) => ({
+      events: privateEventsForUser[userId] ?? [],
+      hasMore: false,
+    }),
     findById: async (eventId: string) => eventId === privateEventId.toString() ? privateEvent : null,
     findByIds: async () => [],
   };

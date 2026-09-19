@@ -98,6 +98,7 @@ export interface IMoment {
   eventCode?: string | null;
   sourceStoryId?: Types.ObjectId | null;
   sourceClientRequestId?: string | null;
+  clientRequestId?: string | null;
   mediaItems: MomentMediaItem[];
   location?: MomentLocationSnapshot | null;
   createdAt: Date;
@@ -170,6 +171,7 @@ export interface CreateMomentDto {
   eventId?: string | null;
   eventCode?: string | null;
   mediaItems?: MomentMediaItem[];
+  clientRequestId?: string | null;
 }
 
 export interface UpdateMomentDto {

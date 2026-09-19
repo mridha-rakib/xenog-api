@@ -94,6 +94,17 @@ const decodeHashtagMomentCursor = (
 
 const nowMs = (): number => Number(process.hrtime.bigint() / 1000000n);
 
+// Mirrors the isDuplicateKeyError helper used elsewhere in this codebase
+// (e.g. report.repository.ts, event-window.repository.ts) for the Mongo
+// E11000 unique-index violation code.
+const isDuplicateKeyError = (error: unknown): boolean => {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  return (error as { code?: number }).code === 11000;
+};
+
 interface MomentInteractionContext {
   likeCounts: Map<string, number>;
   commentCounts: Map<string, number>;
@@ -153,6 +164,21 @@ export class MomentService {
     context: MomentRequestContext = {},
   ): Promise<MomentResponse> {
     const startedAt = nowMs();
+    const clientRequestId = payload.clientRequestId?.trim() || null;
+
+    // CRT-012 fast path: a retry of the SAME logical submit (same creator +
+    // same clientRequestId) returns the already-created Moment as-is, before
+    // any Event/tag/media validation or side effects run again. Legacy/
+    // omitted clientRequestId requests skip this entirely and behave exactly
+    // as before.
+    if (clientRequestId) {
+      const existingMoment = await this.momentRepository.findByClientRequestIdForCreator(user.id, clientRequestId);
+
+      if (existingMoment) {
+        return this.toResponse(existingMoment, undefined, user, new Set(), this.emptyInteractionContext());
+      }
+    }
+
     const hasVideo = payload.mediaItems?.some((mediaItem) => mediaItem.type === "video") ?? false;
     let resolvedEventTitle = payload.eventTitle?.trim() || null;
     const resolvedEventId = payload.eventId?.trim() || null;
@@ -160,7 +186,10 @@ export class MomentService {
     if (resolvedEventId) {
       const event = await this.eventRepository.findById(resolvedEventId);
 
-      if (!event || event.status !== "published") {
+      // CRT-003: the Event-tag picker legitimately lists both "published" and
+      // "live" Events (still excluding draft/completed/cancelled), so the tag
+      // authorization must accept the same two states.
+      if (!event || (event.status !== "published" && event.status !== "live")) {
         throw new AppError("Event not found or not available.", httpStatus.NOT_FOUND);
       }
 
@@ -169,13 +198,19 @@ export class MomentService {
       }
 
       if (event.privacy === "private" && event.userId.toString() !== user.id) {
-        const [hasPurchased, hasShared] = await Promise.all([
-          this.checkoutPaymentRepository.hasUserPaidTicketForEvent(user.id, resolvedEventId),
-          this.ticketShareRepository.hasActiveShareForRecipientAtEvent(user.id, resolvedEventId),
-        ]);
+        // CRT-003: a private-event member is a valid access class for tagging,
+        // alongside a paid ticket or an active shared ticket.
+        const isMember = (event.memberUserIds ?? []).some((id) => id.toString() === user.id);
 
-        if (!hasPurchased && !hasShared) {
-          throw new AppError("A valid ticket is required to tag this event.", httpStatus.FORBIDDEN);
+        if (!isMember) {
+          const [hasPurchased, hasShared] = await Promise.all([
+            this.checkoutPaymentRepository.hasUserPaidTicketForEvent(user.id, resolvedEventId),
+            this.ticketShareRepository.hasActiveShareForRecipientAtEvent(user.id, resolvedEventId),
+          ]);
+
+          if (!hasPurchased && !hasShared) {
+            throw new AppError("A valid ticket is required to tag this event.", httpStatus.FORBIDDEN);
+          }
         }
       }
 
@@ -208,20 +243,42 @@ export class MomentService {
     const location = await this.buildMomentLocationSnapshot(user.id, context.clientIp);
 
     const persistenceStartedAt = nowMs();
-    let moment = await this.momentRepository.create({
-      userId: user.id,
-      mode: payload.mode,
-      caption: payload.caption?.trim() || null,
-      hashtags: extractHashtags(payload.caption),
-      audience: payload.audience,
-      taggedPeople,
-      taggedFriendIds,
-      eventTitle: resolvedEventTitle,
-      eventId: resolvedEventId,
-      eventCode: payload.eventCode?.trim() || null,
-      mediaItems,
-      location,
-    });
+    let moment: IMoment;
+    try {
+      moment = await this.momentRepository.create({
+        userId: user.id,
+        mode: payload.mode,
+        caption: payload.caption?.trim() || null,
+        hashtags: extractHashtags(payload.caption),
+        audience: payload.audience,
+        taggedPeople,
+        taggedFriendIds,
+        eventTitle: resolvedEventTitle,
+        eventId: resolvedEventId,
+        eventCode: payload.eventCode?.trim() || null,
+        clientRequestId,
+        mediaItems,
+        location,
+      });
+    } catch (error) {
+      // CRT-012 race safety: two concurrent requests carrying the same
+      // clientRequestId can both pass the fast-path lookup above before
+      // either has inserted. The (userId, clientRequestId) unique index is
+      // the actual authority here — the loser of the race hits E11000, and
+      // instead of surfacing that raw DB error, we fetch and return the
+      // winner's Moment so both requests resolve to the same record with no
+      // duplicate Moment and no repeated side effects (video queueing below
+      // is never reached on this path).
+      if (clientRequestId && isDuplicateKeyError(error)) {
+        const existingMoment = await this.momentRepository.findByClientRequestIdForCreator(user.id, clientRequestId);
+
+        if (existingMoment) {
+          return this.toResponse(existingMoment, undefined, user, new Set(), this.emptyInteractionContext());
+        }
+      }
+
+      throw error;
+    }
     const persistenceMs = nowMs() - persistenceStartedAt;
 
     if (hasVideo) {

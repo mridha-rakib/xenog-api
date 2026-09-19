@@ -40,6 +40,35 @@ const audience = z
     return value;
   });
 
+// CRT-011 media policy — mirrors app/post-screen/create-post.tsx's
+// APPROVED_IMAGE_MIME_TYPES / APPROVED_AUDIO_MIME_TYPES /
+// AUDIO_MIN_DURATION_SECONDS / AUDIO_MAX_DURATION_SECONDS exactly, so a file
+// the client accepts can never be rejected here and vice versa. File-size
+// limits (15 MB/image, 20 MB/audio, 50 MB total) are deliberately NOT
+// enforced at this layer: MomentMediaItem's `fileSize` field is not part of
+// the create payload contract today, and adding it would mean threading a
+// new field through several client call sites (recorder/picker callback
+// signatures) — a materially bigger change than this validation task calls
+// for. Those size limits are therefore client-enforced only; see the CRT-011
+// media-policy report for the explicit trust-boundary note.
+const MOMENT_IMAGE_APPROVED_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const MOMENT_AUDIO_APPROVED_CONTENT_TYPES = new Set([
+  "audio/mp4",
+  "audio/m4a",
+  "audio/x-m4a",
+  "audio/aac",
+  "audio/mpeg",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/ogg",
+]);
+const MOMENT_AUDIO_MIN_DURATION_SECONDS = 1;
+const MOMENT_AUDIO_MAX_DURATION_SECONDS = 5 * 60;
+
+const normalizeMomentMimeType = (value?: string | null): string => (
+  (value ?? "").trim().toLowerCase().split(";")[0]?.trim() ?? ""
+);
+
 const mediaItem = z
   .object({
     type: z.enum(momentMediaTypes, {
@@ -88,6 +117,44 @@ const mediaItem = z
         path: ["type"],
         message: "Video files must be submitted as video media",
       });
+    }
+
+    // CRT-011: only validated when contentType is actually present — this
+    // stays additive/non-breaking for any existing record or caller that
+    // omits it, rather than newly requiring the field.
+    if (value.type === "image" && value.contentType
+      && !MOMENT_IMAGE_APPROVED_CONTENT_TYPES.has(normalizeMomentMimeType(value.contentType))) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["contentType"],
+        message: "Choose a JPEG, PNG, or WebP image",
+      });
+    }
+
+    if (value.type === "audio") {
+      if (value.contentType && !MOMENT_AUDIO_APPROVED_CONTENT_TYPES.has(normalizeMomentMimeType(value.contentType))) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["contentType"],
+          message: "Choose an M4A, AAC, MP3, WAV, or OGG file",
+        });
+      }
+
+      if (value.durationSeconds !== null) {
+        if (value.durationSeconds < MOMENT_AUDIO_MIN_DURATION_SECONDS) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["durationSeconds"],
+            message: "Audio must be at least 1 second",
+          });
+        } else if (value.durationSeconds > MOMENT_AUDIO_MAX_DURATION_SECONDS) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["durationSeconds"],
+            message: "Audio can be up to 5 minutes",
+          });
+        }
+      }
     }
   });
 
@@ -262,6 +329,10 @@ export const momentValidation = {
           })
           .max(10, "You cannot attach more than 10 media items")
           .default([]),
+        // CRT-012: optional, client-generated, opaque retry-idempotency key.
+        // Same format/limits as shareMoment's clientRequestId above so a
+        // stale/legacy client omitting it entirely is unaffected.
+        clientRequestId: z.string().trim().min(8).max(100).regex(/^[a-zA-Z0-9._:-]+$/).optional().nullable(),
       })
       .strict()
       .superRefine((value, ctx) => {

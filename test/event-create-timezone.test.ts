@@ -90,7 +90,7 @@ const baseEventDoc = () => ({
   status: "draft",
   name: "TZ Event",
   description: "desc",
-  bannerImageKey: null,
+  bannerImageKey: "events/banners/fixture-banner.jpg",
   bannerOriginalImageKey: null,
   bannerImageDisplay: null,
   ageRestriction: "all_ages",
@@ -122,6 +122,7 @@ const draftDto = (over: Partial<SaveEventDraftDto>): SaveEventDraftDto =>
   ({
     name: "TZ Event",
     description: "desc",
+    bannerImageKey: "events/banners/fixture-banner.jpg",
     categories: ["Live Music & Concerts"],
     ...over,
   }) as SaveEventDraftDto;
@@ -366,6 +367,7 @@ test("§12 publish resolves and converts identically to draft save", async () =>
     {
       name: "Published TZ Event",
       description: "desc",
+      bannerImageKey: "events/banners/fixture-banner.jpg",
       ageRestriction: "all_ages",
       categories: ["Live Music & Concerts"],
       scheduledAt: new Date("2026-09-20T13:00:00.000Z"),

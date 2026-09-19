@@ -235,6 +235,8 @@ export interface TicketWalletEvent {
   categories: EventCategory[];
   scheduledAt?: Date | null;
   endAt?: Date | null;
+  /** Additive (Batch 3C.2). IANA venue timezone for Event-local schedule display. */
+  timezone?: string | null;
   location?: {
     searchLabel?: string | null;
     venue?: string | null;

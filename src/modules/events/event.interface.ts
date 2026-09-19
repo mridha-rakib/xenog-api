@@ -690,13 +690,18 @@ export interface NowModeEventResponse extends EventResponse {
   nowStatus: NowEventStatus;
 }
 
-export type PostTagEventStatus = "live" | "active" | "upcoming";
+// "starting_soon" is additive (CRT-003): a distinct context for an upcoming
+// Event within STARTING_SOON_MS of its scheduled start. Existing values are
+// unchanged.
+export type PostTagEventStatus = "live" | "starting_soon" | "active" | "upcoming";
 
 export interface PostTagEventResponse {
   id: string;
   name: string;
   bannerImageUrl?: string | null;
   scheduledAt: Date;
+  /** Additive (Batch 3C.2). IANA venue timezone for Event-local schedule display. */
+  timezone?: string | null;
   location?: EventLocation | null;
   postTagStatus: PostTagEventStatus;
 }

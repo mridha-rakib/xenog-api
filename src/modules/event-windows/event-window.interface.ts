@@ -232,6 +232,8 @@ export interface ParticipatedEventSummary {
   bannerImageDisplay?: EventImageDisplay | null;
   scheduledAt?: Date | null;
   endAt?: Date | null;
+  /** Additive (Batch 3C.2). IANA venue timezone for Event-local schedule-date display. */
+  timezone?: string | null;
   status: string;
   participatedWindows: ParticipatedWindowSummary[];
   lastParticipatedAt: Date;

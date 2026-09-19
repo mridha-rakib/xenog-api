@@ -66,7 +66,7 @@ const createEvent = (overrides: Record<string, unknown> = {}) => ({
   status: "draft",
   name: "Draft Preview",
   description: "Preview copy",
-  bannerImageKey: null,
+  bannerImageKey: "events/banners/fixture-banner.jpg",
   bannerOriginalImageKey: null,
   bannerImageDisplay: null,
   ageRestriction: "all_ages",
@@ -186,7 +186,10 @@ test("saving a new event through draft API stores draft status", async () => {
     },
   });
 
-  const response = await service.saveDraft(owner as never, { name: "Draft Preview" } as never);
+  const response = await service.saveDraft(
+    owner as never,
+    { name: "Draft Preview", bannerImageKey: "events/banners/fixture-banner.jpg" } as never,
+  );
 
   assert.equal(createdPayload?.status, "draft");
   assert.equal(createdPayload?.userId, owner.id);

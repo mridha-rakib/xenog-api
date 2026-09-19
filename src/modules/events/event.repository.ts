@@ -1296,6 +1296,46 @@ export class EventRepository {
     }).sort({ scheduledAt: 1, _id: -1 });
   }
 
+  // CRT-003: Events the current user can tag through a proven foreign-access
+  // path (valid ticket, active shared ticket, private membership, accepted
+  // locked-event join). Access is established by the id source, so this applies
+  // only the lifecycle window — identical to findActiveAndUpcomingByUserId, but
+  // id-scoped and NOT restricted to already-started Events (upcoming/starting-
+  // soon ticketed Events are eligible). Draft/completed/cancelled are excluded
+  // by the status filter; expired/stale by the active-or-future window.
+  public async findPostTaggableByIds(eventIds: string[], activeSince: Date, now: Date): Promise<IEvent[]> {
+    if (eventIds.length === 0) {
+      return [];
+    }
+
+    return EventModel.find({
+      _id: { $in: eventIds },
+      status: { $in: ["published", "live"] },
+      $or: [
+        { endAt: { $gte: now } },
+        { endAt: null, scheduledAt: { $gte: activeSince } },
+        { endAt: { $exists: false }, scheduledAt: { $gte: activeSince } },
+      ],
+    }).sort({ scheduledAt: 1, _id: -1 });
+  }
+
+  // CRT-003: one bounded read for both private-membership and accepted
+  // locked-event join access. Pending/declined join requests are excluded.
+  // Read-only — never mutates joinRequests/memberUserIds.
+  public async findMemberOrAcceptedJoinEventIds(userId: string): Promise<string[]> {
+    const rows = await EventModel.find({
+      status: { $in: ["published", "live"] },
+      $or: [
+        { memberUserIds: userId },
+        { joinRequests: { $elemMatch: { userId, status: "accepted" } } },
+      ],
+    })
+      .select({ _id: 1 })
+      .lean();
+
+    return rows.map((row) => row._id.toString());
+  }
+
   public async findPublishedProfileEventsByUserId(
     userId: string,
     includePrivateEvents: boolean,

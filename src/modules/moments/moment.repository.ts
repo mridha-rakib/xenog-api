@@ -56,9 +56,17 @@ export class MomentRepository {
       eventCode: payload.eventCode ?? null,
       sourceStoryId: payload.sourceStoryId ?? null,
       sourceClientRequestId: payload.sourceClientRequestId ?? null,
+      clientRequestId: payload.clientRequestId ?? null,
       mediaItems: payload.mediaItems ?? [],
       ...(payload.location ? { location: payload.location } : {}),
     });
+  }
+
+  // CRT-012: scoped strictly to (userId, clientRequestId) — never a global
+  // lookup — so two different users can never dedupe against each other even
+  // if they happen to generate the same opaque id.
+  public async findByClientRequestIdForCreator(userId: string, clientRequestId: string): Promise<IMoment | null> {
+    return MomentModel.findOne({ userId, clientRequestId });
   }
 
   public async createStoryShare(payload: CreateMomentRecord & { sourceStoryId: string }): Promise<IMoment> {

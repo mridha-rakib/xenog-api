@@ -144,6 +144,26 @@ test("an accepted post in Window A includes Event A with Window A", async () => 
   assert.deepEqual(result.events[0]!.participatedWindows.map((w) => w.id), [windowA1Id.toString()]);
 });
 
+// Batch 3C.2 — the participated-events projection carries Event.timezone so the
+// app can render the Event schedule date in the venue's local calendar.
+test("participated-events projection propagates Event.timezone (and null when absent)", async () => {
+  const known = await createService({
+    posts: [createAcceptedPost(windowA1Id, eventAId, userId)],
+    windows: [createWindow(windowA1Id, eventAId)],
+    events: [createEvent(eventAId, { timezone: "America/New_York" })],
+  });
+  const knownResult = await known.listParticipatedEvents(user as never, { limit: 20 });
+  assert.equal(knownResult.events[0]!.timezone, "America/New_York");
+
+  const legacy = await createService({
+    posts: [createAcceptedPost(windowA1Id, eventAId, userId)],
+    windows: [createWindow(windowA1Id, eventAId)],
+    events: [createEvent(eventAId)], // no timezone
+  });
+  const legacyResult = await legacy.listParticipatedEvents(user as never, { limit: 20 });
+  assert.equal(legacyResult.events[0]!.timezone, null);
+});
+
 // 4 — ticket/check-in but no post never appears (canonical participation definition)
 test("owning a ticket or being checked in, without an accepted post, does not create participation — this endpoint never even sees that state", async () => {
   // The endpoint's only input signal is EventWindowPost — there is no ticket

@@ -30,6 +30,7 @@ const makeExistingEvent = (overrides: Partial<IEvent> = {}): IEvent =>
     status: "draft",
     name: "Existing Event",
     description: null,
+    bannerImageKey: "events/banners/fixture-banner.jpg",
     hashtags: [],
     categories: [],
     tickets: [],
@@ -118,6 +119,7 @@ test("saving a new draft derives hashtags from description and merges them with 
 
   await service.saveDraft(user, {
     description: "Join our #Music event in #Dhaka!",
+    bannerImageKey: "events/banners/fixture-banner.jpg",
     hashtags: ["concert"],
   });
 
@@ -137,6 +139,7 @@ test("duplicate hashtags (case-insensitive) collapse to one entry", async () => 
 
   await service.saveDraft(user, {
     description: "Big #music night",
+    bannerImageKey: "events/banners/fixture-banner.jpg",
     hashtags: ["music", "Music", "MUSIC"],
   });
 
@@ -206,8 +209,8 @@ test("publishing a draft without resending hashtags preserves the existing merge
     description: "desc #music",
     hashtags: ["music", "vip"],
     categories: ["Live Music & Concerts"],
-    scheduledAt: new Date("2026-09-01T18:00:00.000Z"),
-    endAt: new Date("2026-09-01T20:00:00.000Z"),
+    scheduledAt: new Date("2030-09-01T18:00:00.000Z"),
+    endAt: new Date("2030-09-01T20:00:00.000Z"),
     tickets: [],
   });
   let publishPayload: Record<string, unknown> | undefined;

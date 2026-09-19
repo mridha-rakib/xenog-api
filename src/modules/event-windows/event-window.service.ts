@@ -204,6 +204,7 @@ export class EventWindowService {
         bannerImageDisplay: event.bannerImageDisplay ?? null,
         scheduledAt: event.scheduledAt ?? null,
         endAt: event.endAt ?? null,
+        timezone: event.timezone ?? null,
         status: event.status,
         participatedWindows,
         lastParticipatedAt,

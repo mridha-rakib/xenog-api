@@ -82,6 +82,7 @@ import {
 import {
   ACTIVE_EVENT_WINDOW_MS,
   NOW_MODE_LOOKAHEAD_MS,
+  STARTING_SOON_MS,
   getNowStatus,
   isActiveSmartFeedEvent,
 } from "./event-temporal-status.js";
@@ -339,6 +340,7 @@ export class EventService {
   ): Promise<EventResponse> {
     const existingDraft = eventId ? await this.getDraftForUser(user, eventId) : null;
     const normalizedPayload = this.normalizeDraftPayload(payload, existingDraft);
+    this.assertPublishableBanner(this.getEffectiveBannerImageKey(existingDraft, normalizedPayload));
 
     if (eventId) {
       const draft = existingDraft!;
@@ -391,6 +393,7 @@ export class EventService {
   ): Promise<EventResponse> {
     const existingEvent = eventId ? await this.eventRepository.findByIdForUser(eventId, user.id) : null;
     const normalizedPayload = this.normalizePublishPayload(payload, existingEvent);
+    this.assertPublishableBanner(this.getEffectiveBannerImageKey(existingEvent, normalizedPayload));
 
     if (eventId) {
       if (existingEvent && existingEvent.status !== "draft") {
@@ -442,6 +445,10 @@ export class EventService {
         this.assertTicketAndRewardDatesFitEventSchedule(scheduleCandidate);
       }
 
+      // First-time publish of a draft — the same "new Event" rule as the
+      // brand-new (no eventId) branch below.
+      this.assertPublishableScheduleNotInPast(normalizedPayload.scheduledAt);
+
       const event = await this.eventRepository.publishDraftByIdForUser(
         eventId,
         user.id,
@@ -454,6 +461,10 @@ export class EventService {
 
       return this.toProfileMutatingResponse(event);
     }
+
+    // Brand-new Event, published directly with no prior draft — same "new
+    // Event start must not be in the past" rule.
+    this.assertPublishableScheduleNotInPast(normalizedPayload.scheduledAt);
 
     if (normalizedPayload.tickets.length > 0) {
       this.assertTicketCreationAvailable({
@@ -487,6 +498,7 @@ export class EventService {
     const existingEvent = await this.getModifiableEventForOwner(user, eventId);
     const normalizedPayload = this.normalizeDraftPayload(payload, existingEvent);
     this.assertPublishableCategories(this.getCategoryCandidate(existingEvent, normalizedPayload));
+    this.assertPublishableBanner(this.getEffectiveBannerImageKey(existingEvent, normalizedPayload));
     const scheduleCandidate = this.getEventScheduleCandidate(existingEvent, normalizedPayload);
     this.assertOngoingEventScheduleUpdateAllowed(existingEvent, normalizedPayload, scheduleCandidate);
     await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
@@ -1803,33 +1815,40 @@ export class EventService {
       this.eventRepository.findActiveAndUpcomingByUserId(user.id, activeSince, nowDate),
     ]);
 
-    // Private ticket-holder events remain available only when live or active.
-    const [paidEventIds, sharedEventIds] = await Promise.all([
+    // CRT-003: foreign access (not host, not public). Each id source proves the
+    // access class — valid ticket, active shared ticket, private membership, or
+    // an accepted locked-event join request — so the events themselves only
+    // need the shared published/live + active-or-upcoming lifecycle window
+    // (findPostTaggableByIds). These are eligible while upcoming/starting-soon
+    // too, not only once started.
+    const [paidEventIds, sharedEventIds, memberOrJoinEventIds] = await Promise.all([
       this.checkoutPaymentRepository.findPaidTicketEventIdsByUser(user.id),
       this.ticketShareRepository.findActiveEventIdsByRecipient(user.id),
+      this.eventRepository.findMemberOrAcceptedJoinEventIds(user.id),
     ]);
 
     const directlyAvailableEventIdSet = new Set(
       [...publicEvents, ...ownEvents].map((e) => e._id.toString()),
     );
-    const foreignTicketEventIds = [...new Set([...paidEventIds, ...sharedEventIds])].filter(
-      (id) => !directlyAvailableEventIdSet.has(id),
-    );
+    const foreignAccessEventIds = [
+      ...new Set([...paidEventIds, ...sharedEventIds, ...memberOrJoinEventIds]),
+    ].filter((id) => !directlyAvailableEventIdSet.has(id));
 
-    const ticketEvents = await this.eventRepository.findLiveActiveByIds(
-      foreignTicketEventIds,
+    const foreignAccessEvents = await this.eventRepository.findPostTaggableByIds(
+      foreignAccessEventIds,
       activeSince,
       nowDate,
     );
 
+    // Canonical dedupe identity is the Event id (an Event may qualify through
+    // several paths at once — host + ticket, ticket + membership, …).
     const eventById = new Map<string, IEvent>();
-    [...publicEvents, ...ownEvents, ...ticketEvents].forEach((event) => {
+    [...publicEvents, ...ownEvents, ...foreignAccessEvents].forEach((event) => {
       eventById.set(event._id.toString(), event);
     });
-    const allEvents = [...eventById.values()];
 
-    return Promise.all(
-      allEvents.map(async (event) => {
+    const rows = await Promise.all(
+      [...eventById.values()].map(async (event) => {
         const bannerImageUrl = event.bannerImageKey
           ? await this.storageService
               .createDownloadUrl(event.bannerImageKey)
@@ -1838,12 +1857,14 @@ export class EventService {
           : null;
 
         const scheduled = event.scheduledAt?.getTime() ?? null;
+        const ended = event.endAt?.getTime() ?? null;
         let postTagStatus: PostTagEventStatus;
 
-        const ended = event.endAt?.getTime() ?? null;
-
         if (scheduled === null || scheduled > now) {
-          postTagStatus = "upcoming";
+          // Additive split of the existing "upcoming" bucket: an imminent start
+          // (within the canonical STARTING_SOON_MS) is surfaced distinctly.
+          postTagStatus =
+            scheduled !== null && scheduled - now <= STARTING_SOON_MS ? "starting_soon" : "upcoming";
         } else if (ended ? ended >= now : now - scheduled <= NOW_MODE_LOOKAHEAD_MS) {
           postTagStatus = "live";
         } else {
@@ -1851,15 +1872,50 @@ export class EventService {
         }
 
         return {
-          id: event._id.toString(),
-          name: event.name ?? "",
-          bannerImageUrl,
-          scheduledAt: event.scheduledAt!,
-          location: event.location ?? null,
-          postTagStatus,
+          row: {
+            id: event._id.toString(),
+            name: event.name ?? "",
+            bannerImageUrl,
+            scheduledAt: event.scheduledAt!,
+            timezone: event.timezone ?? null,
+            location: event.location ?? null,
+            postTagStatus,
+          },
+          scheduledMs: scheduled,
         };
       }),
     );
+
+    // CRT-003: one deterministic global order across every eligible Event —
+    // Live, then Starting Soon, then Upcoming (soonest first), then Recent
+    // eligible ("active": started, still inside the 12h no-end window; most
+    // recent first). Source-collection order never controls the output.
+    const bucketRank: Record<PostTagEventStatus, number> = {
+      live: 0,
+      starting_soon: 1,
+      upcoming: 2,
+      active: 3,
+    };
+
+    return rows
+      .sort((left, right) => {
+        const rankDelta = bucketRank[left.row.postTagStatus] - bucketRank[right.row.postTagStatus];
+        if (rankDelta !== 0) {
+          return rankDelta;
+        }
+
+        const leftMs = left.scheduledMs ?? Number.POSITIVE_INFINITY;
+        const rightMs = right.scheduledMs ?? Number.POSITIVE_INFINITY;
+        if (leftMs !== rightMs) {
+          // Recent eligible surfaces most-recent first; every other bucket is
+          // soonest first.
+          return left.row.postTagStatus === "active" ? rightMs - leftMs : leftMs - rightMs;
+        }
+
+        // Final deterministic tie-break on the stable Event id.
+        return left.row.id < right.row.id ? -1 : left.row.id > right.row.id ? 1 : 0;
+      })
+      .map((entry) => entry.row);
   }
 
   public async getTicketAccess(user: AuthUser, eventId: string): Promise<TicketAccessResponse> {
@@ -3024,6 +3080,51 @@ export class EventService {
 
     if (new Set(categories).size !== categories.length) {
       throw new AppError("Categories must be unique", httpStatus.BAD_REQUEST);
+    }
+  }
+
+  // A banner is required on every saved Event (draft or published). The
+  // normalized payload only carries `bannerImageKey` when the request body
+  // actually included that field (see `normalizeDraftPayload`), so an
+  // `undefined` value here means "not part of this request" — preserve
+  // whatever the existing record already has. An explicit `null` means the
+  // client cleared the banner, which is only valid if a replacement isn't
+  // required to make this specific request effective-banner-less.
+  private getEffectiveBannerImageKey(
+    existingEvent: Pick<IEvent, "bannerImageKey"> | null | undefined,
+    normalizedPayload: Pick<SaveEventDraftDto, "bannerImageKey">,
+  ): string | null {
+    if (normalizedPayload.bannerImageKey !== undefined) {
+      return normalizedPayload.bannerImageKey;
+    }
+
+    return existingEvent?.bannerImageKey ?? null;
+  }
+
+  private assertPublishableBanner(bannerImageKey: string | null): void {
+    if (!bannerImageKey) {
+      throw new AppError("Add a banner image before saving this event.", httpStatus.BAD_REQUEST);
+    }
+  }
+
+  // A brand-new Event (first time it becomes "published") must not start in
+  // the past. `scheduledAt` here is always the normalized, post-timezone-
+  // conversion absolute UTC instant (never a raw local string), so this is a
+  // precise instant-vs-instant comparison — never a device-local wall-clock
+  // comparison. Deliberately NOT called for re-publishing/editing an
+  // already-published event (see publish()'s existingEvent.status !== "draft"
+  // branch) — an active event's historical start is legitimate and immutable
+  // (see assertOngoingEventScheduleUpdateAllowed), not a validation error.
+  private assertPublishableScheduleNotInPast(scheduledAt: Date | null | undefined): void {
+    if (!scheduledAt) {
+      return;
+    }
+
+    if (scheduledAt.getTime() < this.getServerNow().getTime()) {
+      throw new AppError(
+        "Event start date and time cannot be in the past.",
+        httpStatus.BAD_REQUEST,
+      );
     }
   }
 

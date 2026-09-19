@@ -30,6 +30,7 @@ const makeEvent = (name: string) => {
       categories: ["Food & Drinks", "Markets & Shopping", "Social Meetups"],
       scheduledAt: now,
       endAt: new Date("2026-07-09T12:00:00.000Z"),
+      timezone: "America/New_York",
       location: { venue: "Test Venue", address: "Test Address" },
       tickets: [{ id: ticketId, name: "Standard", type: "pay", price: 20, capacity: 100 }],
       rewards: [],
@@ -224,6 +225,8 @@ test("owned wallet event includes canonical categories and public going summary 
 
   assert.deepEqual(walletItem?.event.categories, ["Food & Drinks", "Markets & Shopping", "Social Meetups"]);
   assert.equal(walletItem?.event.category, "Food & Drinks");
+  // Batch 3C.2 — the narrow wallet Event projection carries Event.timezone.
+  assert.equal(walletItem?.event.timezone, "America/New_York");
   assert.equal(walletItem?.event.publicGoingSummary?.going, 2);
   assert.deepEqual(walletItem?.event.publicGoingSummary?.avatars, [{
     userId: viewerId.toString(),

@@ -3249,6 +3249,7 @@ export class CheckoutPaymentService {
             : [],
         scheduledAt: event.scheduledAt ?? null,
         endAt: event.endAt ?? null,
+        timezone: event.timezone ?? null,
         location: event.location
           ? {
               searchLabel: event.location.searchLabel ?? null,
@@ -3355,6 +3356,7 @@ export class CheckoutPaymentService {
             : [],
         scheduledAt: event.scheduledAt ?? null,
         endAt: event.endAt ?? null,
+        timezone: event.timezone ?? null,
         location: event.location
           ? {
               searchLabel: event.location.searchLabel ?? null,

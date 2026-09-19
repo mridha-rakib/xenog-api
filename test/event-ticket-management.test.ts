@@ -63,7 +63,7 @@ const createEvent = (overrides: Record<string, unknown> = {}) => ({
   status: "published",
   name: "Ticket Event",
   description: "Ticket event",
-  bannerImageKey: null,
+  bannerImageKey: "events/banners/fixture-banner.jpg",
   bannerOriginalImageKey: null,
   bannerImageDisplay: null,
   ageRestriction: "all_ages",
@@ -454,6 +454,75 @@ test("ongoing event update rejects submitted endAt at or before current time", a
     422,
   );
   assert.equal(updatePayload, null);
+});
+
+// EVT-009 regression: an active Event's venue/timezone change, with the
+// Start left conceptually untouched (no explicit scheduledAt/local-part
+// edit sent). applyEventTimeZone has no active-event special-casing — it
+// reinterprets the wall-clock in the new zone and recomputes the absolute
+// instant uniformly regardless of status — so a genuine zone change here
+// produces a normalized scheduledAt that differs from the persisted one,
+// and assertOngoingEventScheduleUpdateAllowed's mismatch check (the same
+// guard proven above) rejects it, exactly as it would reject any other
+// attempted start mutation. This proves the two mechanisms compose safely:
+// the immutability guard's `scheduledAt !== undefined` check catches a
+// timezone-driven reinterpretation just as it catches a direct edit.
+test("ongoing event update: a venue change that resolves to a DIFFERENT timezone is rejected (historical start stays immutable, not silently reinterpreted)", async () => {
+  let updatePayload: Record<string, unknown> | null = null;
+  const service = createService({
+    event: createEvent({
+      status: "live",
+      scheduledAt: eventStart, // 2026-07-20T19:00:00.000Z = 15:00 America/New_York (EDT)
+      endAt: eventEnd,
+      timezone: "America/New_York",
+      location: { venue: "NYC Venue", latitude: 40.7128, longitude: -74.006 },
+    }),
+    now: baseNow,
+    onUpdateEvent: (payload) => {
+      updatePayload = payload;
+    },
+  });
+
+  // Venue moves to Los Angeles (a different resolvable IANA zone). No
+  // scheduledAt / local wall-clock fields are sent — this is a location-only
+  // edit from the client's point of view.
+  await assertTicketError(
+    () => service.updateEvent(owner as never, eventId.toString(), {
+      categories: ["Live Music & Concerts"],
+      location: { venue: "LA Venue", latitude: 34.0522, longitude: -118.2437 },
+    } as never),
+    422,
+  );
+  assert.equal(updatePayload, null, "the repository must never be called — the persisted start must not be silently shifted");
+});
+
+// Same-zone venue change (no timezone shift at all) must remain a normal,
+// successful edit — proving the rejection above is specifically about the
+// zone actually changing, not about touching location on an active Event.
+test("ongoing event update: a venue change that resolves to the SAME timezone succeeds normally", async () => {
+  let updatePayload: Record<string, unknown> | null = null;
+  const service = createService({
+    event: createEvent({
+      status: "live",
+      scheduledAt: eventStart,
+      endAt: eventEnd,
+      timezone: "America/New_York",
+      location: { venue: "NYC Venue", latitude: 40.7128, longitude: -74.006 },
+    }),
+    now: baseNow,
+    onUpdateEvent: (payload) => {
+      updatePayload = payload;
+    },
+  });
+
+  // A different NYC-area venue, same resolved zone (America/New_York).
+  const response = await service.updateEvent(owner as never, eventId.toString(), {
+    categories: ["Live Music & Concerts"],
+    location: { venue: "Brooklyn Venue", latitude: 40.6782, longitude: -73.9442 },
+  } as never);
+
+  assert.equal(response.scheduledAt?.getTime(), eventStart.getTime());
+  assert.ok(updatePayload, "expected the repository to have been called for a safe same-zone edit");
 });
 
 for (const status of ["published", "live"] as const) {

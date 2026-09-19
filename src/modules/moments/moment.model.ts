@@ -226,6 +226,17 @@ const momentSchema = new Schema<IMoment>(
       maxlength: 120,
       default: null,
     },
+    // CRT-012: opaque client-generated id used to make POST /moments retry-safe
+    // (same logical submit attempt reuses the same id). Distinct from
+    // sourceClientRequestId above, which tags a Story-share's origin, not a
+    // retry of this endpoint. Uniqueness is scoped to (userId, clientRequestId)
+    // below, never global, so two different users can never collide.
+    clientRequestId: {
+      type: String,
+      trim: true,
+      maxlength: 100,
+      default: null,
+    },
     mediaItems: {
       type: [momentMediaItemSchema],
       default: [],
@@ -252,6 +263,13 @@ momentSchema.index({ userId: 1, isEventAnnouncement: 1, createdAt: -1 });
 momentSchema.index(
   { userId: 1, sourceStoryId: 1 },
   { unique: true, partialFilterExpression: { sourceStoryId: { $type: "objectId" } } },
+);
+// CRT-012: per-creator idempotency boundary for POST /moments retries. Partial
+// (not `sparse: true`) so it only ever indexes documents that actually have a
+// clientRequestId — legacy/omitted-id Moments are entirely untouched by it.
+momentSchema.index(
+  { userId: 1, clientRequestId: 1 },
+  { unique: true, partialFilterExpression: { clientRequestId: { $type: "string" } } },
 );
 
 export const MomentModel = model<IMoment>("Moment", momentSchema);

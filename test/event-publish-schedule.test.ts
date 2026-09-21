@@ -337,6 +337,232 @@ test("active Event (already started) end-time-only edit via publish() is not bro
   assert.equal((updatePayload as unknown as { endAt: Date } | null)?.endAt?.getTime(), activeEndExtended.getTime());
 });
 
+// ── EVT-009 fix: publish()'s already-published-event branch previously
+// trusted the client entirely for Start immutability — it now calls the same
+// assertOngoingEventScheduleUpdateAllowed guard that updateEvent() already
+// used (see event-ticket-management.test.ts for the guard's own unit tests).
+// These tests exercise that guard through the actual production edit path. ──
+
+test("active Event (already started): a direct Start mutation via publish() is rejected", async () => {
+  const activeStart = new Date("2026-09-15T11:00:00.000Z"); // 1h before NOW
+  const activeEnd = new Date("2026-09-15T13:00:00.000Z"); // 1h after NOW
+
+  let updatePayload: Record<string, unknown> | null = null;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () =>
+        createEventFixture({ status: "published", scheduledAt: activeStart, endAt: activeEnd }),
+      updateByIdForUser: async (_id: string, _userId: string, payload: Record<string, unknown>) => {
+        updatePayload = payload;
+        return { ...createEventFixture({ status: "published" }), ...payload };
+      },
+    },
+  });
+
+  await assert.rejects(
+    service.publish(
+      owner,
+      publishBasePayload({
+        scheduledAt: new Date(activeStart.getTime() + 15 * 60 * 1000), // moved 15m later
+        endAt: activeEnd,
+      }) as never,
+      eventId.toString(),
+    ),
+    (error: unknown) => {
+      assert.equal((error as { statusCode?: number }).statusCode, 422);
+      assert.match((error as { message?: string }).message ?? "", /cannot be changed/i);
+      return true;
+    },
+  );
+  assert.equal(updatePayload, null, "the repository must never be called — the persisted start must not be silently shifted");
+});
+
+test("active Event: a Start Date-only mutation (local date changes, time unchanged) via publish() is rejected", async () => {
+  const activeStart = new Date("2026-09-15T11:00:00.000Z");
+  const activeEnd = new Date("2026-09-15T13:00:00.000Z");
+
+  let updatePayload: Record<string, unknown> | null = null;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () =>
+        createEventFixture({ status: "published", scheduledAt: activeStart, endAt: activeEnd, timezone: null }),
+      updateByIdForUser: async (_id: string, _userId: string, payload: Record<string, unknown>) => {
+        updatePayload = payload;
+        return { ...createEventFixture({ status: "published" }), ...payload };
+      },
+    },
+  });
+
+  await assert.rejects(
+    service.publish(
+      owner,
+      publishBasePayload({
+        scheduledAt: new Date("2026-09-16T11:00:00.000Z"), // same time, date shifted by 1 day
+        endAt: activeEnd,
+      }) as never,
+      eventId.toString(),
+    ),
+    (error: unknown) => {
+      assert.equal((error as { statusCode?: number }).statusCode, 422);
+      return true;
+    },
+  );
+  assert.equal(updatePayload, null);
+});
+
+test("active Event: a Start Time-only mutation (local time changes, date unchanged) via publish() is rejected", async () => {
+  const activeStart = new Date("2026-09-15T11:00:00.000Z");
+  const activeEnd = new Date("2026-09-15T13:00:00.000Z");
+
+  let updatePayload: Record<string, unknown> | null = null;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () =>
+        createEventFixture({ status: "published", scheduledAt: activeStart, endAt: activeEnd, timezone: null }),
+      updateByIdForUser: async (_id: string, _userId: string, payload: Record<string, unknown>) => {
+        updatePayload = payload;
+        return { ...createEventFixture({ status: "published" }), ...payload };
+      },
+    },
+  });
+
+  await assert.rejects(
+    service.publish(
+      owner,
+      publishBasePayload({
+        scheduledAt: new Date("2026-09-15T11:45:00.000Z"), // same date, time shifted 45m
+        endAt: activeEnd,
+      }) as never,
+      eventId.toString(),
+    ),
+    (error: unknown) => {
+      assert.equal((error as { statusCode?: number }).statusCode, 422);
+      return true;
+    },
+  );
+  assert.equal(updatePayload, null);
+});
+
+test("active Event: a venue/timezone change that would reinterpret the historical Start is rejected via publish()", async () => {
+  const activeStart = new Date("2026-09-15T11:00:00.000Z"); // 07:00 America/New_York (EDT)
+  const activeEnd = new Date("2026-09-15T13:00:00.000Z");
+
+  let updatePayload: Record<string, unknown> | null = null;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () =>
+        createEventFixture({
+          status: "published",
+          scheduledAt: activeStart,
+          endAt: activeEnd,
+          timezone: "America/New_York",
+          location: { venue: "NYC Venue", latitude: 40.7128, longitude: -74.006 },
+        }),
+      updateByIdForUser: async (_id: string, _userId: string, payload: Record<string, unknown>) => {
+        updatePayload = payload;
+        return { ...createEventFixture({ status: "published" }), ...payload };
+      },
+    },
+  });
+
+  // publish()'s DTO always carries an explicit scheduledAt (unlike
+  // updateEvent(), where it's optional), so a client that leaves the
+  // wall-clock fields showing the SAME local time (07:00, unchanged in the
+  // form) but moves the venue to a different zone reproduces the real
+  // reinterpretation risk: applyEventTimeZone's branch (1) converts that
+  // unchanged local wall-clock time using the NEW zone, producing a
+  // different absolute instant than the persisted Start.
+  await assert.rejects(
+    service.publish(
+      owner,
+      publishBasePayload({
+        scheduledAt: activeStart, // device-naive placeholder, superseded by local parts below
+        endAt: activeEnd,
+        scheduledLocalDate: "2026-09-15",
+        scheduledLocalTime: "07:00", // unchanged local wall-clock (was 07:00 America/New_York = activeStart)
+        endLocalDate: "2026-09-15",
+        endLocalTime: "09:00", // unchanged local wall-clock (was 09:00 America/New_York = activeEnd)
+        location: { venue: "LA Venue", latitude: 34.0522, longitude: -118.2437 },
+      }) as never,
+      eventId.toString(),
+    ),
+    (error: unknown) => {
+      assert.equal((error as { statusCode?: number }).statusCode, 422);
+      return true;
+    },
+  );
+  assert.equal(updatePayload, null, "the repository must never be called — the persisted start must not be silently shifted");
+});
+
+test("active Event: safely shortening End (still future) via publish() succeeds", async () => {
+  const activeStart = new Date("2026-09-15T11:00:00.000Z");
+  const activeEndOriginal = new Date("2026-09-15T18:00:00.000Z");
+  const activeEndShortened = new Date("2026-09-15T13:00:00.000Z"); // still 1h after NOW (12:00Z), well clear of the ticket-creation cutoff
+
+  let updatePayload: Record<string, unknown> | null = null;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () =>
+        createEventFixture({ status: "published", scheduledAt: activeStart, endAt: activeEndOriginal }),
+      updateByIdForUser: async (_id: string, _userId: string, payload: Record<string, unknown>) => {
+        updatePayload = payload;
+        return { ...createEventFixture({ status: "published" }), ...payload };
+      },
+    },
+  });
+
+  const event = await service.publish(
+    owner,
+    publishBasePayload({ scheduledAt: activeStart, endAt: activeEndShortened }) as never,
+    eventId.toString(),
+  );
+
+  assert.equal(event.status, "published");
+  assert.equal((updatePayload as unknown as { endAt: Date } | null)?.endAt?.getTime(), activeEndShortened.getTime());
+});
+
+test("active Event: setting End to a time at/before now via publish() is rejected", async () => {
+  const activeStart = new Date("2026-09-15T11:00:00.000Z");
+  const activeEndOriginal = new Date("2026-09-15T18:00:00.000Z");
+
+  let updatePayload: Record<string, unknown> | null = null;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () =>
+        createEventFixture({ status: "published", scheduledAt: activeStart, endAt: activeEndOriginal }),
+      updateByIdForUser: async (_id: string, _userId: string, payload: Record<string, unknown>) => {
+        updatePayload = payload;
+        return { ...createEventFixture({ status: "published" }), ...payload };
+      },
+    },
+  });
+
+  await assert.rejects(
+    service.publish(
+      owner,
+      publishBasePayload({ scheduledAt: activeStart, endAt: NOW }) as never,
+      eventId.toString(),
+    ),
+    (error: unknown) => {
+      assert.equal((error as { statusCode?: number }).statusCode, 422);
+      assert.match((error as { message?: string }).message ?? "", /must remain in the future/i);
+      return true;
+    },
+  );
+  assert.equal(updatePayload, null);
+});
+
+test("active Event: End <= Start is still rejected by the publish schema when editing via publish()", async () => {
+  const { eventValidation } = await import("../src/modules/events/event.validation.js");
+  const activeStart = new Date("2026-09-15T11:00:00.000Z");
+
+  const result = eventValidation.publish.safeParse({
+    body: publishBasePayload({ scheduledAt: activeStart, endAt: activeStart }),
+  });
+
+  assert.equal(result.success, false);
+});
+
 // ── 9: the comparison is instant-vs-instant (UTC), never a device-local
 // string comparison — proven by driving the check through venue-local wall-
 // clock -> resolved-timezone conversion rather than passing a raw Date. ────

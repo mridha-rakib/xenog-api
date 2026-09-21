@@ -1348,6 +1348,7 @@ export class CheckoutPaymentService {
       holderUserId,
       holderName: holder?.name ?? "Attendee",
       usedAt: usage.usedAt,
+      ageRestriction: event.ageRestriction ?? null,
     };
   }
 

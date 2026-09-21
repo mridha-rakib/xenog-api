@@ -20,6 +20,7 @@ const ticketId = z.string().trim().min(1, "Ticket ID is required").max(80, "Tick
 const eventMediaId = z.string().trim().min(1, "Media ID is required").max(80, "Media ID cannot exceed 80 characters");
 const TICKET_SALES_END_DATE_AFTER_EVENT_END_MESSAGE = "Ticket sales end date must be before the event end date.";
 const TICKET_SALES_END_TIME_NOT_BEFORE_EVENT_END_MESSAGE = "Ticket sales end time must be before the event end time.";
+const TICKET_PAID_PRICE_REQUIRED_MESSAGE = "Paid tickets must have a price greater than $0.";
 export const MAX_EVENT_FILTER_RADIUS_KM = 200 * 1.609344;
 
 const optionalText = (label: string, maxLength: number) =>
@@ -306,6 +307,15 @@ const eventTicketShape = {
 const eventTicket = z
   .object(eventTicketShape)
   .strict()
+  .superRefine((ticket, ctx) => {
+    if (ticket.type === "pay" && !(ticket.price > 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: TICKET_PAID_PRICE_REQUIRED_MESSAGE,
+        path: ["price"],
+      });
+    }
+  })
   .transform((ticket) => ({
     ...ticket,
     price: ticket.type === "free" ? 0 : ticket.price,
@@ -323,6 +333,20 @@ const updateEventTicket = z
   .strict()
   .refine((ticket) => Object.values(ticket).some((value) => value !== undefined), {
     message: "At least one ticket field is required",
+  })
+  // Only the self-contained case (both type and price present in the same
+  // partial payload) can be judged here. Whether an omitted price/type makes
+  // the *merged* ticket invalid depends on the existing ticket's state, which
+  // this schema cannot see — that ambiguous case is enforced authoritatively
+  // in EventService after it merges the payload with the existing ticket.
+  .superRefine((ticket, ctx) => {
+    if (ticket.type === "pay" && ticket.price !== undefined && !(ticket.price > 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: TICKET_PAID_PRICE_REQUIRED_MESSAGE,
+        path: ["price"],
+      });
+    }
   })
   .transform((ticket) => ({
     ...ticket,
@@ -527,9 +551,19 @@ const validateTicketSalesEndDates = (
   });
 };
 
-const draftPatchBody = draftBodyBase.superRefine(validateEventDateRange);
+// EVT-013 defense-in-depth: the same salesEndAt-vs-endAt rule already
+// enforced authoritatively in EventService (assertTicketDatesFitEventSchedule,
+// reached from every save/publish path) is also checked here at the Zod
+// boundary for Save Draft / Update Draft. validateTicketSalesEndDates only
+// runs when both event.endAt and a non-empty event.tickets array are present
+// in the SAME request body, so a partial draft save that omits one or the
+// other (e.g. an unrelated field edit that doesn't resend tickets) is
+// unaffected — this never replaces the service-layer check, which is the
+// only place that can see a ticket omitted from the current payload but
+// already persisted on the event.
+const draftPatchBody = draftBodyBase.superRefine(validateEventDateRange).superRefine(validateTicketSalesEndDates);
 
-const draftBody = draftBodyBase.superRefine(validateEventDateRange);
+const draftBody = draftBodyBase.superRefine(validateEventDateRange).superRefine(validateTicketSalesEndDates);
 
 const publishBody = draftBodyBase.extend({
   name: z.string().trim().min(1, "Event name is required").max(160),

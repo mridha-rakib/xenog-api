@@ -407,6 +407,11 @@ export interface ScanTicketResponse {
   holderUserId: string;
   holderName: string;
   usedAt: Date;
+  // EVT-010: the Event's admission age restriction, surfaced so the host can
+  // make an informed admission decision at check-in. Reused directly from the
+  // Event relation already loaded for this scan — not a verified/enforced
+  // state, and never implies the attendee's age has been checked.
+  ageRestriction: string | null;
 }
 
 export type EventTicketStatFilter = "going" | "attended" | "canceled" | "noShow";

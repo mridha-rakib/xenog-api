@@ -158,6 +158,7 @@ const TICKET_CREATION_CUTOFF_MESSAGE = "New tickets can’t be created within 30
 const TICKET_PRICE_EDIT_CUTOFF_MESSAGE = "Ticket price can’t be changed within 30 minutes of the event end time.";
 const TICKET_SALES_END_DATE_AFTER_EVENT_END_MESSAGE = "Ticket sales end date must be before the event end date.";
 const TICKET_SALES_END_TIME_NOT_BEFORE_EVENT_END_MESSAGE = "Ticket sales end time must be before the event end time.";
+const TICKET_PAID_PRICE_REQUIRED_MESSAGE = "Paid tickets must have a price greater than $0.";
 const REWARD_END_DATE_AFTER_TICKET_SALES_END_MESSAGE =
   "Reward end date cannot be after the ticket sales end date.";
 const REWARD_END_TIME_AFTER_TICKET_SALES_END_MESSAGE =
@@ -179,7 +180,8 @@ type TicketValidationCode =
   | "TICKET_CREATION_CUTOFF"
   | "TICKET_PRICE_EDIT_CUTOFF"
   | "TICKET_SALES_END_DATE_AFTER_EVENT_END"
-  | "TICKET_SALES_END_TIME_NOT_BEFORE_EVENT_END";
+  | "TICKET_SALES_END_TIME_NOT_BEFORE_EVENT_END"
+  | "TICKET_PAID_PRICE_MUST_BE_POSITIVE";
 
 type TicketValidationField = "endAt" | "salesEndAt" | "price";
 
@@ -406,6 +408,7 @@ export class EventService {
 
         await this.assertPostingWindowsFitSchedule(existingEvent, normalizedPayload);
         const scheduleCandidate = this.getEventScheduleCandidate(existingEvent, normalizedPayload);
+        this.assertOngoingEventScheduleUpdateAllowed(existingEvent, normalizedPayload, scheduleCandidate);
         this.assertEndAtChangeDoesNotEnterTicketCreationCutoff(existingEvent, normalizedPayload);
         this.assertBulkTicketMutationsRespectCutoffs(existingEvent, scheduleCandidate.tickets, scheduleCandidate.endAt);
         this.assertTicketAndRewardDatesFitEventSchedule(scheduleCandidate);
@@ -708,6 +711,7 @@ export class EventService {
       ...this.normalizeTicket(payload),
       availableCount: payload.capacity,
     };
+    this.assertTicketPriceValid(ticket);
     this.assertTicketDatesFitEventSchedule(event, [ticket]);
     const updatedEvent = await this.eventRepository.addTicketToEvent(eventId, user.id, ticket);
 
@@ -760,6 +764,7 @@ export class EventService {
       type: payload.type ?? existingTicket.type,
     });
     this.assertTicketPriceChangeAvailable(event, existingTicket, merged);
+    this.assertTicketPriceValid(merged);
     this.assertTicketDatesFitEventSchedule(event, [merged]);
 
     const updatedEvent = await this.eventRepository.updateTicketFields(eventId, user.id, ticketId, {
@@ -820,6 +825,7 @@ export class EventService {
     const event = await this.getDraftForUser(user, eventId);
     this.assertTicketCreationAvailable(event);
     const ticket = this.normalizeTicket(payload);
+    this.assertTicketPriceValid(ticket);
     this.assertTicketDatesFitEventSchedule(event, [ticket]);
     const updatedEvent = await this.eventRepository.updateDraftByIdForUser(eventId, user.id, {
       tickets: [...event.tickets.map((item) => this.normalizeTicket(item)), ticket],
@@ -867,6 +873,7 @@ export class EventService {
     }
     if (existingTicket && mergedTicket) {
       this.assertTicketPriceChangeAvailable(event, existingTicket, mergedTicket);
+      this.assertTicketPriceValid(mergedTicket);
     }
     this.assertTicketDatesFitEventSchedule(event, tickets);
 
@@ -3113,8 +3120,9 @@ export class EventService {
   // precise instant-vs-instant comparison — never a device-local wall-clock
   // comparison. Deliberately NOT called for re-publishing/editing an
   // already-published event (see publish()'s existingEvent.status !== "draft"
-  // branch) — an active event's historical start is legitimate and immutable
-  // (see assertOngoingEventScheduleUpdateAllowed), not a validation error.
+  // branch) — an active event's historical start is legitimate, and is
+  // instead protected from mutation by assertOngoingEventScheduleUpdateAllowed,
+  // which that branch calls directly.
   private assertPublishableScheduleNotInPast(scheduledAt: Date | null | undefined): void {
     if (!scheduledAt) {
       return;
@@ -3160,6 +3168,7 @@ export class EventService {
       location: draftPayload.location ?? {},
       tickets: payload.tickets.map((ticket) => {
         const normalized = this.normalizeTicket(ticket);
+        this.assertTicketPriceValid(normalized);
         // On first publish, every ticket starts fully available.
         return { ...normalized, availableCount: normalized.capacity };
       }),
@@ -3699,6 +3708,25 @@ export class EventService {
   private assertTicketCreationAvailable(event: { status?: string | null; endAt?: Date | null }): void {
     this.assertTicketManagementStatus(event.status);
     this.assertTicketCreationWindowOpen(event);
+  }
+
+  // Authoritative backend floor for paid tickets, independent of the Zod
+  // schema layer. Called wherever a ticket's *effective* type/price is known
+  // (i.e. after merging a partial update with its existing ticket), so it
+  // correctly rejects "pay" tickets left at price 0 whether that came from an
+  // explicit price:0 or from omitting price while switching type to "pay".
+  private assertTicketPriceValid(ticket: Pick<EventTicket, "type" | "price">): void {
+    if (ticket.type === "pay" && !(ticket.price > 0)) {
+      throw new AppError(
+        TICKET_PAID_PRICE_REQUIRED_MESSAGE,
+        httpStatus.UNPROCESSABLE_ENTITY,
+        this.getTicketValidationDetails(
+          "TICKET_PAID_PRICE_MUST_BE_POSITIVE",
+          "price",
+          TICKET_PAID_PRICE_REQUIRED_MESSAGE,
+        ),
+      );
+    }
   }
 
   private assertTicketPriceChangeAvailable(

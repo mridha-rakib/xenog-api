@@ -768,6 +768,19 @@ export const eventValidation = {
     }),
     body: updateEventTicket,
   }),
+  // EVT-014 reorder: IDs only, never a mutable ticket payload — the service
+  // rejects anything but an exact permutation of the event's current ticket
+  // ID set (see EventService.getReorderedTickets).
+  reorderEventTickets: z.object({
+    params: z.object({
+      id: objectId,
+    }),
+    body: z
+      .object({
+        ticketIds: z.array(ticketId).min(1, "At least one ticket ID is required").max(100),
+      })
+      .strict(),
+  }),
   createDraftTicket: z.object({
     params: z.object({
       id: objectId,

@@ -2122,6 +2122,22 @@ export class EventRepository {
     );
   }
 
+  /**
+   * Persists a new ARRAY ORDER only. `tickets` must be the event's own
+   * existing ticket objects (see EventService.getReorderedTickets, which
+   * builds this array by looking up each submitted ID against the currently
+   * persisted tickets) — never client-reconstructed objects — so every
+   * field (capacity, availableCount, price, salesEndAt, ...) is carried
+   * through byte-for-byte and only the position in the array changes.
+   */
+  public async reorderTickets(eventId: string, userId: string, tickets: EventTicket[]): Promise<IEvent | null> {
+    return EventModel.findOneAndUpdate(
+      { _id: eventId, userId },
+      { $set: { tickets } },
+      { new: true, runValidators: true },
+    );
+  }
+
   private toUpdate(payload: SaveEventDraftDto): UpdateQuery<IEvent> {
     const update: UpdateQuery<IEvent> = {};
 

@@ -60,6 +60,13 @@ router.get("/hashtags/:hashtag", validate(eventValidation.hashtagEvents), catchA
 router.get("/profile/:userId", validate(eventValidation.profileEvents), catchAsync(controller.listProfileEvents));
 router.get("/:id/tickets/:ticketId", validate(eventValidation.eventTicketParams), catchAsync(controller.getEventTicket));
 router.post("/:id/tickets", validate(eventValidation.createEventTicket), catchAsync(controller.createEventTicket));
+// Must stay registered before the "/:id/tickets/:ticketId" PATCH route below
+// so the literal "reorder" segment is matched here, not treated as a ticketId.
+router.patch(
+  "/:id/tickets/reorder",
+  validate(eventValidation.reorderEventTickets),
+  catchAsync(controller.reorderEventTickets),
+);
 router.patch(
   "/:id/tickets/:ticketId",
   validate(eventValidation.updateEventTicket),

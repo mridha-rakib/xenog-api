@@ -783,6 +783,49 @@ export class EventService {
     return this.toProfileMutatingResponse(updatedEvent);
   }
 
+  // EVT-014 reorder: array position only. `ticketIds` must be an exact
+  // permutation of the event's CURRENT ticket ID set — every existing ticket
+  // object (capacity, availableCount, price, salesEndAt, sold/ownership
+  // relationships tracked elsewhere by ticket id, etc.) is carried through
+  // unchanged; nothing here reconstructs or mutates a ticket's fields.
+  public async reorderEventTickets(
+    user: AuthUser,
+    eventId: string,
+    ticketIds: string[],
+  ): Promise<EventResponse> {
+    const event = await this.getEventForTicketOwner(user, eventId);
+    const orderedTickets = this.getReorderedTickets(event.tickets, ticketIds);
+    const updatedEvent = await this.eventRepository.reorderTickets(eventId, user.id, orderedTickets);
+
+    if (!updatedEvent) {
+      throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+    }
+
+    return this.toProfileMutatingResponse(updatedEvent);
+  }
+
+  private getReorderedTickets(tickets: EventTicket[], ticketIds: string[]): EventTicket[] {
+    const existingIds = tickets.map((ticket) => ticket.id);
+    const existingIdSet = new Set(existingIds);
+    const submittedIdSet = new Set(ticketIds);
+
+    const hasDuplicateSubmittedId = submittedIdSet.size !== ticketIds.length;
+    const hasUnknownId = ticketIds.some((id) => !existingIdSet.has(id));
+    const isMissingAnExistingId = existingIds.some((id) => !submittedIdSet.has(id));
+    const isSameSize = ticketIds.length === existingIds.length;
+
+    if (hasDuplicateSubmittedId || hasUnknownId || isMissingAnExistingId || !isSameSize) {
+      throw new AppError(
+        "The ticket order must contain exactly the event's current ticket tiers, with no duplicate, missing, or unknown tickets.",
+        httpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    const ticketsById = new Map(tickets.map((ticket) => [ticket.id, ticket]));
+
+    return ticketIds.map((id) => ticketsById.get(id)!);
+  }
+
   public async deleteEventTicket(
     user: AuthUser,
     eventId: string,

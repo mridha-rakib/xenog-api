@@ -19,14 +19,17 @@ process.env.JWT_ACCESS_SECRET =
 // and event-ticket-integrity.test.ts) remains the authoritative check and is
 // unchanged by this file.
 
-const FUTURE = new Date("2026-09-20T18:00:00.000Z");
-const FUTURE_PLUS_2H = new Date("2026-09-20T20:00:00.000Z");
-const FUTURE_PLUS_1H = new Date("2026-09-20T19:00:00.000Z");
+// Deliberately far in the future (not "next week" relative to whenever this
+// suite happens to run) so this file never goes flaky purely from calendar
+// time passing, the way a near-term fixed date would.
+const FUTURE = new Date("2030-09-20T18:00:00.000Z");
+const FUTURE_PLUS_2H = new Date("2030-09-20T20:00:00.000Z");
+const FUTURE_PLUS_1H = new Date("2030-09-20T19:00:00.000Z");
 const eventId = new Types.ObjectId().toString();
 
 const validTicket = (overrides: Record<string, unknown> = {}) => ({
   name: "General",
-  salesEndAt: new Date("2026-09-20T19:30:00.000Z"), // before FUTURE_PLUS_2H (endAt)
+  salesEndAt: new Date("2030-09-20T19:30:00.000Z"), // before FUTURE_PLUS_2H (endAt)
   type: "free",
   capacity: 10,
   ...overrides,
@@ -68,7 +71,7 @@ test("draft create: salesEndAt after endAt is rejected", async () => {
 
   const result = eventValidation.saveDraft.safeParse({
     body: draftBasePayload({
-      tickets: [validTicket({ salesEndAt: new Date("2026-09-21T00:00:00.000Z") })],
+      tickets: [validTicket({ salesEndAt: new Date("2030-09-21T00:00:00.000Z") })],
     }),
   });
 

@@ -499,6 +499,9 @@ export interface SaveEventDraftDto {
 
 export type CreateEventTicketDto = EventTicketInput;
 export type UpdateEventTicketDto = Partial<Omit<EventTicketInput, "id">>;
+// EVT-014 reorder: IDs only — never a mutable ticket payload, so this can
+// never carry price/capacity/availableCount/etc. through the reorder path.
+export type ReorderEventTicketsDto = { ticketIds: string[] };
 export type CreateEventRewardDto = EventRewardInput;
 export type UpdateEventRewardDto = Partial<Omit<EventRewardInput, "id">>;
 

@@ -14,6 +14,7 @@ import type {
   EventMapQuery,
   NowModeQuery,
   PublishEventDto,
+  ReorderEventTicketsDto,
   SaveEventDraftDto,
   UpdateEventRewardDto,
   UpdateEventTicketDto,
@@ -162,6 +163,22 @@ export class EventController {
 
     ApiResponse.success(res, {
       message: "Event ticket updated",
+      data: {
+        event,
+      },
+    });
+  };
+
+  public reorderEventTickets = async (req: Request, res: Response): Promise<void> => {
+    const { ticketIds } = req.body as ReorderEventTicketsDto;
+    const event = await this.eventService.reorderEventTickets(
+      req.authUser as AuthUser,
+      req.params.id as string,
+      ticketIds,
+    );
+
+    ApiResponse.success(res, {
+      message: "Event tickets reordered",
       data: {
         event,
       },

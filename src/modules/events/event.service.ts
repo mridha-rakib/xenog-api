@@ -459,6 +459,16 @@ export class EventService {
       );
 
       if (!event) {
+        // The repository claims the draft -> published transition atomically.
+        // A competing request can therefore lose only after it read the draft
+        // above. Re-read the owner's Event and reconcile that losing request
+        // with the authoritative publication; never re-run its payload as a
+        // published edit from this branch.
+        const publishedEvent = await this.eventRepository.findByIdForUser(eventId, user.id);
+        if (publishedEvent?.status === "published") {
+          return this.toProfileMutatingResponse(publishedEvent);
+        }
+
         throw new AppError("Event draft not found.", httpStatus.NOT_FOUND);
       }
 

@@ -1089,6 +1089,134 @@ test("owner can publish a draft without creating a duplicate event", async () =>
   assert.equal(createCalled, false);
 });
 
+test("concurrent draft publishes have one atomic first-publication winner and reconcile the loser", async () => {
+  const ticket = createTicket({ capacity: 100, availableCount: null });
+  let persisted = createEvent({ tickets: [ticket] });
+  let firstPublishTransitions = 0;
+  let publishAttempts = 0;
+
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () => persisted,
+      publishDraftByIdForUser: async (_requestedEventId: string, _requestedUserId: string, payload: Record<string, unknown>) => {
+        publishAttempts += 1;
+        if (persisted.status !== "draft") {
+          return null;
+        }
+
+        firstPublishTransitions += 1;
+        persisted = createEvent({
+          status: "published",
+          publishedAt: now,
+          tickets: payload.tickets,
+          rewards: persisted.rewards,
+          privacy: payload.privacy,
+        });
+        return persisted;
+      },
+      create: async () => {
+        throw new Error("concurrent draft publishes must not create a second Event");
+      },
+    },
+  });
+  const payload = {
+    name: "Draft Preview",
+    ageRestriction: "all_ages",
+    category: "Live Music & Concerts",
+    categories: ["Live Music & Concerts"],
+    scheduledAt: now,
+    endAt: new Date("2026-07-15T12:00:00.000Z"),
+    privacy: "locked",
+    tickets: [ticket],
+  };
+
+  const [first, second] = await Promise.all([
+    service.publish(owner as never, payload as never, eventId.toString()),
+    service.publish(owner as never, payload as never, eventId.toString()),
+  ]);
+
+  assert.equal(firstPublishTransitions, 1);
+  assert.equal(publishAttempts, 2);
+  assert.equal(first.id, eventId.toString());
+  assert.equal(second.id, eventId.toString());
+  assert.equal(first.privacy, "locked");
+  assert.equal(second.privacy, "locked");
+  assert.deepEqual(first.tickets.map((item) => item.id), ["ticket-1"]);
+  assert.deepEqual(second.tickets.map((item) => item.id), ["ticket-1"]);
+  assert.equal(first.tickets[0]?.availableCount, 100);
+  assert.equal(second.tickets[0]?.availableCount, 100);
+});
+
+test("repository first-publish claim is an atomic owner-and-draft conditional update", async () => {
+  const originalFindOneAndUpdate = EventModel.findOneAndUpdate.bind(EventModel);
+  let capturedFilter: Record<string, unknown> | null = null;
+  let capturedUpdate: Record<string, unknown> | null = null;
+  EventModel.findOneAndUpdate = ((filter: Record<string, unknown>, update: Record<string, unknown>) => {
+    capturedFilter = filter;
+    capturedUpdate = update;
+    return Promise.resolve(createEvent({ status: "published", publishedAt: now }));
+  }) as typeof EventModel.findOneAndUpdate;
+
+  try {
+    await new EventRepository().publishDraftByIdForUser(
+      eventId.toString(),
+      owner.id,
+      { name: "Published name", privacy: "private" } as never,
+    );
+
+    assert.deepEqual(capturedFilter, { _id: eventId.toString(), userId: owner.id, status: "draft" });
+    assert.equal(capturedUpdate?.status, "published");
+    assert.ok(capturedUpdate?.publishedAt instanceof Date);
+    assert.equal(capturedUpdate?.name, "Published name");
+    assert.equal(capturedUpdate?.privacy, "private");
+  } finally {
+    EventModel.findOneAndUpdate = originalFindOneAndUpdate as typeof EventModel.findOneAndUpdate;
+  }
+});
+
+test("timeout retry follows the published-edit path without reinitializing inventory or first publication", async () => {
+  const ticket = createTicket({ capacity: 100, availableCount: null });
+  let persisted = createEvent({ tickets: [ticket] });
+  let firstPublishTransitions = 0;
+  let publishedUpdateCalls = 0;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () => persisted,
+      publishDraftByIdForUser: async (_requestedEventId: string, _requestedUserId: string, payload: Record<string, unknown>) => {
+        firstPublishTransitions += 1;
+        persisted = createEvent({ status: "published", publishedAt: now, tickets: payload.tickets, privacy: payload.privacy });
+        return persisted;
+      },
+      updateByIdForUser: async (_requestedEventId: string, _requestedUserId: string, payload: Record<string, unknown>) => {
+        publishedUpdateCalls += 1;
+        persisted = createEvent({ ...persisted, ...payload, status: "published", publishedAt: now });
+        return persisted;
+      },
+    },
+  });
+  const payload = {
+    name: "Draft Preview",
+    ageRestriction: "all_ages",
+    category: "Live Music & Concerts",
+    categories: ["Live Music & Concerts"],
+    scheduledAt: now,
+    endAt: new Date("2026-07-15T12:00:00.000Z"),
+    privacy: "private",
+    tickets: [ticket],
+  };
+
+  const first = await service.publish(owner as never, payload as never, eventId.toString());
+  persisted = createEvent({ ...persisted, status: "published", publishedAt: now, tickets: [{ ...persisted.tickets[0], availableCount: 70 }] });
+  const retry = await service.publish(owner as never, payload as never, eventId.toString());
+
+  assert.equal(firstPublishTransitions, 1);
+  assert.equal(publishedUpdateCalls, 1);
+  assert.equal(first.id, retry.id);
+  assert.equal(retry.privacy, "private");
+  assert.equal(retry.tickets[0]?.id, "ticket-1");
+  assert.equal(retry.tickets[0]?.availableCount, 70);
+});
+
 test("publishing a draft is blocked when existing windows would fall outside the published schedule", async () => {
   let publishCalled = false;
   const service = createEventService({

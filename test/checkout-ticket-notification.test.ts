@@ -221,6 +221,9 @@ test("buyer ticket-purchase notification uses the approved copy with the real ev
   assert.ok(buyerNotification, "expected a ticket_buyer notification to be created");
   assert.equal(buyerNotification?.title, "Your tickets are ready");
   assert.equal(buyerNotification?.message, "Your tickets for Neon Vibes Night are now available.");
+  assert.equal(buyerNotification?.orderId, order._id.toString());
+  assert.equal(buyerNotification?.ticketId, ticketId);
+  assert.equal(buyerNotification?.ticketIndex, 1);
 
   const creatorNotification = notificationCreates.find((n) => n.type === "ticket_creator");
   assert.ok(creatorNotification, "expected a ticket_creator notification to be created");

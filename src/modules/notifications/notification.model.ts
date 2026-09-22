@@ -13,6 +13,8 @@ const notificationSchema = new Schema<INotification>(
     momentId: { type: String, default: null },
     contentType: { type: String, enum: ["post", "event"], default: null },
     orderId: { type: String, default: null },
+    ticketId: { type: String, default: null },
+    ticketIndex: { type: Number, default: null },
     refundId: { type: String, default: null },
     refundStatus: { type: String, default: null },
     cancellationReason: { type: String, default: null },

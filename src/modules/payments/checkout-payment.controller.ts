@@ -132,6 +132,12 @@ export class CheckoutPaymentController {
     });
   };
 
+  public getPurchasedTicket = async (req: Request, res: Response): Promise<void> => {
+    const { orderId, ticketId, ticketIndex } = req.params as { orderId: string; ticketId: string; ticketIndex: string };
+    const result = await this.service.getPurchasedTicket(req.authUser as AuthUser, orderId, ticketId, Number(ticketIndex));
+    ApiResponse.success(res, { message: "Purchased ticket retrieved", data: result });
+  };
+
   public shareTicket = async (req: Request, res: Response): Promise<void> => {
     const share = await this.service.shareTicket(req.authUser as AuthUser, req.body);
 

@@ -910,6 +910,39 @@ export class CheckoutPaymentService {
     });
   }
 
+  public async getPurchasedTicket(
+    user: AuthUser,
+    orderId: string,
+    ticketId: string,
+    ticketIndex: number,
+  ): Promise<{ ticket: TicketWalletItem; remainingPurchasableQuantity: number }> {
+    const tickets = await this.getMyTicketWallet(user);
+    const ticket = tickets.find((item) =>
+      item.ticketId === ticketId && item.ticketPasses.some((pass) => pass.orderId === orderId && pass.ticketIndex === ticketIndex),
+    );
+
+    if (!ticket) {
+      throw new AppError("Purchased ticket not found.", httpStatus.NOT_FOUND);
+    }
+
+    const selectedPass = ticket.ticketPasses.find((pass) => pass.orderId === orderId && pass.ticketIndex === ticketIndex)!;
+    const activeCount = await this.repository.getActivePurchasedCountForTicket(user.id, ticket.event.id, ticketId);
+    const cancelledCount = await this.ticketCancellationRepository.countByBuyerEventTicket(user.id, ticket.event.id, ticketId);
+
+    return {
+      ticket: {
+        ...ticket,
+        ticketNo: selectedPass.ticketNo,
+        quantity: 1,
+        paidQuantity: selectedPass.ticketIndex <= (ticket.paidQuantity ?? ticket.quantity) ? 1 : 0,
+        freeQuantity: selectedPass.ticketIndex <= (ticket.paidQuantity ?? ticket.quantity) ? 0 : 1,
+        totalQuantity: 1,
+        ticketPasses: [selectedPass],
+      },
+      remainingPurchasableQuantity: Math.max(0, 2 - Math.max(0, activeCount - cancelledCount)),
+    };
+  }
+
   public async shareTicket(user: AuthUser, payload: ShareTicketDto): Promise<TicketShareResponse> {
     if (user.id === payload.friendId) {
       throw new AppError("You cannot share a ticket with yourself", httpStatus.BAD_REQUEST);
@@ -2406,6 +2439,9 @@ export class CheckoutPaymentService {
         actorUsername: buyer?.username ?? null,
         actorAvatarKey: buyer?.avatarKey ?? null,
         eventId,
+        orderId: order._id.toString(),
+        ticketId: ticketItem.itemId ?? null,
+        ticketIndex: order.ticketPasses.find((pass) => pass.ticketId === ticketItem.itemId)?.ticketIndex ?? null,
         eventName,
         ticketName,
         title: buyerTitle,
@@ -2422,6 +2458,9 @@ export class CheckoutPaymentService {
           actorUsername: null,
           actorAvatarUrl: null,
           eventId,
+          orderId: order._id.toString(),
+          ticketId: ticketItem.itemId ?? null,
+          ticketIndex: order.ticketPasses.find((pass) => pass.ticketId === ticketItem.itemId)?.ticketIndex ?? null,
           eventName,
           ticketName,
           title: buyerTitle,

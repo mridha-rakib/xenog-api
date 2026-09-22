@@ -14,6 +14,8 @@ export class NotificationRepository {
       momentId: data.momentId ?? null,
       contentType: data.contentType ?? null,
       orderId: data.orderId ?? null,
+      ticketId: data.ticketId ?? null,
+      ticketIndex: data.ticketIndex ?? null,
       refundId: data.refundId ?? null,
       refundStatus: data.refundStatus ?? null,
       cancellationReason: data.cancellationReason ?? null,

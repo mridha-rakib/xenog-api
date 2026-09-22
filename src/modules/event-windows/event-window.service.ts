@@ -488,6 +488,16 @@ export class EventWindowService {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
 
+    if (event.privacy === "locked") {
+      const joinRequest = event.joinRequests.find((request) => request.userId.toString() === user.id);
+
+      if (joinRequest?.status !== "accepted") {
+        // Locked Events remain discoverable through Event surfaces, but their
+        // participation resources must not reveal themselves before approval.
+        throw new AppError("Event not found.", httpStatus.NOT_FOUND);
+      }
+    }
+
     return event;
   }
 

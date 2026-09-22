@@ -926,6 +926,52 @@ test("publishing a draft preserves ticket and reward ids without duplicate child
   assert.equal(publishPayload?.rewards, undefined);
 });
 
+test("a Public draft can become Locked and publish with the same Event and ticket identities", async () => {
+  const ticket = createTicket({ id: "draft-ticket", capacity: 12, availableCount: null });
+  let savedPrivacy: string | null = null;
+  let publishedDraftId: string | null = null;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () => createEvent({ privacy: "public", tickets: [ticket] }),
+      updateDraftByIdForUser: async (_eventId: string, _userId: string, payload: Record<string, unknown>) => {
+        savedPrivacy = payload.privacy as string;
+        return createEvent({ privacy: "locked", tickets: [ticket] });
+      },
+      publishDraftByIdForUser: async (draftId: string, _userId: string, payload: Record<string, unknown>) => {
+        publishedDraftId = draftId;
+        return createEvent({
+          status: "published",
+          publishedAt: now,
+          privacy: payload.privacy,
+          tickets: payload.tickets,
+        });
+      },
+      create: async () => {
+        throw new Error("publishing an existing draft must not create a second Event");
+      },
+    },
+  });
+
+  const saved = await service.saveDraft(owner as never, { privacy: "locked" } as never, eventId.toString());
+  const published = await service.publish(owner as never, {
+    name: "Draft Preview",
+    ageRestriction: "all_ages",
+    category: "Live Music & Concerts",
+    categories: ["Live Music & Concerts"],
+    scheduledAt: now,
+    endAt: new Date("2026-07-15T12:00:00.000Z"),
+    location: { venue: "Test venue" },
+    privacy: saved.privacy,
+    tickets: [ticket],
+  } as never, eventId.toString());
+
+  assert.equal(savedPrivacy, "locked");
+  assert.equal(publishedDraftId, eventId.toString());
+  assert.equal(published.id, eventId.toString());
+  assert.equal(published.privacy, "locked");
+  assert.equal(published.tickets[0]?.id, "draft-ticket");
+});
+
 test("draft owner can read draft detail without creating interaction moment or chat room", async () => {
   let interactionMomentCreated = false;
   let chatRoomCreated = false;
@@ -1105,6 +1151,58 @@ test("published event schedule update is blocked when existing windows conflict"
     { statusCode: 422 },
   );
   assert.equal(updateCalled, false);
+});
+
+test("published privacy transitions persist without replacing ticket inventory", async () => {
+  const tickets = [
+    createTicket({ id: "ticket-a", capacity: 30, availableCount: 17, type: "pay", price: 25 }),
+    createTicket({ id: "ticket-b", capacity: 10, availableCount: 4, type: "free", price: 0 }),
+  ];
+
+  for (const [from, to] of [
+    ["public", "locked"],
+    ["locked", "public"],
+    ["public", "private"],
+    ["private", "public"],
+    ["locked", "private"],
+    ["private", "locked"],
+  ] as const) {
+    let updatePayload: Record<string, unknown> | null = null;
+    const service = createEventService({
+      eventRepository: {
+        findByIdForUser: async () => createEvent({ status: "published", publishedAt: now, privacy: from, tickets }),
+        updateByIdForUser: async (_eventId: string, _userId: string, payload: Record<string, unknown>) => {
+          updatePayload = payload;
+          return createEvent({ status: "published", publishedAt: now, privacy: to, tickets });
+        },
+      },
+    });
+
+    const response = await service.updateEvent(owner as never, eventId.toString(), { privacy: to } as never);
+
+    assert.equal(response.privacy, to, `${from} -> ${to} persists the authoritative response value`);
+    assert.equal(updatePayload?.privacy, to, `${from} -> ${to} remains a privacy-only write`);
+    assert.equal(updatePayload?.tickets, undefined, `${from} -> ${to} never replaces the ticket array`);
+    assert.deepEqual(
+      response.tickets.map((ticket) => ({
+        id: ticket.id,
+        capacity: ticket.capacity,
+        availableCount: ticket.availableCount,
+        type: ticket.type,
+        price: ticket.price,
+        salesEndAt: ticket.salesEndAt,
+      })),
+      tickets.map((ticket) => ({
+        id: ticket.id,
+        capacity: ticket.capacity,
+        availableCount: ticket.availableCount,
+        type: ticket.type,
+        price: ticket.price,
+        salesEndAt: ticket.salesEndAt,
+      })),
+      `${from} -> ${to} preserves ticket identity, order, and server-owned availability`,
+    );
+  }
 });
 
 test("completed and cancelled events cannot be republished through publish retry path", async () => {

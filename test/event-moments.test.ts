@@ -97,6 +97,71 @@ const createMoment = (overrides: {
   updatedAt: now,
 });
 
+const createMomentAccessService = async (moment: ReturnType<typeof createMoment>, accessEvent: typeof event) => {
+  const { MomentService } = await import("../src/modules/moments/moment.service.js");
+
+  return new MomentService(
+    { findById: async () => moment } as never,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { findById: async () => accessEvent } as never,
+  );
+};
+
+test("Event-associated Moment direct access conceals a private Event from non-members", async () => {
+  const memberId = new Types.ObjectId();
+  const privateEvent = {
+    ...event,
+    privacy: "private" as const,
+    memberUserIds: [memberId],
+  };
+  const privateMoment = createMoment({
+    id: new Types.ObjectId(),
+    caption: "Members-only Event Moment",
+    isEventAnnouncement: false,
+  });
+  const service = await createMomentAccessService(privateMoment, privateEvent);
+  const getViewableMoment = (service as unknown as {
+    getViewableMoment: (momentId: string, user: typeof viewer) => Promise<unknown>;
+  }).getViewableMoment.bind(service);
+  const member = { ...viewer, id: memberId.toString() };
+  const hostViewer = { ...viewer, id: hostId.toString() };
+
+  await assert.rejects(
+    () => getViewableMoment(privateMoment._id.toString(), viewer),
+    { statusCode: 404 },
+  );
+  await assert.doesNotReject(() => getViewableMoment(privateMoment._id.toString(), member));
+  await assert.doesNotReject(() => getViewableMoment(privateMoment._id.toString(), hostViewer));
+});
+
+test("Event-associated Moment access leaves public and non-Event Moments unchanged", async () => {
+  const publicEventMoment = createMoment({
+    id: new Types.ObjectId(),
+    caption: "Public Event Moment",
+    isEventAnnouncement: false,
+  });
+  const publicService = await createMomentAccessService(publicEventMoment, event);
+  const publicAccess = (publicService as unknown as {
+    getViewableMoment: (momentId: string, user: typeof viewer) => Promise<unknown>;
+  }).getViewableMoment.bind(publicService);
+  await assert.doesNotReject(() => publicAccess(publicEventMoment._id.toString(), viewer));
+
+  const nonEventMoment = { ...publicEventMoment, eventId: null };
+  const nonEventService = await createMomentAccessService(nonEventMoment, event);
+  const nonEventAccess = (nonEventService as unknown as {
+    getViewableMoment: (momentId: string, user: typeof viewer) => Promise<unknown>;
+  }).getViewableMoment.bind(nonEventService);
+  await assert.doesNotReject(() => nonEventAccess(nonEventMoment._id.toString(), viewer));
+});
+
 test("GET /moments/event/:eventId excludes event announcement moments and returns user-created event moments", async () => {
   const [{ MomentController }, { MomentService }, { MomentRepository }, { MomentModel }] = await Promise.all([
     import("../src/modules/moments/moment.controller.js"),

@@ -41,6 +41,8 @@ export interface INotification {
   momentId?: string | null;
   contentType?: NotificationContentType | null;
   orderId?: string | null;
+  ticketId?: string | null;
+  ticketIndex?: number | null;
   refundId?: string | null;
   refundStatus?: string | null;
   cancellationReason?: string | null;
@@ -66,6 +68,8 @@ export interface CreateNotificationDto {
   momentId?: string | null;
   contentType?: NotificationContentType | null;
   orderId?: string | null;
+  ticketId?: string | null;
+  ticketIndex?: number | null;
   refundId?: string | null;
   refundStatus?: string | null;
   cancellationReason?: string | null;
@@ -89,6 +93,8 @@ export interface NotificationResponse {
   momentId?: string | null;
   contentType?: NotificationContentType | null;
   orderId?: string | null;
+  ticketId?: string | null;
+  ticketIndex?: number | null;
   refundId?: string | null;
   refundStatus?: string | null;
   cancellationReason?: string | null;

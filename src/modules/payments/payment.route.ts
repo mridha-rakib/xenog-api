@@ -99,6 +99,7 @@ router.get(
   catchAsync(checkoutPaymentController.getPublicEventGoingItems),
 );
 router.get("/ticket-wallet", catchAsync(checkoutPaymentController.getMyTicketWallet));
+router.get("/purchased-tickets/:orderId/:ticketId/:ticketIndex", catchAsync(checkoutPaymentController.getPurchasedTicket));
 
 router.post(
   "/ticket-cancellations",

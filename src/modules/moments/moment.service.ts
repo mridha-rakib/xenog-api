@@ -41,6 +41,7 @@ import { MomentReactionRepository } from "./moment-reaction.repository.js";
 import { MomentSaveRepository } from "./moment-save.repository.js";
 import { EventRepository } from "../events/event.repository.js";
 import { getDistanceKm } from "../events/event.repository.js";
+import type { IEvent } from "../events/event.interface.js";
 import { CheckoutPaymentRepository } from "../payments/checkout-payment.repository.js";
 import { TicketShareRepository } from "../payments/ticket-share.repository.js";
 import { isOwnedMomentVideoStorageKey, MomentVideoService } from "./moment-video.service.js";
@@ -368,6 +369,8 @@ export class MomentService {
     if (!event || event.status !== "published") {
       throw new AppError("Event not found.", httpStatus.NOT_FOUND);
     }
+
+    this.assertEventAssociatedMomentAccess(event, user);
 
     const moments = await this.momentRepository.findByEventId(eventId);
     const uniqueUserIds = [...new Set(moments.map((m) => m.userId.toString()))];
@@ -821,6 +824,8 @@ export class MomentService {
       throw new AppError("Moment not found", httpStatus.NOT_FOUND);
     }
 
+    await this.assertEventAssociatedMomentAccessById(moment.eventId?.toString(), user);
+
     const [author, viewerFollowingIds, interactionContext] = await Promise.all([
       this.userRepository.findById(moment.userId.toString()),
       this.getViewerFollowingIdSet(user),
@@ -861,13 +866,21 @@ export class MomentService {
     const saves = await this.momentSaveRepository.findByUserId(user.id);
     const momentIds = saves.map((s) => s.momentId.toString());
     const moments = await this.momentRepository.findByIds(momentIds);
+    const visibleMoments = (
+      await Promise.all(moments.map(async (moment) => ({
+        moment,
+        visible: await this.isEventAssociatedMomentVisible(moment, user),
+      })))
+    )
+      .filter((entry) => entry.visible)
+      .map((entry) => entry.moment);
 
     const [viewerFollowingIds, interactionContext] = await Promise.all([
       this.getViewerFollowingIdSet(user),
-      this.buildInteractionContext(moments, user),
+      this.buildInteractionContext(visibleMoments, user),
     ]);
 
-    const momentById = new Map(moments.map((m) => [m._id.toString(), m]));
+    const momentById = new Map(visibleMoments.map((m) => [m._id.toString(), m]));
     const orderedMoments = momentIds
       .map((id) => momentById.get(id))
       .filter((m): m is IMoment => m !== undefined);
@@ -1604,14 +1617,63 @@ export class MomentService {
       throw new AppError("You do not have access to this moment", httpStatus.FORBIDDEN);
     }
 
-    if (moment.isEventAnnouncement && moment.eventId) {
-      const event = await this.eventRepository.findById(moment.eventId.toString());
-      if (!event || event.status === "draft") {
-        throw new AppError("Moment not found", httpStatus.NOT_FOUND);
-      }
-    }
+    await this.assertEventAssociatedMomentAccessById(moment.eventId?.toString(), viewer);
 
     return moment;
+  }
+
+  /**
+   * Event-tagged Moments are a secondary access path to Event content. Keep
+   * their private visibility aligned with Event Detail rather than relying on
+   * feed filtering or callers remembering to apply a privacy check.
+   */
+  private async assertEventAssociatedMomentAccessById(
+    eventId: string | undefined,
+    viewer: AuthUser,
+  ): Promise<void> {
+    if (!eventId) {
+      return;
+    }
+
+    const event = await this.eventRepository.findById(eventId);
+
+    if (!event) {
+      throw new AppError("Moment not found", httpStatus.NOT_FOUND);
+    }
+
+    this.assertEventAssociatedMomentAccess(event, viewer);
+  }
+
+  private async isEventAssociatedMomentVisible(moment: IMoment, viewer: AuthUser): Promise<boolean> {
+    try {
+      await this.assertEventAssociatedMomentAccessById(moment.eventId?.toString(), viewer);
+      return true;
+    } catch (error) {
+      if (error instanceof AppError && error.statusCode === httpStatus.NOT_FOUND) {
+        return false;
+      }
+
+      throw error;
+    }
+  }
+
+  private assertEventAssociatedMomentAccess(event: IEvent, viewer: AuthUser): void {
+    if (event.status === "draft") {
+      throw new AppError("Moment not found", httpStatus.NOT_FOUND);
+    }
+
+    if (event.privacy !== "private") {
+      return;
+    }
+
+    const isOwner = event.userId.toString() === viewer.id;
+    const isMember = event.memberUserIds.some((memberId) => memberId.toString() === viewer.id);
+
+    if (!isOwner && !isMember) {
+      // Match Event Detail's concealment policy: callers must not be able to
+      // distinguish a private Event Moment from a nonexistent Moment.
+      throw new AppError("Moment not found", httpStatus.NOT_FOUND);
+    }
   }
 
   /**

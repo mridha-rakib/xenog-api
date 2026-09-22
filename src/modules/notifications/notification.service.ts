@@ -77,6 +77,8 @@ export class NotificationService {
       contentType?: NotificationContentType | null;
       eventName?: string | null;
       orderId?: string | null;
+      ticketId?: string | null;
+      ticketIndex?: number | null;
       refundId?: string | null;
       refundStatus?: string | null;
       cancellationReason?: string | null;
@@ -99,6 +101,8 @@ export class NotificationService {
       contentType: options.contentType ?? null,
       eventName: options.eventName ?? null,
       orderId: options.orderId ?? null,
+      ticketId: options.ticketId ?? null,
+      ticketIndex: options.ticketIndex ?? null,
       refundId: options.refundId ?? null,
       refundStatus: options.refundStatus ?? null,
       cancellationReason: options.cancellationReason ?? null,
@@ -129,6 +133,8 @@ export class NotificationService {
         contentType: notification.contentType ?? null,
         eventName: notification.eventName ?? null,
         orderId: notification.orderId ?? null,
+        ticketId: notification.ticketId ?? null,
+        ticketIndex: notification.ticketIndex ?? null,
         refundId: notification.refundId ?? null,
         refundStatus: notification.refundStatus ?? null,
         cancellationReason: notification.cancellationReason ?? null,
@@ -149,6 +155,8 @@ export class NotificationService {
           ...(options.momentId ? { momentId: options.momentId } : {}),
           ...(options.contentType ? { contentType: options.contentType } : {}),
           ...(options.orderId ? { orderId: options.orderId } : {}),
+          ...(options.ticketId ? { ticketId: options.ticketId } : {}),
+          ...(options.ticketIndex ? { ticketIndex: String(options.ticketIndex) } : {}),
           ...(options.refundId ? { refundId: options.refundId } : {}),
           ...(options.deepLink ? { deepLink: options.deepLink } : {}),
         },
@@ -168,6 +176,8 @@ export class NotificationService {
       momentId?: string | null;
       contentType?: NotificationContentType | null;
       orderId?: string | null;
+      ticketId?: string | null;
+      ticketIndex?: number | null;
       refundId?: string | null;
       refundStatus?: string | null;
       cancellationReason?: string | null;
@@ -199,6 +209,8 @@ export class NotificationService {
       momentId: n.momentId ?? null,
       contentType: n.contentType ?? null,
       orderId: n.orderId ?? null,
+      ticketId: n.ticketId ?? null,
+      ticketIndex: n.ticketIndex ?? null,
       refundId: n.refundId ?? null,
       refundStatus: n.refundStatus ?? null,
       cancellationReason: n.cancellationReason ?? null,

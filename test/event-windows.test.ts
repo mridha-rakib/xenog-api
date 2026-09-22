@@ -94,6 +94,9 @@ const eventForPrivacy = (
   ...event,
   privacy,
   memberUserIds: privacy === "private" ? [attendeeId] : [],
+  // Existing locked-window tests model an attendee who has already been
+  // approved. Individual denial tests override this with no/pending/declined.
+  joinRequests: privacy === "locked" ? [{ userId: attendeeId, status: "accepted", createdAt: now }] : [],
   ...overrides,
 });
 
@@ -320,6 +323,39 @@ test("event window details are listed, updated, and backward compatible", async 
   assert.equal(updatedWindow.id, windowId.toString());
   assert.equal(updatedWindow.details, "Updated details");
   assert.equal(legacyWindow.details, null);
+});
+
+test("locked Event Windows require accepted host approval without changing public or private access", async () => {
+  const publicService = await createService({ event: eventForPrivacy("public") });
+  await assert.doesNotReject(() => publicService.listWindows(attendee, eventId.toString()));
+
+  for (const status of [undefined, "pending", "declined"] as const) {
+    const lockedService = await createService({
+      event: eventForPrivacy("locked", {
+        joinRequests: status ? [{ userId: attendeeId, status, createdAt: now }] : [],
+      }),
+    });
+    await assert.rejects(
+      () => lockedService.listWindows(attendee, eventId.toString()),
+      { statusCode: 404 },
+      `locked attendee with ${status ?? "no"} request must be concealed`,
+    );
+  }
+
+  const acceptedService = await createService({
+    event: eventForPrivacy("locked", {
+      joinRequests: [{ userId: attendeeId, status: "accepted", createdAt: now }],
+    }),
+  });
+  await assert.doesNotReject(() => acceptedService.listWindows(attendee, eventId.toString()));
+  await assert.doesNotReject(() => acceptedService.listWindows(host, eventId.toString()));
+
+  const privateService = await createService({ event: eventForPrivacy("private") });
+  await assert.doesNotReject(() => privateService.listWindows(attendee, eventId.toString()));
+  await assert.rejects(
+    () => privateService.listWindows(otherAttendee, eventId.toString()),
+    { statusCode: 404 },
+  );
 });
 
 test("event window details validation enforces 500 characters", async () => {

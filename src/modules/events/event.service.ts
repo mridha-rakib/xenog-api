@@ -81,9 +81,8 @@ import {
 } from "../feed/event-smart-feed-ranking.js";
 import {
   ACTIVE_EVENT_WINDOW_MS,
+  getEventLifecycle,
   NOW_MODE_LOOKAHEAD_MS,
-  STARTING_SOON_MS,
-  getNowStatus,
   isActiveSmartFeedEvent,
 } from "./event-temporal-status.js";
 import {
@@ -1864,7 +1863,7 @@ export class EventService {
   }
 
   public async listMyPostTagEvents(user: AuthUser): Promise<PostTagEventResponse[]> {
-    const now = Date.now();
+    const now = this.getServerNow().getTime();
     const activeSince = new Date(now - ACTIVE_EVENT_WINDOW_MS);
 
     const nowDate = new Date(now);
@@ -1907,7 +1906,7 @@ export class EventService {
       eventById.set(event._id.toString(), event);
     });
 
-    const rows = await Promise.all(
+    const rows: Array<{ row: PostTagEventResponse | null; scheduledMs: number | null }> = await Promise.all(
       [...eventById.values()].map(async (event) => {
         const bannerImageUrl = event.bannerImageKey
           ? await this.storageService
@@ -1917,22 +1916,10 @@ export class EventService {
           : null;
 
         const scheduled = event.scheduledAt?.getTime() ?? null;
-        const ended = event.endAt?.getTime() ?? null;
-        let postTagStatus: PostTagEventStatus;
-
-        if (scheduled === null || scheduled > now) {
-          // Additive split of the existing "upcoming" bucket: an imminent start
-          // (within the canonical STARTING_SOON_MS) is surfaced distinctly.
-          postTagStatus =
-            scheduled !== null && scheduled - now <= STARTING_SOON_MS ? "starting_soon" : "upcoming";
-        } else if (ended ? ended >= now : now - scheduled <= NOW_MODE_LOOKAHEAD_MS) {
-          postTagStatus = "live";
-        } else {
-          postTagStatus = "active";
-        }
+        const postTagStatus = getEventLifecycle(event.scheduledAt, event.endAt, now);
 
         return {
-          row: {
+          row: postTagStatus ? {
             id: event._id.toString(),
             name: event.name ?? "",
             bannerImageUrl,
@@ -1940,24 +1927,24 @@ export class EventService {
             timezone: event.timezone ?? null,
             location: event.location ?? null,
             postTagStatus,
-          },
+          } : null,
           scheduledMs: scheduled,
         };
       }),
     );
 
-    // CRT-003: one deterministic global order across every eligible Event —
-    // Live, then Starting Soon, then Upcoming (soonest first), then Recent
-    // eligible ("active": started, still inside the 12h no-end window; most
-    // recent first). Source-collection order never controls the output.
+    // Canonical display ordering: Live, Starting Soon, Upcoming, then Ended.
+    // The repository eligibility window remains unchanged; malformed legacy
+    // rows lacking an end instant have no canonical display lifecycle.
     const bucketRank: Record<PostTagEventStatus, number> = {
       live: 0,
       starting_soon: 1,
       upcoming: 2,
-      active: 3,
+      ended: 3,
     };
 
     return rows
+      .filter((entry): entry is { row: PostTagEventResponse; scheduledMs: number | null } => entry.row !== null)
       .sort((left, right) => {
         const rankDelta = bucketRank[left.row.postTagStatus] - bucketRank[right.row.postTagStatus];
         if (rankDelta !== 0) {
@@ -1967,9 +1954,7 @@ export class EventService {
         const leftMs = left.scheduledMs ?? Number.POSITIVE_INFINITY;
         const rightMs = right.scheduledMs ?? Number.POSITIVE_INFINITY;
         if (leftMs !== rightMs) {
-          // Recent eligible surfaces most-recent first; every other bucket is
-          // soonest first.
-          return left.row.postTagStatus === "active" ? rightMs - leftMs : leftMs - rightMs;
+          return leftMs - rightMs;
         }
 
         // Final deterministic tie-break on the stable Event id.
@@ -2317,7 +2302,7 @@ export class EventService {
   }
 
   public async listNowModeEvents(query: NowModeQuery): Promise<NowModeEventResponse[]> {
-    const now = Date.now();
+    const now = this.getServerNow().getTime();
     const activeSince = new Date(now - ACTIVE_EVENT_WINDOW_MS);
     const upcomingUntil = new Date(now + NOW_MODE_LOOKAHEAD_MS);
 
@@ -2331,21 +2316,22 @@ export class EventService {
 
     const hostById = await this.getHostById(events);
     const statusPriority: Record<NowEventStatus, number> = {
-      live_now: 0,
+      live: 0,
       starting_soon: 1,
-      last_call: 2,
+      upcoming: 2,
+      ended: 3,
     };
 
     const responseEvents = events
       .map((event) => {
-        const nowStatus = getNowStatus(event.scheduledAt ?? null, event.endAt ?? null);
+        const nowStatus = getEventLifecycle(event.scheduledAt ?? null, event.endAt ?? null, now);
 
         if (!nowStatus) {
           return null;
         }
 
         return {
-          ...this.toResponse(event, hostById.get(event.userId.toString()) ?? null),
+          ...this.toResponse(event, hostById.get(event.userId.toString()) ?? null, undefined, undefined, { lifecycleNow: now }),
           nowStatus,
         };
       })
@@ -4761,13 +4747,16 @@ export class EventService {
       isFollowing?: boolean;
     },
     myJoinRequestStatus?: EventJoinRequestStatus | null,
-    options: { includeEventMedia?: boolean } = {},
+    options: { includeEventMedia?: boolean; lifecycleNow?: number } = {},
   ): EventResponse {
     return {
       id: event._id.toString(),
       userId: event.userId.toString(),
       ...(host !== undefined ? { host: this.toHostResponse(host, hostExtras) } : {}),
       status: event.status,
+      lifecycle: event.status === "draft" || event.status === "cancelled"
+        ? null
+        : getEventLifecycle(event.scheduledAt, event.endAt, options.lifecycleNow),
       crowdStatus: null,
       name: event.name ?? null,
       description: event.description ?? null,

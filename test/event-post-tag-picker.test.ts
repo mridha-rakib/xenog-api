@@ -22,6 +22,7 @@ const now = Date.now();
 
 type FakeEvent = {
   _id: { toString: () => string };
+  userId: { toString: () => string };
   name: string;
   scheduledAt: Date | null;
   endAt: Date | null;
@@ -36,9 +37,14 @@ const makeEvent = (
   endFromNowMs: number | null,
 ): FakeEvent => ({
   _id: { toString: () => id },
+  userId: { toString: () => "owner" },
   name: `Event ${id}`,
   scheduledAt: scheduledFromNowMs === null ? null : new Date(now + scheduledFromNowMs),
-  endAt: endFromNowMs === null ? null : new Date(now + endFromNowMs),
+  // Published Events require an end instant. Keep ordinary picker fixtures on
+  // that valid path; legacy no-end rows intentionally have no display status.
+  endAt: scheduledFromNowMs === null
+    ? null
+    : new Date(now + (endFromNowMs ?? Math.max(scheduledFromNowMs + HOUR, HOUR))),
   location: { venue: `Venue ${id}`, address: `Address ${id}` },
   timezone: "America/New_York",
   bannerImageKey: null,
@@ -95,6 +101,7 @@ const buildService = (h: PickerHarness) => {
     {} as never, // creatorEarningRepository
     ticketShareRepository as never,
   );
+  (service as unknown as { getServerNow: () => Date }).getServerNow = () => new Date(now);
 
   return { service, calls };
 };
@@ -106,7 +113,7 @@ const user = { id: "viewer-1", name: "Viewer" };
 test("§11/§16 one deterministic global order regardless of source insertion order", async () => {
   const upcomingFar = makeEvent("upcoming-far", 10 * 24 * HOUR, 11 * 24 * HOUR);
   const live = makeEvent("live", -1 * HOUR, 2 * HOUR);
-  const recent = makeEvent("recent-active", -5 * HOUR, null); // started, past 3h live window, inside 12h
+  const recent = makeEvent("recent-live", -5 * HOUR, 2 * HOUR);
   const startingSoon = makeEvent("starting-soon", 0.5 * HOUR, 3 * HOUR);
   const upcomingNear = makeEvent("upcoming-near", 2 * HOUR, 4 * HOUR);
 
@@ -122,11 +129,11 @@ test("§11/§16 one deterministic global order regardless of source insertion or
 
   assert.deepEqual(
     rows.map((r) => r.id),
-    ["live", "starting-soon", "upcoming-near", "upcoming-far", "recent-active"],
+    ["recent-live", "live", "starting-soon", "upcoming-near", "upcoming-far"],
   );
   assert.deepEqual(
     rows.map((r) => r.postTagStatus),
-    ["live", "starting_soon", "upcoming", "upcoming", "active"],
+    ["live", "live", "starting_soon", "upcoming", "upcoming"],
   );
 });
 
@@ -140,21 +147,20 @@ test("§14 upcoming bucket is nearest-first; §15 recent-eligible bucket is most
   const { service } = buildService({ ownEvents: [far, recentOlder, near, recentNewer, mid] });
   const rows = await service.listMyPostTagEvents(user as never);
 
-  assert.deepEqual(
-    rows.map((r) => r.id),
-    ["u-near", "u-mid", "u-far", "r-newer", "r-older"],
-  );
+  assert.deepEqual(rows.map((r) => r.id), ["r-older", "r-newer", "u-near", "u-mid", "u-far"]);
 });
 
 // ── Starting Soon boundary uses the canonical constant ──
 
-test("§13/§39 starting_soon vs upcoming boundary is exactly STARTING_SOON_MS", async () => {
-  const inside = makeEvent("inside", STARTING_SOON_MS - 60_000, null);
+test("§13/§39 post-tag status uses the strict canonical two-hour boundary", async () => {
+  const exact = makeEvent("exact", STARTING_SOON_MS, null);
+  const inside = makeEvent("inside", STARTING_SOON_MS - 1, null);
   const outside = makeEvent("outside", STARTING_SOON_MS + 60_000, null);
 
-  const { service } = buildService({ ownEvents: [inside, outside] });
+  const { service } = buildService({ ownEvents: [exact, inside, outside] });
   const rows = await service.listMyPostTagEvents(user as never);
 
+  assert.equal(rows.find((r) => r.id === "exact")?.postTagStatus, "upcoming");
   assert.equal(rows.find((r) => r.id === "inside")?.postTagStatus, "starting_soon");
   assert.equal(rows.find((r) => r.id === "outside")?.postTagStatus, "upcoming");
 });
@@ -219,6 +225,48 @@ test("§40 every row keeps id/name/scheduledAt/timezone/location/postTagStatus",
   assert.deepEqual(row!.location, { venue: "Venue shape", address: "Address shape" });
   assert.equal(row!.postTagStatus, "upcoming");
   assert.ok("bannerImageUrl" in row!);
+});
+
+test("Now mode attaches only canonical lifecycle labels, including stale persisted status boundaries", async () => {
+  const atEnd = makeEvent("at-end", -6 * HOUR, 0);
+  const live = makeEvent("live", -HOUR, HOUR);
+  const startingSoon = makeEvent("starting", STARTING_SOON_MS - 1, 3 * HOUR);
+  const atTwoHours = makeEvent("two-hours", STARTING_SOON_MS, 4 * HOUR);
+  const { service } = buildService({});
+  const internals = service as unknown as {
+    eventRepository: { findNowModeEvents: () => Promise<FakeEvent[]> };
+    getHostById: () => Promise<Map<string, never>>;
+    toResponse: (event: FakeEvent) => Record<string, unknown>;
+    withCrowdStatuses: <T>(_events: FakeEvent[], response: T[]) => Promise<T[]>;
+  };
+  internals.eventRepository = { findNowModeEvents: async () => [atEnd, live, startingSoon, atTwoHours] };
+  internals.getHostById = async () => new Map();
+  internals.toResponse = (event) => ({ id: event._id.toString(), status: "published" });
+  internals.withCrowdStatuses = async (_events, response) => response;
+
+  const rows = await service.listNowModeEvents({});
+  assert.deepEqual(rows.map((row) => row.nowStatus), ["live", "starting_soon", "upcoming", "ended"]);
+  assert.equal(rows.some((row) => (row.nowStatus as string) === "last_call"), false);
+});
+
+test("Event response lifecycle is derived from times, not stale persisted status", () => {
+  const { service } = buildService({});
+  const toResponse = (event: Record<string, unknown>) => (
+    service as unknown as { toResponse: (input: Record<string, unknown>) => { status: string; lifecycle: string | null } }
+  ).toResponse(event);
+  const base = {
+    _id: { toString: () => "response" }, userId: { toString: () => "owner" }, status: "published",
+    tickets: [], rewards: [], memberUserIds: [], privacy: "public", categories: [],
+    createdAt: new Date(now), updatedAt: new Date(now),
+  };
+
+  const lifecycle = (scheduledAt: Date, endAt: Date) => toResponse({ ...base, scheduledAt, endAt });
+  assert.equal(lifecycle(new Date(now + STARTING_SOON_MS + 1_000), new Date(now + 4 * HOUR)).lifecycle, "upcoming");
+  assert.equal(lifecycle(new Date(now + STARTING_SOON_MS - 1), new Date(now + 4 * HOUR)).lifecycle, "starting_soon");
+  assert.equal(lifecycle(new Date(now - HOUR), new Date(now + HOUR)).lifecycle, "live");
+  assert.equal(lifecycle(new Date(now - 6 * HOUR), new Date(now)).lifecycle, "ended");
+  assert.equal(toResponse({ ...base, status: "draft", scheduledAt: new Date(now), endAt: new Date(now + HOUR) }).lifecycle, null);
+  assert.equal(toResponse({ ...base, status: "cancelled", scheduledAt: new Date(now), endAt: new Date(now + HOUR) }).lifecycle, null);
 });
 
 // ── Repository-level eligibility clauses (source assertions) ──

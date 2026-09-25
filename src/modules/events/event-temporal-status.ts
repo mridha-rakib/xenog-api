@@ -1,42 +1,65 @@
-import type { NowEventStatus } from "./event.interface.js";
+import type { EventLifecycle } from "./event.interface.js";
 
-/**
- * Canonical Event temporal constants + classifier.
- *
- * Extracted verbatim from EventService (Now Mode) so the Smart Feed Event
- * ranking layer can reuse the SAME "starting soon" / "last call" / active-window
- * definitions instead of inventing a second one. Behaviour is unchanged — the
- * only addition is an injectable `now` (ms) for deterministic tests; it defaults
- * to `Date.now()`, so existing 2-argument callers behave exactly as before.
- */
+/** Canonical display-lifecycle constants and classifier. */
 export const ACTIVE_EVENT_WINDOW_MS = 12 * 60 * 60 * 1000;
 export const NOW_MODE_LOOKAHEAD_MS = 3 * 60 * 60 * 1000;
-export const STARTING_SOON_MS = 60 * 60 * 1000;
+export const STARTING_SOON_MS = 2 * 60 * 60 * 1000;
 
-export const getNowStatus = (
+/**
+ * Derives the one display lifecycle for a normally eligible Event from absolute
+ * instants. Persisted Event status is deliberately not an input: scheduler
+ * writes must never make the displayed state lag a start or end boundary.
+ */
+export const getEventLifecycle = (
   scheduledAt: Date | null | undefined,
-  endAt?: Date | null,
+  endAt: Date | null | undefined,
   now: number = Date.now(),
-): NowEventStatus | null => {
-  if (!scheduledAt) {
+): EventLifecycle | null => {
+  const scheduled = scheduledAt?.getTime() ?? Number.NaN;
+  const ended = endAt?.getTime() ?? Number.NaN;
+
+  if (!Number.isFinite(scheduled) || !Number.isFinite(ended)) {
     return null;
   }
 
-  const scheduled = scheduledAt.getTime();
-  const ended = endAt?.getTime() ?? null;
-
-  if (scheduled <= now && (ended ? ended >= now : now - scheduled <= ACTIVE_EVENT_WINDOW_MS)) {
-    return "live_now";
+  if (now >= ended) {
+    return "ended";
   }
-
-  if (scheduled > now && scheduled - now <= STARTING_SOON_MS) {
+  if (now >= scheduled) {
+    return "live";
+  }
+  if (scheduled - now < STARTING_SOON_MS) {
     return "starting_soon";
   }
+  return "upcoming";
+};
 
+/**
+ * Smart Feed's legacy ranking buckets are intentionally separate from display
+ * lifecycle. In particular, `last_call` remains a score bucket, never an API
+ * lifecycle label, so canonical display changes do not silently alter ranking.
+ */
+export type SmartFeedTemporalBucket = "live_now" | "starting_soon" | "last_call" | null;
+const SMART_FEED_STARTING_SOON_MS = 60 * 60 * 1000;
+
+export const getSmartFeedTemporalBucket = (
+  scheduledAt: Date | null | undefined,
+  endAt: Date | null | undefined,
+  now: number = Date.now(),
+): SmartFeedTemporalBucket => {
+  const scheduled = scheduledAt?.getTime() ?? Number.NaN;
+  if (!Number.isFinite(scheduled)) return null;
+
+  const ended = endAt?.getTime() ?? Number.NaN;
+  if (scheduled <= now && (Number.isFinite(ended) ? ended >= now : now - scheduled <= ACTIVE_EVENT_WINDOW_MS)) {
+    return "live_now";
+  }
+  if (scheduled > now && scheduled - now <= SMART_FEED_STARTING_SOON_MS) {
+    return "starting_soon";
+  }
   if (scheduled > now && scheduled - now <= NOW_MODE_LOOKAHEAD_MS) {
     return "last_call";
   }
-
   return null;
 };
 

@@ -533,6 +533,8 @@ export interface EventResponse {
   // moderation/report content. Populated alongside canReport.
   hasReported?: boolean;
   status: EventStatus;
+  /** Canonical display lifecycle from absolute schedule instants; null for draft/cancelled or incomplete legacy Events. */
+  lifecycle: EventLifecycle | null;
   crowdStatus: CrowdStatus | null;
   /**
    * Authoritative raw checked-in ticket/pass count (TicketUsage rows, deduped
@@ -680,7 +682,10 @@ export interface RewardClaimResponse {
   createdAt: Date;
 }
 
-export type NowEventStatus = "live_now" | "starting_soon" | "last_call";
+export type EventLifecycle = "upcoming" | "starting_soon" | "live" | "ended";
+
+/** Now mode is a filtered view, but its attached status is canonical display lifecycle. */
+export type NowEventStatus = EventLifecycle;
 
 export interface NowModeQuery {
   latitude?: number;
@@ -693,10 +698,8 @@ export interface NowModeEventResponse extends EventResponse {
   nowStatus: NowEventStatus;
 }
 
-// "starting_soon" is additive (CRT-003): a distinct context for an upcoming
-// Event within STARTING_SOON_MS of its scheduled start. Existing values are
-// unchanged.
-export type PostTagEventStatus = "live" | "starting_soon" | "active" | "upcoming";
+/** Post-tag status is canonical display lifecycle, never a separate active state. */
+export type PostTagEventStatus = EventLifecycle;
 
 export interface PostTagEventResponse {
   id: string;

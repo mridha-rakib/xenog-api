@@ -1,6 +1,6 @@
 import { calculateFreshnessScore } from "./smart-feed-ranking.js";
 import {
-  getNowStatus,
+  getSmartFeedTemporalBucket,
   NOW_MODE_LOOKAHEAD_MS,
   STARTING_SOON_MS,
 } from "../events/event-temporal-status.js";
@@ -444,7 +444,7 @@ export const calculateEventStatusScore = (signals: {
   endAt: Date | null | undefined;
   now: number;
 }): number => {
-  const nowStatus = getNowStatus(signals.scheduledAt, signals.endAt, signals.now);
+  const nowStatus = getSmartFeedTemporalBucket(signals.scheduledAt, signals.endAt, signals.now);
   if (nowStatus === "live_now") {
     return EVENT_STATUS_SCORES.liveNow;
   }
@@ -462,11 +462,11 @@ export const calculateEventStatusScore = (signals: {
 
   const msUntil = scheduled - signals.now;
   if (msUntil <= 0) {
-    // Already started; not classified live by getNowStatus (outside the active
+    // Already started; not classified live by the ranking bucket (outside the active
     // window and/or ended). Eligibility filter should have removed it.
     return EVENT_STATUS_SCORES.ended;
   }
-  // getNowStatus already covered <= NOW_MODE_LOOKAHEAD_MS (3h) as last_call.
+  // The ranking bucket already covered <= NOW_MODE_LOOKAHEAD_MS (3h) as last_call.
   if (msUntil <= NOW_MODE_LOOKAHEAD_MS) {
     return EVENT_STATUS_SCORES.lastCall;
   }

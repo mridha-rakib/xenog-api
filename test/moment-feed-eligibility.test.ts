@@ -399,6 +399,50 @@ test("feed service resolves event-tagged post visibility from candidate moment e
   );
 });
 
+test("feed Event Moments expose the canonical lifecycle from the existing visible-Event batch", async () => {
+  const lifecycleNow = new Date("2026-07-16T12:00:00.000Z");
+  const twoHours = 2 * 60 * 60 * 1000;
+  const cases = [
+    { id: new Types.ObjectId(), status: "published" as const, scheduledAt: new Date(lifecycleNow.getTime() + twoHours), endAt: new Date(lifecycleNow.getTime() + 4 * twoHours), expected: "upcoming" },
+    { id: new Types.ObjectId(), status: "published" as const, scheduledAt: new Date(lifecycleNow.getTime() + twoHours - 1), endAt: new Date(lifecycleNow.getTime() + 4 * twoHours), expected: "starting_soon" },
+    { id: new Types.ObjectId(), status: "published" as const, scheduledAt: new Date(lifecycleNow.getTime() - 1), endAt: new Date(lifecycleNow.getTime() + 1), expected: "live" },
+    // Persisted status deliberately disagrees: timestamps remain authoritative.
+    { id: new Types.ObjectId(), status: "published" as const, scheduledAt: lifecycleNow, endAt: new Date(lifecycleNow.getTime() + twoHours), expected: "live" },
+    { id: new Types.ObjectId(), status: "live" as const, scheduledAt: new Date(lifecycleNow.getTime() - twoHours), endAt: lifecycleNow, expected: "ended" },
+    { id: new Types.ObjectId(), status: "published" as const, scheduledAt: new Date("invalid"), endAt: new Date(lifecycleNow.getTime() + twoHours), expected: null },
+  ];
+  const eventMoments = cases.map((entry) => makeMoment({
+    mode: "event",
+    eventId: entry.id,
+    eventTitle: "Lifecycle Event",
+  }));
+  const service = createMomentService({
+    momentRepository: new MomentRepository() as never,
+    eventRepository: new EventRepository() as never,
+  });
+  const originalNow = Date.now;
+  Date.now = () => lifecycleNow.getTime();
+
+  try {
+    await withMockedMomentFind(eventMoments, async () => {
+      await withMockedEventFind(cases.map((entry) => makeEvent(entry.id, "public", {
+        status: entry.status,
+        scheduledAt: entry.scheduledAt,
+        endAt: entry.endAt,
+      })), async () => {
+        const responses = await service.listFeedMoments(viewer as never);
+        const lifecycleByEventId = new Map(responses.map((response) => [response.eventId, response.eventLifecycle]));
+
+        for (const entry of cases) {
+          assert.equal(lifecycleByEventId.get(entry.id.toString()), entry.expected);
+        }
+      });
+    });
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test("friends feed moments use mutual friend authors for normal and event-tagged posts", async () => {
   const friendFeedPost = makeMoment({
     userId: authorId,

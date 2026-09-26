@@ -1,4 +1,5 @@
 import type { Types } from "mongoose";
+import type { EventLifecycle } from "../events/event.interface.js";
 
 export const momentModes = ["feed", "event"] as const;
 export type MomentMode = (typeof momentModes)[number];
@@ -169,6 +170,8 @@ export interface CreateMomentDto {
   taggedFriendIds?: string[];
   eventTitle?: string | null;
   eventId?: string | null;
+  /** Canonical Event display lifecycle, present for Event-associated feed Moments. */
+  eventLifecycle?: EventLifecycle | null;
   eventCode?: string | null;
   mediaItems?: MomentMediaItem[];
   clientRequestId?: string | null;

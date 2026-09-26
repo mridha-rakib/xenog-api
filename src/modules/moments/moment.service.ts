@@ -41,7 +41,8 @@ import { MomentReactionRepository } from "./moment-reaction.repository.js";
 import { MomentSaveRepository } from "./moment-save.repository.js";
 import { EventRepository } from "../events/event.repository.js";
 import { getDistanceKm } from "../events/event.repository.js";
-import type { IEvent } from "../events/event.interface.js";
+import type { EventLifecycle, IEvent } from "../events/event.interface.js";
+import { getEventLifecycle } from "../events/event-temporal-status.js";
 import { CheckoutPaymentRepository } from "../payments/checkout-payment.repository.js";
 import { TicketShareRepository } from "../payments/ticket-share.repository.js";
 import { isOwnedMomentVideoStorageKey, MomentVideoService } from "./moment-video.service.js";
@@ -445,6 +446,16 @@ export class MomentService {
       excludeUserIds,
     );
     const visibleEventIds = visibleEvents.map((event) => event._id.toString());
+    // The feed visibility query already loads every eligible Event in one
+    // batch. Reuse those authoritative schedule instants for the Moment
+    // contract; this adds no Event lookup per Moment.
+    const lifecycleNow = Date.now();
+    const eventLifecycleById = new Map<string, EventLifecycle | null>(
+      visibleEvents.map((event) => [
+        event._id.toString(),
+        getEventLifecycle(event.scheduledAt, event.endAt, lifecycleNow),
+      ]),
+    );
     const moments = await this.momentRepository.findFeed({
       ...query,
       hashtags,
@@ -475,6 +486,7 @@ export class MomentService {
         viewerFollowingIds,
         interactionContext,
         smartFeedContext,
+        eventLifecycleById.get(moment.eventId?.toString() ?? ""),
       )),
     );
 
@@ -1256,6 +1268,7 @@ export class MomentService {
     viewerFollowingIds = new Set<string>(),
     interactionContext?: MomentInteractionContext,
     smartFeedContext?: MomentSmartFeedContext,
+    eventLifecycle?: EventLifecycle | null,
   ): Promise<MomentResponse> {
     const momentId = moment._id.toString();
     const taggedFriendIds = (moment.taggedFriendIds ?? []).map((id) => id.toString());
@@ -1294,6 +1307,7 @@ export class MomentService {
       taggedFriends,
       eventTitle: moment.eventTitle ?? null,
       eventId: moment.eventId?.toString() ?? null,
+      ...(moment.eventId ? { eventLifecycle: eventLifecycle ?? null } : {}),
       eventCode: moment.eventCode ?? null,
       mediaItems,
       ...(moment.location ? { location: moment.location } : {}),

@@ -4,9 +4,9 @@ import { CheckoutPaymentRepository } from "./checkout-payment.repository.js";
 import { TicketCancellationRepository } from "./ticket-cancellation.repository.js";
 import { TicketUsageRepository } from "./ticket-usage.repository.js";
 
-type CapacityResult = {
-  eventId: string;
-  capacity: number;
+type AdmissionCounts = {
+  validAdmissionCountByEventId: Map<string, number>;
+  checkedInCountByEventId: Map<string, number>;
 };
 
 type CrowdStatusEventInput = {
@@ -38,25 +38,30 @@ export class CrowdStatusService {
         result.set(eventId, null);
       }
     }
-    const liveCapacityResults = events
+    const liveEventIds = [...new Set(events
       .filter((event) => event.status === "live")
-      .map((event) => this.getCanonicalCapacity(event))
-      .filter((item): item is CapacityResult => item !== null);
+      .map(getEventId)
+      .filter(Boolean))];
 
-    if (liveCapacityResults.length === 0) {
+    if (liveEventIds.length === 0) {
       return result;
     }
 
-    const capacityByEventId = new Map(
-      liveCapacityResults.map((item) => [item.eventId, item.capacity]),
-    );
-    const liveEventIds = [...capacityByEventId.keys()];
     const eventById = this.buildEventById(events);
-    const checkedInCountByEventId = await this.computeCheckedInCounts(liveEventIds, eventById);
+    const { validAdmissionCountByEventId, checkedInCountByEventId } = await this.computeAdmissionCounts(
+      liveEventIds,
+      eventById,
+    );
 
-    for (const [eventId, capacity] of capacityByEventId) {
+    for (const eventId of liveEventIds) {
+      const totalValidAdmissions = validAdmissionCountByEventId.get(eventId) ?? 0;
+
+      if (totalValidAdmissions === 0) {
+        continue;
+      }
+
       const checkedInCount = checkedInCountByEventId.get(eventId) ?? 0;
-      const percentage = (checkedInCount / capacity) * 100;
+      const percentage = (checkedInCount / totalValidAdmissions) * 100;
       result.set(eventId, this.classify(percentage));
     }
 
@@ -64,7 +69,7 @@ export class CrowdStatusService {
   }
 
   /**
-   * Raw authoritative checked-in pass count per event (no live/capacity gating,
+   * Raw authoritative checked-in pass count per event (no live/occupancy gating,
    * no percentage classification) — reuses the same valid-pass-key semantics as
    * getCrowdStatusByEventId (duplicate-scan prevention, cancelled/refunded pass
    * exclusion, BOGO-aware quantity validation) for every event supplied, not
@@ -78,7 +83,7 @@ export class CrowdStatusService {
       result.set(eventId, 0);
     }
 
-    const checkedInCountByEventId = await this.computeCheckedInCounts([...eventById.keys()], eventById);
+    const { checkedInCountByEventId } = await this.computeAdmissionCounts([...eventById.keys()], eventById);
 
     for (const [eventId, count] of checkedInCountByEventId) {
       result.set(eventId, count);
@@ -100,14 +105,15 @@ export class CrowdStatusService {
     return eventById;
   }
 
-  private async computeCheckedInCounts(
+  private async computeAdmissionCounts(
     eventIds: string[],
     eventById: Map<string, CrowdStatusEventInput>,
-  ): Promise<Map<string, number>> {
+  ): Promise<AdmissionCounts> {
+    const validAdmissionCountByEventId = new Map<string, number>();
     const checkedInCountByEventId = new Map<string, number>();
 
     if (eventIds.length === 0) {
-      return checkedInCountByEventId;
+      return { validAdmissionCountByEventId, checkedInCountByEventId };
     }
 
     const [orders, cancellations] = await Promise.all([
@@ -129,6 +135,10 @@ export class CrowdStatusService {
     const validPassKeys = new Set<string>();
 
     for (const order of orders) {
+      if (order.kind !== "ticket" || order.paymentStatus !== "paid") {
+        continue;
+      }
+
       const orderId = order._id.toString();
 
       for (const ticketPass of order.ticketPasses) {
@@ -162,8 +172,12 @@ export class CrowdStatusService {
           ticketPass.ticketIndex,
         );
 
-        if (!cancelledPassKeys.has(key)) {
+        if (!cancelledPassKeys.has(key) && !validPassKeys.has(key)) {
           validPassKeys.add(key);
+          validAdmissionCountByEventId.set(
+            ticketPass.eventId,
+            (validAdmissionCountByEventId.get(ticketPass.eventId) ?? 0) + 1,
+          );
         }
       }
     }
@@ -189,31 +203,7 @@ export class CrowdStatusService {
       );
     }
 
-    return checkedInCountByEventId;
-  }
-
-  private getCanonicalCapacity(event: CrowdStatusEventInput): CapacityResult | null {
-    const eventId = getEventId(event);
-
-    if (!eventId) {
-      return null;
-    }
-
-    if (!event.tickets.length) {
-      return null;
-    }
-
-    let capacity = 0;
-
-    for (const ticket of event.tickets) {
-      if (!Number.isFinite(ticket.capacity) || ticket.capacity < 0) {
-        return null;
-      }
-
-      capacity += ticket.capacity;
-    }
-
-    return capacity > 0 ? { eventId, capacity } : null;
+    return { validAdmissionCountByEventId, checkedInCountByEventId };
   }
 
   private calculateTicketRewardQuantity(paidQuantity: number, reward?: EventReward | null): number {
@@ -262,11 +252,11 @@ export class CrowdStatusService {
   }
 
   private classify(percentage: number): CrowdStatus {
-    if (percentage < 34) {
+    if (percentage < 30) {
       return "not_busy";
     }
 
-    if (percentage < 67) {
+    if (percentage < 70) {
       return "busy";
     }
 

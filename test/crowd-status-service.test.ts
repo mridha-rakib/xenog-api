@@ -89,19 +89,21 @@ const usageForPass = (order: ReturnType<typeof createOrder>, event: IEvent, tick
 
 test("classifies unrounded crowd percentage boundaries", async () => {
   const cases = [
-    { capacity: 1000, checkedIn: 339, expected: "not_busy" },
-    { capacity: 100, checkedIn: 34, expected: "busy" },
-    { capacity: 1000, checkedIn: 669, expected: "busy" },
-    { capacity: 100, checkedIn: 67, expected: "very_busy" },
-    { capacity: 100, checkedIn: 100, expected: "very_busy" },
+    { validAdmissions: 1000, checkedIn: 299, expected: "not_busy" },
+    { validAdmissions: 100, checkedIn: 30, expected: "busy" },
+    { validAdmissions: 1000, checkedIn: 699, expected: "busy" },
+    { validAdmissions: 100, checkedIn: 70, expected: "very_busy" },
+    { validAdmissions: 100, checkedIn: 100, expected: "very_busy" },
   ] as const;
 
   for (const item of cases) {
-    const event = createEvent(item.capacity);
-    const order = createOrder(event, item.checkedIn);
+    const event = createEvent(10_000);
+    const order = createOrder(event, item.validAdmissions);
     const service = createService({
       orders: [order],
-      usages: order.ticketPasses.map((pass) => usageForPass(order, event, pass.ticketIndex)),
+      usages: order.ticketPasses
+        .slice(0, item.checkedIn)
+        .map((pass) => usageForPass(order, event, pass.ticketIndex)),
     });
 
     const result = await service.getCrowdStatusByEventId([event]);
@@ -110,12 +112,35 @@ test("classifies unrounded crowd percentage boundaries", async () => {
   }
 });
 
-test("returns not_busy for live event with positive capacity and zero valid check-ins", async () => {
+test("uses checked-in valid admissions divided by all valid admissions", async () => {
+  const cases = [
+    { validAdmissions: 100, checkedIn: 76, expected: "very_busy" },
+    { validAdmissions: 300, checkedIn: 130, expected: "busy" },
+    { validAdmissions: 50, checkedIn: 8, expected: "not_busy" },
+  ] as const;
+
+  for (const item of cases) {
+    const event = createEvent(1_000);
+    const order = createOrder(event, item.validAdmissions);
+    const service = createService({
+      orders: [order],
+      usages: order.ticketPasses
+        .slice(0, item.checkedIn)
+        .map((pass) => usageForPass(order, event, pass.ticketIndex)),
+    });
+
+    const result = await service.getCrowdStatusByEventId([event]);
+
+    assert.equal(result.get(event._id.toString()), item.expected, `${item.checkedIn}/${item.validAdmissions}`);
+  }
+});
+
+test("returns null for a live event with positive capacity but zero valid admissions", async () => {
   const event = createEvent(100);
   const service = createService({});
   const result = await service.getCrowdStatusByEventId([event]);
 
-  assert.equal(result.get(event._id.toString()), "not_busy");
+  assert.equal(result.get(event._id.toString()), null);
 });
 
 test("returns null for non-live and zero-capacity events", async () => {
@@ -146,10 +171,29 @@ test("excludes cancelled passes but preserves other passes in the same order", a
   });
   const result = await service.getCrowdStatusByEventId([event]);
 
-  assert.equal(result.get(event._id.toString()), "busy");
+  assert.equal(result.get(event._id.toString()), "very_busy");
 });
 
-test("counts BOGO rewarded physical passes without adding reward capacity to denominator", async () => {
+test("excludes refunded and unpaid orders from both valid admissions and check-ins", async () => {
+  const event = createEvent(1_000);
+  const paidOrder = createOrder(event, 10);
+  const refundedOrder = { ...createOrder(event, 90), paymentStatus: "refunded" };
+  const unpaidOrder = { ...createOrder(event, 90), paymentStatus: "requires_payment" };
+  const service = createService({
+    orders: [paidOrder, refundedOrder, unpaidOrder],
+    usages: [
+      ...paidOrder.ticketPasses.map((pass) => usageForPass(paidOrder, event, pass.ticketIndex)),
+      ...refundedOrder.ticketPasses.map((pass) => usageForPass(refundedOrder, event, pass.ticketIndex)),
+      ...unpaidOrder.ticketPasses.map((pass) => usageForPass(unpaidOrder, event, pass.ticketIndex)),
+    ],
+  });
+
+  const result = await service.getCrowdStatusByEventId([event]);
+
+  assert.equal(result.get(event._id.toString()), "very_busy");
+});
+
+test("counts BOGO rewarded physical passes in both valid admissions and checked-in admissions", async () => {
   const event = createEvent(100, {
     rewards: [{
       id: "reward-1",
@@ -182,5 +226,31 @@ test("counts BOGO rewarded physical passes without adding reward capacity to den
   });
   const result = await service.getCrowdStatusByEventId([event]);
 
-  assert.equal(result.get(event._id.toString()), "not_busy");
+  assert.equal(result.get(event._id.toString()), "very_busy");
+});
+
+test("uses issued admission passes rather than configured capacity", async () => {
+  const event = createEvent(100);
+  const order = createOrder(event, 10);
+  const service = createService({
+    orders: [order],
+    usages: order.ticketPasses.slice(0, 8).map((pass) => usageForPass(order, event, pass.ticketIndex)),
+  });
+
+  const result = await service.getCrowdStatusByEventId([event]);
+
+  assert.equal(result.get(event._id.toString()), "very_busy");
+});
+
+test("counts admission units, not unique owners", async () => {
+  const event = createEvent(100);
+  const order = createOrder(event, 3);
+  const service = createService({
+    orders: [order],
+    usages: [usageForPass(order, event, 1)],
+  });
+
+  const result = await service.getCrowdStatusByEventId([event]);
+
+  assert.equal(result.get(event._id.toString()), "busy");
 });

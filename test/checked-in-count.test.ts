@@ -241,7 +241,7 @@ test("BOGO rewarded physical passes are counted like any other valid checked-in 
   assert.equal(result.get(event._id.toString()), 2);
 });
 
-test("getCrowdStatusByEventId classification is unchanged after extracting the shared counting helper", async () => {
+test("getCrowdStatusByEventId uses the shared valid-admission counting helper", async () => {
   const event = createEvent(1000, { status: "live" });
   const order = createOrder(event, 339);
   const service = createService({
@@ -252,7 +252,7 @@ test("getCrowdStatusByEventId classification is unchanged after extracting the s
   const crowdStatuses = await service.getCrowdStatusByEventId([event]);
   const counts = await service.getCheckedInCountsByEventId([event]);
 
-  assert.equal(crowdStatuses.get(event._id.toString()), "not_busy");
+  assert.equal(crowdStatuses.get(event._id.toString()), "very_busy");
   assert.equal(counts.get(event._id.toString()), 339);
 });
 

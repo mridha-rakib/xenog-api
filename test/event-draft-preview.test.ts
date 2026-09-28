@@ -4,6 +4,7 @@ import { Types } from "mongoose";
 import { EventModel } from "../src/modules/events/event.model.js";
 import { EventRepository } from "../src/modules/events/event.repository.js";
 import { EventService } from "../src/modules/events/event.service.js";
+import { eventValidation } from "../src/modules/events/event.validation.js";
 
 process.env.NODE_ENV = "test";
 process.env.MONGODB_URI = process.env.MONGODB_URI ?? "mongodb://localhost:27017/xenog-test";
@@ -1331,6 +1332,127 @@ test("published privacy transitions persist without replacing ticket inventory",
       `${from} -> ${to} preserves ticket identity, order, and server-owned availability`,
     );
   }
+});
+
+test("only the owner can directly change public and locked privacy, including when a non-owner has an issued admission", async () => {
+  const attendeeId = new Types.ObjectId();
+  const attendee = { ...otherUser, id: attendeeId.toString(), accountType: "business" };
+  let persisted = createEvent({ status: "published", publishedAt: now, privacy: "public" });
+  let updateCalls = 0;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async (_id: string, userId: string) => userId === owner.id ? persisted : null,
+      updateByIdForUser: async (_id: string, userId: string, payload: Record<string, unknown>) => {
+        assert.equal(userId, owner.id);
+        updateCalls += 1;
+        persisted = { ...persisted, privacy: payload.privacy };
+        return persisted;
+      },
+    },
+  });
+
+  const locked = await service.updateEvent(owner as never, eventId.toString(), { privacy: "locked" } as never);
+  assert.equal(locked.privacy, "locked");
+  const publicAgain = await service.updateEvent(owner as never, eventId.toString(), { privacy: "public" } as never);
+  assert.equal(publicAgain.privacy, "public");
+
+  await assert.rejects(
+    () => service.updateEvent(attendee as never, eventId.toString(), { privacy: "locked" } as never),
+    { statusCode: 404 },
+  );
+  await assert.rejects(
+    () => service.updateEvent(otherUser as never, new Types.ObjectId().toString(), { privacy: "locked" } as never),
+    { statusCode: 404 },
+  );
+  assert.equal(updateCalls, 2, "non-owner calls never reach the owner-scoped mutation");
+});
+
+test("privacy-only update preserves issued-pass, checked-in, order, inventory, and join-request records", async () => {
+  const attendeeId = new Types.ObjectId();
+  const issuedAttendee = { ...otherUser, id: attendeeId.toString() };
+  const tickets = [
+    createTicket({ id: "ticket-a", capacity: 30, availableCount: 17, type: "pay", price: 25 }),
+    createTicket({ id: "ticket-b", capacity: 10, availableCount: 4, type: "free", price: 0 }),
+  ];
+  const joinRequests = [
+    { userId: attendeeId, status: "accepted", createdAt: now },
+    { userId: new Types.ObjectId(), status: "pending", createdAt: now },
+    { userId: new Types.ObjectId(), status: "rejected", createdAt: now },
+  ];
+  const issuedOrder = {
+    id: new Types.ObjectId().toString(),
+    ownerUserId: attendeeId.toString(),
+    paymentStatus: "paid",
+    ticketPasses: [{ id: "pass-1", ticketId: "ticket-a", ticketIndex: 1, checkInCode: "MOM-26-TEST-PASS" }],
+  };
+  const usage = { id: new Types.ObjectId().toString(), passId: "pass-1", eventId: eventId.toString(), usedAt: now };
+  const before = structuredClone({ tickets, issuedOrder, usage });
+  const joinRequestSnapshot = joinRequests.map((request) => ({
+    userId: request.userId.toString(),
+    status: request.status,
+    createdAt: request.createdAt,
+  }));
+  let persisted = createEvent({
+    status: "published",
+    publishedAt: now,
+    privacy: "public",
+    tickets,
+    joinRequests,
+    memberUserIds: [attendeeId],
+  });
+  let updatePayload: Record<string, unknown> | null = null;
+  const service = createEventService({
+    eventRepository: {
+      findByIdForUser: async () => persisted,
+      findById: async () => persisted,
+      updateByIdForUser: async (_id: string, _userId: string, payload: Record<string, unknown>) => {
+        updatePayload = payload;
+        persisted = { ...persisted, privacy: payload.privacy };
+        return persisted;
+      },
+    },
+    checkoutPaymentRepository: {
+      hasUserPaidTicketForEvent: async (userId: string, requestedEventId: string) =>
+        userId === attendeeId.toString() && requestedEventId === eventId.toString(),
+    },
+  });
+
+  assert.deepEqual(
+    await service.getTicketAccess(issuedAttendee as never, eventId.toString()),
+    { hasAccess: true },
+    "issued attendee has access before the privacy change",
+  );
+  const updated = await service.updateEvent(owner as never, eventId.toString(), { privacy: "locked" } as never);
+
+  assert.equal(updatePayload?.privacy, "locked");
+  assert.equal(updatePayload?.tickets, undefined);
+  assert.equal(updatePayload?.rewards, undefined);
+  assert.equal(updatePayload?.memberUserIds, undefined);
+  assert.equal(updatePayload?.joinRequests, undefined);
+  assert.equal(updated.privacy, "locked");
+  assert.deepEqual({ tickets, issuedOrder, usage }, before);
+  assert.deepEqual(
+    updated.tickets.map(({ id, capacity, availableCount, salesEndAt }) => ({ id, capacity, availableCount, salesEndAt })),
+    before.tickets.map(({ id, capacity, availableCount, salesEndAt }) => ({ id, capacity, availableCount, salesEndAt })),
+  );
+  assert.deepEqual(
+    joinRequests.map((request) => ({ userId: request.userId.toString(), status: request.status, createdAt: request.createdAt })),
+    joinRequestSnapshot,
+  );
+  assert.deepEqual(
+    await service.getTicketAccess(issuedAttendee as never, eventId.toString()),
+    { hasAccess: true },
+    "existing ticket holder retains issued-admission access after locking",
+  );
+});
+
+test("update validation rejects unsupported privacy values before the owner-scoped service mutation", () => {
+  const result = eventValidation.updateEvent.safeParse({
+    params: { id: eventId.toString() },
+    body: { privacy: "open" },
+  });
+
+  assert.equal(result.success, false);
 });
 
 test("completed and cancelled events cannot be republished through publish retry path", async () => {

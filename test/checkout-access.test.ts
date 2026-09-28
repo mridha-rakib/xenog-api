@@ -46,6 +46,22 @@ const makeService = async (privacy: "public" | "locked" | "private", joinStatus?
   );
 };
 
+const makeMutableService = async (privacy: "public" | "locked", joinStatus?: string | null) => {
+  const { CheckoutPaymentService } = await import("../src/modules/payments/checkout-payment.service.js");
+  const event = makeEvent(privacy);
+
+  return {
+    setPrivacy: (nextPrivacy: "public" | "locked") => { event.privacy = nextPrivacy; },
+    service: new CheckoutPaymentService(
+      {} as never,
+      {
+        findById: async () => event,
+        findUserJoinRequest: async () => joinStatus ? { status: joinStatus } : null,
+      } as never,
+    ),
+  };
+};
+
 const payload = {
   kind: "ticket" as const,
   paymentMethod: "card" as const,
@@ -76,6 +92,29 @@ test("locked event checkout quote works after accepted join request", async () =
   const service = await makeService("locked", "accepted");
   const quote = await service.quoteCheckout({ id: buyerId.toString() } as never, payload);
 
+  assert.equal(quote.lineItems[0]?.itemId, "general");
+});
+
+test("fresh checkout evaluation applies Locked rules immediately after a Public to Locked update", async () => {
+  const { service, setPrivacy } = await makeMutableService("public", "pending");
+
+  await service.quoteCheckout({ id: buyerId.toString() } as never, payload);
+  setPrivacy("locked");
+  await assert.rejects(
+    () => service.quoteCheckout({ id: buyerId.toString() } as never, payload),
+    /request must be accepted/i,
+  );
+});
+
+test("fresh checkout evaluation applies Public rules immediately after a Locked to Public update", async () => {
+  const { service, setPrivacy } = await makeMutableService("locked", "pending");
+
+  await assert.rejects(
+    () => service.quoteCheckout({ id: buyerId.toString() } as never, payload),
+    /request must be accepted/i,
+  );
+  setPrivacy("public");
+  const quote = await service.quoteCheckout({ id: buyerId.toString() } as never, payload);
   assert.equal(quote.lineItems[0]?.itemId, "general");
 });
 
